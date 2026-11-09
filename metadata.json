@@ -1,0 +1,6 @@
+{
+  "name": "TrackFlow - Universal Multi-Carrier Tracker",
+  "description": "Fast, free parcel and shipment tracking for 20+ carriers including India Post Speed Post, DTDC, Ekart, Delhivery, BlueDart, and international postal networks.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
