@@ -117,9 +117,9 @@ export function TrackingFetchingAnimation({
 
             {/* The Moving Logistics Truck */}
             <motion.div
-              className="absolute left-6 sm:left-12 z-20"
+              className="absolute left-2 sm:left-10 z-20"
               animate={{
-                x: [0, 80, 160, 240, 320, 240, 120, 0],
+                x: [0, 40, 100, 180, 260, 180, 80, 0],
                 y: [0, -1.5, 0, -1, 0, -1.5, 0],
               }}
               transition={{
@@ -129,17 +129,17 @@ export function TrackingFetchingAnimation({
             >
               <div className="relative flex items-center">
                 {/* Radar Pulse from truck antenna */}
-                <div className="absolute -top-3 left-7">
-                  <span className="absolute -top-1 -left-1 h-4 w-4 rounded-full bg-indigo-400/50 animate-ping" />
+                <div className="absolute -top-3 left-6 sm:left-7">
+                  <span className="absolute -top-1 -left-1 h-3.5 w-3.5 rounded-full bg-indigo-400/50 animate-ping" />
                   <span className="relative block h-2 w-2 rounded-full bg-indigo-500" />
                 </div>
 
                 {/* Headlight beam */}
-                <div className="absolute left-18 top-2 h-7 w-20 bg-gradient-to-r from-amber-200/50 via-amber-200/10 to-transparent pointer-events-none" />
+                <div className="absolute left-14 sm:left-18 top-2 h-6 w-14 sm:w-20 bg-gradient-to-r from-amber-200/50 via-amber-200/10 to-transparent pointer-events-none" />
 
                 {/* Styled Logistics Delivery Truck SVG */}
                 <svg
-                  className="h-10 w-24 text-indigo-600 dark:text-indigo-400 drop-shadow-md"
+                  className="h-8 w-20 sm:h-10 sm:w-24 text-indigo-600 dark:text-indigo-400 drop-shadow-md"
                   viewBox="0 0 96 40"
                   fill="currentColor"
                   xmlns="http://www.w3.org/2000/svg"

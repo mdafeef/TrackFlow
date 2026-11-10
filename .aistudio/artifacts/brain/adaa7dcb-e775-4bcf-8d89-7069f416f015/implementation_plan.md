@@ -227,3 +227,122 @@ To satisfy the requirement of using their service while never displaying or expo
    - Verify light/dark theme contrast across all elements.
    - Verify Canvas PNG export and download in browser.
    - Run `compile_applet` and `lint_applet` to ensure pristine compilation.
+
+---
+
+## Refinement Phase Completion Notes
+
+1. **Chronological Journey Reversal & Delivered as Last Point**:
+   - Reversed the timeline activity ordering to reflect the true real-world parcel journey:
+     - **Top / Start**: Origin Point (Item Booked at origin).
+     - **Intermediate**: Dispatched, sorting hubs, and transit checkpoints.
+     - **Bottom / End**: **Delivered** is now the final destination point!
+   - The scrolling truck starts at the top (with all route dots below it) and smoothly drives downward as you scroll.
+   - When scrolling to the bottom, the truck reaches the final destination: **Delivered**.
+   - The truck has `z-40` layering on top of the road line and milestone dots.
+2. **Truck Animation Glitch on "See All" Click Fixed**:
+   - Resolved the issue where the truck would jump/stretch across the expanded height.
+   - Transitions are smoothly suppressed during the layout expansion so the truck remains in place without erratic motion.
+3. **Redesigned Modern Specification Cards**:
+   - Replaced generic grey boxes with high-fidelity, distinct modern logistics cards:
+     - **Origin Facility**: Crisp `Building2` icon in indigo ring container, uppercase label, monospace `PIN` badge, bold facility name, and booking date.
+     - **Destination Hub**: Target `MapPin` icon in emerald ring container, uppercase label, monospace `PIN` badge, bold destination name, and delivery office indicator.
+     - **Article Specs**: `Package` icon in violet ring container, uppercase label, weight pill (`45 g`), bold article type, and service class indicator.
+4. **Simplified Delivered Hero Card (Zero Duplicate Badges)**:
+   - Removed lengthy phrase ("Package Successfully Delivered").
+   - Headline is concisely set to **Delivered**.
+   - Removed the redundant top badge so the word "Delivered" is never duplicated in the card.
+   - Included clean delivery timestamp with clock icon and arrival status details.
+5. **Mobile Visibility & Exact 1-Axis Alignment**:
+   - The vertical route line, truck icon, and checkpoint milestone dots all share an identical X-coordinate (`left-6` on mobile / `sm:left-7` on desktop).
+   - Milestones are revealed only after the truck arrives at or passes each node.
+6. **Clean Specification Grid (Zero Tariff / Billed Amount)**:
+   - Removed all tariff, COD, and billed rate indicators. Replaced with the new uncluttered 3-card logistics grid.
+7. **Expanded Desktop Modal**:
+   - Desktop modal enlarged to `sm:max-w-5xl lg:max-w-6xl` for a spacious layout, while staying full-screen on mobile devices.
+8. **Input & Directory Integration**:
+   - Placeholder shortened to `Enter Consignment or AWB Number...`.
+   - Courier directory cards pre-select the courier and focus the input without fetching dummy data.
+
+---
+
+## Turn 10 Implementation & Fixes
+
+1. **Auto-Detect Couriers Dropdown Behind Scrolling Logos Fixed**:
+   - Removed `overflow-hidden` from `#track-section` in `TrackerHero.tsx` and set container to `relative z-30`.
+   - Raised dropdown menu z-index to `z-[60]` with `shadow-2xl` and backdrop at `z-40`, so the dropdown floats seamlessly above the scrolling partner logos marquee.
+2. **Removed Weight**:
+   - Removed weight from the tracking popup Sub Route Bar and replaced the weight badge in the Article Specs card with `Standard Express`.
+   - Ensured no weight columns or badges are shown in the bulk dashboard table or popup.
+3. **Scrolling Truck Directly On Top of Points (Exact Single Vertical Axis)**:
+   - Refactored the highway timeline into a rigid 2-column flex structure: a fixed `w-8` node column and an adjacent detail card column.
+   - The vertical highway track runs directly at `left-4` (16px), exactly down the centerline of the `w-8` node column.
+   - The moving truck has `z-40`, `shadow-md`, and `ring-4` centered on the line (`x = 16px`), and floats directly over the checkpoint points as the user scrolls.
+   - Checkpoint points bloom as the truck reaches and passes each node.
+4. **Checkpoint Route & History Replaced with Complete History**:
+   - Renamed section header to **Complete History**.
+5. **Destination Top and Starting Bottom**:
+   - Guaranteed chronological display where Destination (Delivered / Return) is at the TOP (index 0) and Starting Facility (Origin / Booked) is at the BOTTOM.
+   - Re-ordered Spec Cards: Card 1 = Destination Hub (Top), Card 2 = Starting Facility (Origin), Card 3 = Article Specs.
+6. **Removed "Recipient & Route" Column**:
+   - Completely removed the `Recipient & Route` table column from `BulkDashboard.tsx`.
+7. **Styled Courier Partner Dropdown in Add Tracking ID Manually**:
+   - Replaced the unstyled native `<select>` with a custom-styled dropdown button displaying carrier brand badges, full names, short codes, and a smooth animated `ChevronDown`.
+   - Integrated click-outside detection and active selection checkmarks.
+
+---
+
+## Turn 11 Implementation
+
+1. **Removed Truck Scroll Animation**:
+   - Completely removed the moving delivery truck and dynamic road progress fill from the timeline.
+   - Removed `roadProgress`, `maxProgress`, `isToggling`, scroll calculation listeners, and the scroll container ref overhead.
+   - Replaced with a clean, static, high-contrast vertical logistics stem with permanently visible, crisp milestone rings and dots.
+   - All checkpoint updates expand/collapse instantly with zero scroll lag.
+
+---
+
+## Turn 12 Implementation
+
+1. **Removed Protected Ingestion Engine Card**:
+   - Removed the security policy card from the import popup.
+2. **Renamed to Bulk Import**:
+   - Changed "Bulk Excel Upload" button text and modal header to **Bulk Import**.
+3. **Import Preview & Confirmation Flow**:
+   - Files are now parsed into a preview state before adding them to the dashboard.
+   - Renders a clean preview screen showing consignment count, file name, and a scrollable table with AWB, detected courier, destination, and status.
+   - Added **Confirm Import ({count} Shipments)** and **Cancel / Choose Another File** actions.
+4. **View Imported Data Separately**:
+   - Added an **Imported ({count})** tab in the status filter tab group.
+   - Added a quick filter button **View Imported Only ({count})** next to the search input.
+   - Added an **Imported** badge in table rows next to the AWB number for imported consignments.
+5. **Sequential History Display Without Skipping Milestones**:
+   - Removed the milestone skipping logic in `displayActivities`.
+   - Now renders checkpoints in strict sequential chronological order from top (Destination / Delivered) to bottom.
+   - Initial view shows the first sequential checkpoints uninterrupted; clicking **See remaining updates** reveals the continuous balance.
+
+---
+
+## Turn 13 Implementation
+
+1. **Imported Batch-Wise Management**:
+   - Added `batchId`, `batchName`, and `importedAt` metadata properties to `BulkShipment` and tagged default sample shipments.
+   - When importing an Excel or Google Sheets workbook, all parsed consignments are automatically tagged with a unique batch ID (`batch-${timestamp}`), a readable batch name (`Batch #${N} • filename`), and import timestamp (`Today, HH:MM AM/PM`).
+   - Added `selectedBatchId` state and dynamic `uniqueBatches` computation to calculate per-batch metrics: total consignments, delivered count, active transit count, and returned count.
+   - Built a dedicated **Batch-Wise Ingestion Navigator** bar when filtering by "Imported" or when a batch is selected:
+     - Includes filter pills for **All Batches ({count})** and each individual batch tag.
+     - Displays active batch summary metrics (Delivery count, In Transit count, Returned count, import timestamp).
+     - Provides quick actions: **Reset to All Batches** and **Delete Batch** (with confirmation).
+   - In the dashboard table, the imported badge now displays the batch identifier and is interactive—clicking the batch badge on any row immediately filters the dashboard to that specific batch.
+   - In the search bar area, selecting a batch displays an active batch chip with a 1-click `X` clear button.
+
+2. **Successfully Imported Screen & Automatic Modal Close**:
+   - When the user clicks **Confirm Import**:
+     - Consignments are committed to dashboard state and `localStorage`.
+     - An audible confirmation chime is played.
+     - Modal smoothly switches to a dedicated **Successfully Imported** screen displaying a green check badge, total consignments added, batch assignment name, and an animated progress bar indicating automatic closing.
+     - If there is no issue, the modal **automatically closes after 1.4 seconds**, cleans up all timers and preview state, switches the dashboard filter to `imported`, and selects the newly imported batch.
+     - Includes an instant **Open Batch in Dashboard Now →** action button for users who want to proceed immediately without waiting.
+     - Handled clean timer disposal when closing manually or unmounting to prevent state leaks.
+
+

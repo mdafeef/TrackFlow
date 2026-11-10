@@ -10,7 +10,7 @@ export interface WatchlistItem {
   nickname: string;
   lastStatus: string;
   lastUpdated: string;
-  variant: "delivered" | "in-transit" | "out-for-delivery" | "pending";
+  variant: "delivered" | "in-transit" | "out-for-delivery" | "pending" | "returned";
 }
 
 interface WatchlistDrawerProps {

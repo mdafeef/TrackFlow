@@ -3,6 +3,7 @@
 import React, { useState, useEffect } from "react";
 import { Search, X, ChevronDown, CheckCircle2, ShieldCheck, Zap } from "lucide-react";
 import { COURIER_LIST, COURIER_MAP, autoDetectCourier, CourierConfig } from "@/lib/couriers";
+import { AnimatedSpiralBg } from "@/components/AnimatedSpiralBg";
 
 interface TrackerHeroProps {
   onSearch: (trackingNumber: string, courierId?: string) => void;
@@ -94,8 +95,11 @@ export function TrackerHero({
   const activeCourier = selectedCourierId ? COURIER_MAP[selectedCourierId] : detectedCourier;
 
   return (
-    <section id="track-section" className="relative pt-10 pb-16 md:pt-14 md:pb-20">
-      <div className="mx-auto max-w-5xl px-4 sm:px-6 lg:px-8 text-center">
+    <section id="track-section" className="relative z-30 pt-10 pb-16 md:pt-14 md:pb-20">
+      {/* Floating Animated Spiral & Orbit Rings Background */}
+      <AnimatedSpiralBg />
+
+      <div className="relative z-20 mx-auto max-w-5xl px-4 sm:px-6 lg:px-8 text-center">
         {/* Kicker Tag */}
         <div className="inline-flex items-center gap-2 rounded-full border border-indigo-200 bg-indigo-50/80 px-3.5 py-1 text-xs font-semibold text-indigo-700 dark:border-indigo-900/50 dark:bg-indigo-950/40 dark:text-indigo-300 mb-6">
           <Zap className="h-3.5 w-3.5" />
@@ -115,7 +119,7 @@ export function TrackerHero({
         <div className="mt-8 max-w-3xl mx-auto">
           <form
             onSubmit={handleSubmit}
-            className="relative flex flex-col sm:flex-row items-stretch rounded-2xl border border-slate-300/80 bg-white p-2 shadow-lg dark:border-slate-800 dark:bg-slate-900 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all"
+            className="relative z-20 flex flex-col sm:flex-row items-stretch rounded-2xl border border-slate-300/80 bg-white p-2 shadow-lg dark:border-slate-800 dark:bg-slate-900 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all"
           >
             {/* Carrier Selector Dropdown */}
             <div className="relative shrink-0 border-b sm:border-b-0 sm:border-r border-slate-200 dark:border-slate-800 pb-2 sm:pb-0 sm:pr-2">
@@ -140,7 +144,7 @@ export function TrackerHero({
                     className="fixed inset-0 z-40"
                     onClick={() => setIsDropdownOpen(false)}
                   />
-                  <div className="absolute left-0 top-full mt-2 z-50 max-h-72 w-64 overflow-y-auto rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl dark:border-slate-800 dark:bg-slate-900 text-left">
+                  <div className="absolute left-0 top-full mt-2 z-[60] max-h-72 w-64 overflow-y-auto rounded-xl border border-slate-200 bg-white p-1.5 shadow-2xl dark:border-slate-800 dark:bg-slate-900 text-left">
                     <button
                       type="button"
                       onClick={() => {
@@ -188,7 +192,7 @@ export function TrackerHero({
                 type="text"
                 value={trackingNumber}
                 onChange={(e) => handleInputChange(e.target.value)}
-                placeholder="Enter Consignment or AWB Number (e.g. EL855948618IN)..."
+                placeholder="Enter Consignment or AWB Number..."
                 className="w-full bg-transparent py-2 text-sm sm:text-base font-mono tracking-wider font-medium text-slate-900 placeholder:font-sans placeholder:text-slate-400 focus:outline-none dark:text-white"
                 autoComplete="off"
                 spellCheck="false"

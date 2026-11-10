@@ -36,10 +36,10 @@ export interface TrackingResult {
     avgTransitDays: string;
   };
   overallStatus: {
-    stage: "booked" | "dispatched" | "in_transit" | "out_for_delivery" | "delivered";
+    stage: "booked" | "dispatched" | "in_transit" | "out_for_delivery" | "delivered" | "returned";
     label: string;
     phrase: string;
-    variant: "delivered" | "in-transit" | "out-for-delivery" | "pending";
+    variant: "delivered" | "in-transit" | "out-for-delivery" | "pending" | "returned";
     timestamp: string;
   };
   estimatedDelivery: {
@@ -534,6 +534,112 @@ const VERIFIED_REAL_SAMPLES: Record<string, Partial<TrackingResult>> = {
         role: "destination",
         status: "completed",
         timestamp: "25 Oct 07:18 PM",
+      },
+    ],
+  },
+  RT855948618IN: {
+    trackingNumber: "RT855948618IN",
+    overallStatus: {
+      stage: "delivered",
+      label: "Returned (RTO)",
+      phrase: "Returned to Shipper",
+      variant: "returned",
+      timestamp: "Today, 11:20 AM",
+    },
+    estimatedDelivery: {
+      date: "Returned to Origin",
+      confidence: "100%",
+      rangeDays: "Completed RTO",
+      message: "Consignment returned back to origin shipper due to: Addressee Moved / Incomplete Address.",
+    },
+    bookingDetails: {
+      trackingNumber: "RT855948618IN",
+      courierId: "speedpost",
+      courierName: "India Post Speed Post",
+      bookedAt: "04 Nov 2026, 11:15 AM",
+      origin: "Chennai Central GPO (600001)",
+      destination: "Coimbatore South SO (641001)",
+      articleType: "Speed Post Inland Document (RTO)",
+      weight: "110 grams",
+      tariff: "₹ 70.00",
+      currentLocation: "Chennai Central GPO",
+    },
+    activities: [
+      {
+        id: "act-r1",
+        date: "10 Nov 2026",
+        time: "11:20",
+        facility: "Chennai Central GPO",
+        statusText: "Item Delivered to Sender / Return Completed",
+        stage: "delivered",
+        details: "RTO package handed back to sender at origin counter",
+      },
+      {
+        id: "act-r2",
+        date: "09 Nov 2026",
+        time: "16:40",
+        facility: "Chennai GPO ICH",
+        statusText: "Return Bag Received at Origin Transshipment Hub",
+        stage: "in_transit",
+      },
+      {
+        id: "act-r3",
+        date: "08 Nov 2026",
+        time: "14:15",
+        facility: "Coimbatore South SO",
+        statusText: "Item Returned - RTO Initiated: Addressee Moved",
+        stage: "out_for_delivery",
+        details: "Unable to deliver: Addressee moved without forwarding address",
+      },
+      {
+        id: "act-r4",
+        date: "07 Nov 2026",
+        time: "10:30",
+        facility: "Coimbatore South SO",
+        statusText: "Out For Delivery",
+        stage: "out_for_delivery",
+      },
+      {
+        id: "act-r5",
+        date: "06 Nov 2026",
+        time: "08:15",
+        facility: "Coimbatore ICH",
+        statusText: "Item Received at Destination Sorting Hub",
+        stage: "in_transit",
+      },
+      {
+        id: "act-r6",
+        date: "04 Nov 2026",
+        time: "11:15",
+        facility: "Chennai Central GPO",
+        statusText: "Item Booked",
+        stage: "booked",
+      },
+    ],
+    routeMilestones: [
+      {
+        id: "m-1",
+        name: "Chennai Central GPO",
+        city: "Chennai (600001)",
+        role: "origin",
+        status: "completed",
+        timestamp: "04 Nov 11:15 AM",
+      },
+      {
+        id: "m-2",
+        name: "Coimbatore South SO",
+        city: "Delivery Attempt Hub",
+        role: "transit",
+        status: "completed",
+        timestamp: "08 Nov 02:15 PM (RTO)",
+      },
+      {
+        id: "m-3",
+        name: "Chennai Central GPO",
+        city: "Returned to Shipper",
+        role: "destination",
+        status: "completed",
+        timestamp: "10 Nov 11:20 AM",
       },
     ],
   },

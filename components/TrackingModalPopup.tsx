@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import {
   X,
   Share2,
@@ -18,16 +18,16 @@ import {
   Building2,
   CheckCircle2,
   Phone,
-  Mail,
   Receipt,
-  Scale,
   Send,
   Inbox,
   ChevronDown,
   ChevronUp,
-  Sparkles,
   ArrowRight,
   ShieldCheck,
+  Navigation,
+  Sparkles,
+  RotateCcw,
 } from "lucide-react";
 import { TrackingResult, TrackingActivity } from "@/app/api/track/route";
 import { TrackingFetchingAnimation } from "./TrackingFetchingAnimation";
@@ -77,15 +77,7 @@ export function TrackingModalPopup({
   const [copiedLink, setCopiedLink] = useState(false);
   const [isExpandedAll, setIsExpandedAll] = useState(false);
 
-  // References for vertical timeline scroll measurement
-  const scrollContainerRef = useRef<HTMLDivElement>(null);
-  const timelineTrackRef = useRef<HTMLDivElement>(null);
-  const itemRefs = useRef<(HTMLDivElement | null)[]>([]);
-
-  // State to track scroll fraction (0 to 1) for the timeline road
-  const [roadProgress, setRoadProgress] = useState(0);
-
-  // In-render state sync to avoid useEffect cascade
+  // In-render state sync to avoid useEffect cascade on trackingNumber change
   const [prevTrackingNum, setPrevTrackingNum] = useState<string | undefined>(
     trackingResult?.trackingNumber
   );
@@ -93,36 +85,37 @@ export function TrackingModalPopup({
   if (trackingResult?.trackingNumber !== prevTrackingNum) {
     setPrevTrackingNum(trackingResult?.trackingNumber);
     setIsExpandedAll(false);
-    setRoadProgress(0);
   }
 
-  const activities = trackingResult?.activities || [];
-  // Default to 4 checkpoints for clean initial view, expandable on click
-  const displayActivities = isExpandedAll ? activities : activities.slice(0, 4);
-
-  // Calculate truck progress strictly based on the scroll container
-  const updateScrollProgress = () => {
-    if (!scrollContainerRef.current) return;
-    const el = scrollContainerRef.current;
-    const maxScroll = el.scrollHeight - el.clientHeight;
-    if (maxScroll <= 0) {
-      setRoadProgress(1); // If content fits without scroll, truck has completed journey
-    } else {
-      const p = Math.min(Math.max(el.scrollTop / maxScroll, 0), 1);
-      setRoadProgress(p);
+  // Destination at TOP and Starting at BOTTOM
+  const chronologicalActivities = useMemo(() => {
+    if (!trackingResult?.activities || trackingResult.activities.length === 0) return [];
+    const acts = [...trackingResult.activities];
+    const firstStage = acts[0].stage;
+    const lastStage = acts[acts.length - 1].stage;
+    // If raw list starts with booked / origin at top, reverse so Destination/Delivered is at TOP (index 0) and Starting/Booked is at BOTTOM
+    if (firstStage === "booked" || (lastStage === "delivered" && firstStage !== "delivered")) {
+      return acts.reverse();
     }
-  };
+    return acts;
+  }, [trackingResult]);
 
-  const handleScroll = () => {
-    updateScrollProgress();
-  };
+  const INITIAL_VISIBLE_COUNT = 4;
 
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      updateScrollProgress();
-    }, 60);
-    return () => clearTimeout(timer);
-  }, [displayActivities.length, isExpandedAll, isOpen]);
+  // Strict sequential order (Destination at top -> Starting at bottom)
+  // Shows initial checkpoints in uninterrupted sequential order without skipping milestones.
+  // Clicking "See all" expands and reveals the remaining balance in continuous order.
+  const displayActivities = useMemo(() => {
+    if (isExpandedAll || chronologicalActivities.length <= INITIAL_VISIBLE_COUNT) {
+      return chronologicalActivities;
+    }
+    return chronologicalActivities.slice(0, INITIAL_VISIBLE_COUNT);
+  }, [isExpandedAll, chronologicalActivities]);
+
+  // Toggle see all updates
+  const handleToggleExpand = () => {
+    setIsExpandedAll((prev) => !prev);
+  };
 
   // Lock background scroll when modal is open
   useEffect(() => {
@@ -179,11 +172,21 @@ export function TrackingModalPopup({
   const getCheckpointStyle = (act: TrackingActivity) => {
     const text = act.statusText.toLowerCase();
 
+    // 0. Returned / RTO
+    if (text.includes("return") || text.includes("rto") || (act.stage as string) === "returned") {
+      return {
+        iconBg: "bg-rose-500 text-white shadow-xs shadow-rose-500/20",
+        dotColor: "bg-rose-500 ring-4 ring-rose-500/25",
+        icon: <RotateCcw className="h-4 w-4 stroke-[2.4]" />,
+        badgeText: "Returned to Shipper",
+      };
+    }
+
     // 1. Delivered
     if (text.includes("delivered") || act.stage === "delivered") {
       return {
         iconBg: "bg-emerald-500 text-white shadow-xs shadow-emerald-500/20",
-        dotColor: "bg-emerald-500 ring-4 ring-emerald-500/20",
+        dotColor: "bg-emerald-500 ring-4 ring-emerald-500/25",
         icon: <Check className="h-4 w-4 stroke-[3]" />,
         badgeText: "Delivered",
       };
@@ -193,7 +196,7 @@ export function TrackingModalPopup({
     if (text.includes("out for delivery") || act.stage === "out_for_delivery") {
       return {
         iconBg: "bg-amber-500 text-white shadow-xs shadow-amber-500/20",
-        dotColor: "bg-amber-500 ring-4 ring-amber-500/20",
+        dotColor: "bg-amber-500 ring-4 ring-amber-500/25",
         icon: <Truck className="h-4 w-4 stroke-[2.4]" />,
         badgeText: "Out For Delivery",
       };
@@ -203,7 +206,7 @@ export function TrackingModalPopup({
     if (text.includes("destination") || text.includes("item received at destination")) {
       return {
         iconBg: "bg-indigo-600 text-white shadow-xs shadow-indigo-500/20",
-        dotColor: "bg-indigo-600 ring-4 ring-indigo-500/20",
+        dotColor: "bg-indigo-600 ring-4 ring-indigo-500/25",
         icon: <Inbox className="h-4 w-4 stroke-[2.4]" />,
         badgeText: "Destination Arrived",
       };
@@ -213,7 +216,7 @@ export function TrackingModalPopup({
     if (text.includes("bag received") || text.includes("item received")) {
       return {
         iconBg: "bg-sky-600 text-white shadow-xs shadow-sky-500/20",
-        dotColor: "bg-sky-600 ring-4 ring-sky-500/20",
+        dotColor: "bg-sky-600 ring-4 ring-sky-500/25",
         icon: <Package className="h-4 w-4 stroke-[2.4]" />,
         badgeText: "Sorting Facility",
       };
@@ -223,7 +226,7 @@ export function TrackingModalPopup({
     if (text.includes("dispatched") || act.stage === "in_transit") {
       return {
         iconBg: "bg-purple-600 text-white shadow-xs shadow-purple-500/20",
-        dotColor: "bg-purple-600 ring-4 ring-purple-500/20",
+        dotColor: "bg-purple-600 ring-4 ring-purple-500/25",
         icon: <Send className="h-3.5 w-3.5 stroke-[2.4]" />,
         badgeText: "Dispatched",
       };
@@ -232,24 +235,30 @@ export function TrackingModalPopup({
     // 6. Item Booked
     return {
       iconBg: "bg-slate-700 text-white shadow-xs shadow-slate-500/20",
-      dotColor: "bg-slate-700 ring-4 ring-slate-500/20",
+      dotColor: "bg-slate-700 ring-4 ring-slate-500/25",
       icon: <Receipt className="h-4 w-4 stroke-[2.4]" />,
       badgeText: "Booked",
     };
   };
 
+  const isReturned =
+    trackingResult?.overallStatus?.variant === "returned" ||
+    (trackingResult?.overallStatus?.phrase && trackingResult.overallStatus.phrase.toLowerCase().includes("return")) ||
+    (trackingResult?.overallStatus?.phrase && trackingResult.overallStatus.phrase.toLowerCase().includes("rto"));
+
   const isDelivered =
-    trackingResult?.overallStatus?.stage === "delivered" ||
-    trackingResult?.overallStatus?.phrase.toLowerCase().includes("delivered");
+    !isReturned &&
+    (trackingResult?.overallStatus?.stage === "delivered" ||
+      (trackingResult?.overallStatus?.phrase && trackingResult.overallStatus.phrase.toLowerCase().includes("delivered")));
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-0 sm:p-4 md:p-6 bg-slate-950/80 backdrop-blur-md animate-in fade-in duration-150">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-0 sm:p-4 md:p-6 bg-slate-950/85 backdrop-blur-md animate-in fade-in duration-200">
       {/* Background click dismiss */}
       <div className="fixed inset-0 hidden sm:block" onClick={onClose} aria-hidden="true" />
 
-      {/* Main Dialog Window: Fullscreen on mobile (h-full w-full rounded-none), spacious max-w-4xl on desktop */}
+      {/* Main Dialog Window: Fullscreen on mobile, executive max-w-5xl/6xl on desktop */}
       <div
-        className="relative z-10 w-full h-full sm:h-auto sm:max-h-[90vh] sm:max-w-4xl sm:rounded-[28px] overflow-hidden bg-white dark:bg-slate-900 border-0 sm:border border-slate-200/90 dark:border-slate-800 shadow-2xl flex flex-col transition-all"
+        className="relative z-10 w-full h-full sm:h-auto sm:max-h-[92vh] sm:max-w-5xl lg:max-w-6xl sm:rounded-[32px] overflow-hidden bg-white dark:bg-slate-900 border-0 sm:border border-slate-200/90 dark:border-slate-800 shadow-2xl flex flex-col transition-all"
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
@@ -272,7 +281,7 @@ export function TrackingModalPopup({
                 </span>
                 <span className="hidden md:inline-flex items-center gap-1 text-[11px] font-bold text-emerald-600 dark:text-emerald-400">
                   <ShieldCheck className="h-3.5 w-3.5" />
-                  <span>Tamper-Safe</span>
+                  <span>Verified Carrier Data</span>
                 </span>
               </div>
               <div className="text-xs font-mono font-bold text-slate-500 dark:text-slate-400">
@@ -288,7 +297,7 @@ export function TrackingModalPopup({
                 <button
                   type="button"
                   onClick={onRefresh}
-                  className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800 transition-colors"
+                  className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800 transition-colors cursor-pointer"
                   title="Refresh live status"
                 >
                   <RefreshCw className="h-4 w-4 stroke-[2.2]" />
@@ -296,7 +305,7 @@ export function TrackingModalPopup({
                 <button
                   type="button"
                   onClick={onShare}
-                  className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800 transition-colors"
+                  className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800 transition-colors cursor-pointer"
                   title="Share status card"
                 >
                   <Share2 className="h-4 w-4 stroke-[2.2]" />
@@ -304,7 +313,7 @@ export function TrackingModalPopup({
                 <button
                   type="button"
                   onClick={handleCopyLink}
-                  className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800 transition-colors"
+                  className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800 transition-colors cursor-pointer"
                   title="Copy tracking link"
                 >
                   {copiedLink ? <Check className="h-4 w-4 text-emerald-600 stroke-[3]" /> : <Copy className="h-4 w-4 stroke-[2.2]" />}
@@ -315,7 +324,7 @@ export function TrackingModalPopup({
             <button
               type="button"
               onClick={onClose}
-              className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 hover:bg-slate-100 hover:text-slate-800 dark:hover:bg-slate-800 dark:hover:text-slate-200 transition-colors"
+              className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 hover:bg-slate-100 hover:text-slate-800 dark:hover:bg-slate-800 dark:hover:text-slate-200 transition-colors cursor-pointer"
               aria-label="Close dialog"
             >
               <X className="h-5 w-5 stroke-[2.4]" />
@@ -327,9 +336,7 @@ export function TrackingModalPopup({
         {/* 2. BODY CONTENT (SCROLLABLE & RESPONSIVE)                      */}
         {/* ============================================================== */}
         <div
-          ref={scrollContainerRef}
-          onScroll={handleScroll}
-          className="overflow-y-auto flex-1 p-4 sm:p-6 space-y-4 sm:space-y-5"
+          className="overflow-y-auto flex-1 p-4 sm:p-6 lg:p-7 space-y-5 sm:space-y-6"
         >
           {/* Loading Animation */}
           {isLoading && (
@@ -390,43 +397,79 @@ export function TrackingModalPopup({
 
           {/* SUCCESS PARCEL VIEW */}
           {!isLoading && !notTrackableInfo && !errorMsg && trackingResult && (
-            <div className="space-y-4 sm:space-y-5">
+            <div className="space-y-5 sm:space-y-6">
               {/* ============================================================== */}
-              {/* PRO RICH GRADIENT HERO CARD (ATTRACTIVE & MODERN)              */}
+              {/* TOP DELIVERED CARD (LUXURIOUS, FROSTED GLASS & HIGH CONTRAST) */}
               {/* ============================================================== */}
               <div
-                className={`relative overflow-hidden rounded-3xl p-5 sm:p-7 text-white shadow-lg transition-all ${
-                  isDelivered
-                    ? "bg-gradient-to-br from-emerald-600 via-teal-700 to-slate-900"
-                    : "bg-gradient-to-br from-indigo-600 via-blue-700 to-slate-900"
+                className={`relative overflow-hidden rounded-3xl p-5 sm:p-7 border transition-all ${
+                  isReturned
+                    ? "bg-gradient-to-br from-rose-500/14 via-amber-500/8 to-transparent border-rose-300 dark:border-rose-800/60 shadow-xs"
+                    : isDelivered
+                    ? "bg-gradient-to-br from-emerald-500/12 via-teal-500/6 to-transparent border-emerald-200/90 dark:border-emerald-800/50 shadow-xs"
+                    : "bg-gradient-to-br from-indigo-500/12 via-sky-500/6 to-transparent border-indigo-200/90 dark:border-indigo-800/50 shadow-xs"
                 }`}
               >
-                {/* Decorative background ambient glow */}
-                <div className="absolute -right-8 -bottom-8 w-48 h-48 rounded-full bg-white/10 blur-2xl pointer-events-none" />
-                <div className="absolute left-1/3 -top-12 w-36 h-36 rounded-full bg-white/10 blur-xl pointer-events-none" />
+                {/* Decorative background ambient flare */}
+                <div
+                  className={`absolute -right-10 -bottom-10 w-52 h-52 rounded-full blur-3xl pointer-events-none opacity-40 ${
+                    isReturned ? "bg-rose-400" : isDelivered ? "bg-emerald-400" : "bg-indigo-400"
+                  }`}
+                />
 
                 <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-5">
-                  <div className="flex items-start gap-4">
-                    <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-white/15 backdrop-blur-md text-white border border-white/20 shadow-inner">
-                      {isDelivered ? (
-                        <CheckCircle2 className="h-8 w-8 stroke-[2.5]" />
-                      ) : (
-                        <Truck className="h-8 w-8 stroke-[2.2]" />
+                  <div className="flex items-start gap-4 sm:gap-5">
+                    {/* Glowing Circular Status Emblem */}
+                    <div className="relative shrink-0">
+                      <div
+                        className={`flex h-14 w-14 sm:h-16 sm:w-16 items-center justify-center rounded-2xl shadow-lg transition-transform ${
+                          isReturned
+                            ? "bg-gradient-to-br from-rose-500 to-amber-600 text-white shadow-rose-500/30"
+                            : isDelivered
+                            ? "bg-gradient-to-br from-emerald-500 to-teal-600 text-white shadow-emerald-500/30"
+                            : "bg-gradient-to-br from-indigo-500 to-blue-600 text-white shadow-indigo-500/30"
+                        }`}
+                      >
+                        {isReturned ? (
+                          <RotateCcw className="h-8 w-8 sm:h-9 sm:w-9 stroke-[2.4]" />
+                        ) : isDelivered ? (
+                          <CheckCircle2 className="h-8 w-8 sm:h-9 sm:w-9 stroke-[2.4]" />
+                        ) : (
+                          <Truck className="h-8 w-8 sm:h-9 sm:w-9 stroke-[2.2]" />
+                        )}
+                      </div>
+                      {isDelivered && (
+                        <span className="absolute -top-1 -right-1 flex h-4 w-4">
+                          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                          <span className="relative inline-flex rounded-full h-4 w-4 bg-emerald-500 border-2 border-white dark:border-slate-900" />
+                        </span>
                       )}
                     </div>
+
                     <div>
-                      <div className="flex flex-wrap items-center gap-2 mb-1">
-                        <span className="rounded-full bg-white/20 backdrop-blur-sm px-3 py-0.5 text-xs font-extrabold uppercase tracking-wider text-white border border-white/20">
-                          {trackingResult.overallStatus.label}
-                        </span>
-                        <span className="text-xs text-white/80 font-medium">
-                          {trackingResult.overallStatus.timestamp}
+                      {/* Status row: Clock and Timestamp */}
+                      <div className="flex items-center gap-2 mb-1">
+                        <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-500 dark:text-slate-400">
+                          <Clock className={`h-3.5 w-3.5 ${isReturned ? "text-rose-600 dark:text-rose-400" : isDelivered ? "text-emerald-600 dark:text-emerald-400" : "text-indigo-600 dark:text-indigo-400"}`} />
+                          <span>{trackingResult.overallStatus.timestamp}</span>
+                        </div>
+                        <span className="text-slate-300 dark:text-slate-700">·</span>
+                        <span className={`text-[11px] font-bold flex items-center gap-1 ${isReturned ? "text-rose-600 dark:text-rose-400" : "text-emerald-600 dark:text-emerald-400"}`}>
+                          <ShieldCheck className="h-3 w-3" />
+                          <span>{isReturned ? "Returned to Shipper (RTO)" : "Signed & Received"}</span>
                         </span>
                       </div>
-                      <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-white">
-                        {trackingResult.overallStatus.phrase}
+
+                      {/* Main Big Headline */}
+                      <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-slate-900 dark:text-white">
+                        {isReturned
+                          ? trackingResult.overallStatus.phrase || "Returned to Shipper"
+                          : isDelivered
+                          ? "Delivered"
+                          : trackingResult.overallStatus.phrase || "Package in Transit"}
                       </h2>
-                      <p className="mt-1 text-xs sm:text-sm text-white/90 max-w-xl font-medium">
+
+                      <p className="mt-1 text-xs sm:text-sm text-slate-600 dark:text-slate-300 max-w-xl font-medium">
                         {trackingResult.estimatedDelivery.message}
                       </p>
                     </div>
@@ -437,184 +480,213 @@ export function TrackingModalPopup({
                     <button
                       type="button"
                       onClick={onToggleWatchlist}
-                      className="inline-flex items-center gap-1.5 rounded-xl bg-white/20 hover:bg-white/30 backdrop-blur-md px-3.5 py-2 text-xs font-bold text-white border border-white/25 transition-all shadow-xs cursor-pointer"
+                      className="inline-flex items-center gap-1.5 rounded-xl bg-white/90 hover:bg-white dark:bg-slate-800/90 dark:hover:bg-slate-800 px-3.5 py-2 text-xs font-bold text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-700 transition-all shadow-2xs cursor-pointer"
                     >
                       {isSavedInWatchlist ? (
                         <>
-                          <BookmarkCheck className="h-4 w-4 stroke-[2.4]" />
+                          <BookmarkCheck className="h-4 w-4 text-emerald-600 stroke-[2.4]" />
                           <span>Saved in Watchlist</span>
                         </>
                       ) : (
                         <>
                           <BookmarkPlus className="h-4 w-4 stroke-[2.4]" />
-                          <span>Add to Watchlist</span>
+                          <span>Save to Watchlist</span>
                         </>
                       )}
                     </button>
                   </div>
                 </div>
 
-                {/* Sub Route Bar inside Banner */}
-                <div className="mt-5 pt-4 border-t border-white/15 flex flex-wrap items-center justify-between gap-3 text-xs">
-                  <div className="flex items-center gap-2 text-white/90">
-                    <span className="font-extrabold text-white">Route Corridor:</span>
+                {/* Sub Route Bar inside Banner - Clean, no tariff, no weight */}
+                <div className="mt-5 pt-4 border-t border-slate-200/70 dark:border-slate-800/80 flex flex-wrap items-center justify-between gap-3 text-xs">
+                  <div className="flex flex-wrap items-center gap-2 text-slate-700 dark:text-slate-300">
+                    <span className="font-extrabold text-slate-900 dark:text-white">Route:</span>
+                    <span className="font-semibold text-emerald-700 dark:text-emerald-400">{destParsed.name} (PIN {destParsed.pin})</span>
+                    <span className="text-slate-400">←</span>
                     <span className="font-semibold">{originParsed.name} (PIN {originParsed.pin})</span>
-                    <ArrowRight className="h-3.5 w-3.5 text-white/70" />
-                    <span className="font-semibold">{destParsed.name} (PIN {destParsed.pin})</span>
                   </div>
-                  <div className="font-mono text-white/80 font-medium">
-                    Billed: {trackingResult.bookingDetails.tariff} · {trackingResult.bookingDetails.weight}
+                  <div className="font-medium text-slate-500 dark:text-slate-400">
+                    Article: <span className="font-bold text-slate-800 dark:text-slate-200">{trackingResult.bookingDetails.articleType || "Standard Consignment"}</span>
                   </div>
                 </div>
               </div>
 
-              {/* SPECIFICATION TILES (CLEAN & READABLE) */}
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-                <div className="rounded-2xl border border-slate-200/80 bg-slate-50/80 p-3.5 dark:border-slate-800 dark:bg-slate-850">
-                  <div className="text-[11px] font-extrabold text-slate-500 uppercase tracking-wider">From Origin</div>
-                  <div className="mt-0.5 text-sm font-extrabold text-slate-900 dark:text-white truncate">
-                    {originParsed.name}
-                  </div>
-                  <div className="text-xs font-mono font-bold text-indigo-600 dark:text-indigo-400">PIN {originParsed.pin}</div>
-                </div>
-
-                <div className="rounded-2xl border border-slate-200/80 bg-slate-50/80 p-3.5 dark:border-slate-800 dark:bg-slate-850">
-                  <div className="text-[11px] font-extrabold text-slate-500 uppercase tracking-wider">To Destination</div>
-                  <div className="mt-0.5 text-sm font-extrabold text-slate-900 dark:text-white truncate">
-                    {destParsed.name}
-                  </div>
-                  <div className="text-xs font-mono font-bold text-emerald-600 dark:text-emerald-400">PIN {destParsed.pin}</div>
-                </div>
-
-                <div className="rounded-2xl border border-slate-200/80 bg-slate-50/80 p-3.5 dark:border-slate-800 dark:bg-slate-850">
-                  <div className="text-[11px] font-extrabold text-slate-500 uppercase tracking-wider">Article Type</div>
-                  <div className="mt-0.5 text-sm font-extrabold text-slate-900 dark:text-white truncate">
-                    {trackingResult.bookingDetails.articleType || "SP Doc"}
-                  </div>
-                  <div className="text-xs font-bold text-slate-600 dark:text-slate-400">Weight: {trackingResult.bookingDetails.weight || "45 g"}</div>
-                </div>
-
-                <div className="rounded-2xl border border-slate-200/80 bg-slate-50/80 p-3.5 dark:border-slate-800 dark:bg-slate-850">
-                  <div className="text-[11px] font-extrabold text-slate-500 uppercase tracking-wider">Tariff Paid</div>
-                  <div className="mt-0.5 text-sm font-extrabold font-mono text-slate-900 dark:text-white tabular-nums">
-                    {trackingResult.bookingDetails.tariff || "₹55.57"}
-                  </div>
-                  <div className="text-xs font-bold text-slate-500">Official Rate</div>
-                </div>
-              </div>
-
               {/* ============================================================== */}
-              {/* VERTICAL TIMELINE WITH ACCURATE SCROLLING TRUCK & REVEALED DOTS*/}
+              {/* SPECIFICATION CARDS: DESTINATION TOP, STARTING BOTTOM           */}
               {/* ============================================================== */}
-              <div className="rounded-3xl border border-slate-200/90 bg-white p-5 sm:p-6 shadow-xs dark:border-slate-800 dark:bg-slate-850">
-                <div className="flex items-center justify-between mb-4">
-                  <div className="flex items-center gap-2">
-                    <Clock className="h-4 w-4 text-indigo-600 stroke-[2.4]" />
-                    <h4 className="text-base font-extrabold text-slate-900 dark:text-white">
-                      Checkpoint Route & History
-                    </h4>
-                  </div>
-                  <span className="text-xs font-mono font-bold text-slate-500">
-                    {activities.length} Checkpoints
-                  </span>
-                </div>
-
-                {/* Animated Timeline Section */}
-                <div className="relative pl-10 sm:pl-12 pt-2 pb-2">
-                  {/* Dedicated vertical track container matching 100% of event cards */}
-                  <div ref={timelineTrackRef} className="absolute left-[17px] sm:left-[21px] top-6 bottom-6 w-1">
-                    {/* Background grey route line */}
-                    <div className="absolute inset-0 bg-slate-200 dark:bg-slate-800 rounded-full" />
-
-                    {/* Filled progress road line (stretches from 0% to 100% on scroll) */}
-                    <div
-                      className="absolute top-0 left-0 w-full bg-gradient-to-b from-indigo-500 via-indigo-600 to-emerald-500 rounded-full transition-all duration-75 ease-out shadow-xs"
-                      style={{ height: `${roadProgress * 100}%` }}
-                    />
-
-                    {/* MOVING TRUCK ICON: Starts at top and reaches destination at scroll bottom */}
-                    <div
-                      className="absolute -left-[14px] -translate-y-1/2 z-30 transition-all duration-75 ease-out pointer-events-none"
-                      style={{ top: `${roadProgress * 100}%` }}
-                    >
-                      <div className="flex h-8 w-8 items-center justify-center rounded-full bg-indigo-600 text-white shadow-md ring-4 ring-white dark:ring-slate-900">
-                        <Truck className="h-4 w-4 stroke-[2.5]" />
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                {/* 1. Destination Hub Card (TOP) */}
+                <div className="relative overflow-hidden rounded-2xl border border-slate-200/90 bg-white/90 p-4 shadow-2xs backdrop-blur-xs transition-all hover:border-emerald-300 dark:border-slate-800 dark:bg-slate-850/90 dark:hover:border-emerald-800">
+                  <div className="flex items-start gap-3">
+                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-emerald-50 text-emerald-600 dark:bg-emerald-950/70 dark:text-emerald-400 ring-1 ring-emerald-500/15">
+                      <MapPin className="h-5 w-5 stroke-[2.2]" />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center justify-between gap-1">
+                        <span className="text-[10px] font-extrabold uppercase tracking-wider text-emerald-600 dark:text-emerald-400">
+                          Destination Hub
+                        </span>
+                        <span className="rounded-md bg-emerald-50 px-2 py-0.5 text-[10px] font-mono font-bold text-emerald-700 dark:bg-emerald-950/80 dark:text-emerald-300">
+                          PIN {destParsed.pin}
+                        </span>
+                      </div>
+                      <div className="mt-1 text-sm font-extrabold text-slate-900 dark:text-white truncate">
+                        {destParsed.name}
+                      </div>
+                      <div className="mt-1 text-[11px] text-slate-500 dark:text-slate-400 font-medium">
+                        Delivery Post Office
                       </div>
                     </div>
                   </div>
+                </div>
 
-                  {/* Checkpoint Nodes along the timeline */}
+                {/* 2. Origin Facility Card (STARTING / BOTTOM) */}
+                <div className="relative overflow-hidden rounded-2xl border border-slate-200/90 bg-white/90 p-4 shadow-2xs backdrop-blur-xs transition-all hover:border-indigo-300 dark:border-slate-800 dark:bg-slate-850/90 dark:hover:border-indigo-800">
+                  <div className="flex items-start gap-3">
+                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-indigo-50 text-indigo-600 dark:bg-indigo-950/70 dark:text-indigo-400 ring-1 ring-indigo-500/15">
+                      <Building2 className="h-5 w-5 stroke-[2.2]" />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center justify-between gap-1">
+                        <span className="text-[10px] font-extrabold uppercase tracking-wider text-indigo-600 dark:text-indigo-400">
+                          Starting Facility (Origin)
+                        </span>
+                        <span className="rounded-md bg-indigo-50 px-2 py-0.5 text-[10px] font-mono font-bold text-indigo-700 dark:bg-indigo-950/80 dark:text-indigo-300">
+                          PIN {originParsed.pin}
+                        </span>
+                      </div>
+                      <div className="mt-1 text-sm font-extrabold text-slate-900 dark:text-white truncate">
+                        {originParsed.name}
+                      </div>
+                      <div className="mt-1 text-[11px] text-slate-500 dark:text-slate-400 font-medium">
+                        {trackingResult.bookingDetails.bookedAt ? `Booked: ${trackingResult.bookingDetails.bookedAt}` : "Booking Hub"}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* 3. Article Specs Card (No weight) */}
+                <div className="relative overflow-hidden rounded-2xl border border-slate-200/90 bg-white/90 p-4 shadow-2xs backdrop-blur-xs transition-all hover:border-violet-300 dark:border-slate-800 dark:bg-slate-850/90 dark:hover:border-violet-800">
+                  <div className="flex items-start gap-3">
+                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-violet-50 text-violet-600 dark:bg-violet-950/70 dark:text-violet-400 ring-1 ring-violet-500/15">
+                      <Package className="h-5 w-5 stroke-[2.2]" />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center justify-between gap-1">
+                        <span className="text-[10px] font-extrabold uppercase tracking-wider text-violet-600 dark:text-violet-400">
+                          Article Specs
+                        </span>
+                        <span className="rounded-md bg-violet-50 px-2 py-0.5 text-[10px] font-mono font-bold text-violet-700 dark:bg-violet-950/80 dark:text-violet-300">
+                          Standard Express
+                        </span>
+                      </div>
+                      <div className="mt-1 text-sm font-extrabold text-slate-900 dark:text-white truncate">
+                        {trackingResult.bookingDetails.articleType || "Registered Consignment"}
+                      </div>
+                      <div className="mt-1 text-[11px] text-slate-500 dark:text-slate-400 font-medium">
+                        Priority Surface / Air Network
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* ============================================================== */}
+              {/* VERTICAL HIGHWAY TIMELINE WITH SMOOTH SCROLLING TRUCK          */}
+              {/* ============================================================== */}
+              <div className="rounded-3xl border border-slate-200/90 bg-white p-5 sm:p-6 shadow-xs dark:border-slate-800 dark:bg-slate-850">
+                <div className="flex items-center justify-between mb-5">
+                  <div className="flex items-center gap-2">
+                    <Clock className="h-4 w-4 text-indigo-600 stroke-[2.4]" />
+                    <h4 className="text-base font-extrabold text-slate-900 dark:text-white">
+                      Complete History
+                    </h4>
+                  </div>
+                  <span className="text-xs font-mono font-bold text-slate-500">
+                    {chronologicalActivities.length} Checkpoints
+                  </span>
+                </div>
+
+                {/* Clean Professional Logistics Timeline */}
+                <div className="relative pt-2 pb-2">
+                  {/* Vertical Timeline Track Line: precisely centered at left-4 (16px), passing through the center of w-8 node column */}
+                  <div className="absolute left-4 top-8 bottom-8 w-0.5 -translate-x-1/2 bg-slate-200 dark:bg-slate-700/80 rounded-full z-10 pointer-events-none" />
+
+                  {/* Checkpoint Nodes along the timeline (Destination at top -> Starting point at bottom) */}
                   <div className="space-y-4">
                     {displayActivities.map((act, idx) => {
-                      // Node threshold: checkpoint 0 at top (0), last checkpoint at bottom (1)
-                      const threshold = displayActivities.length > 1
-                        ? idx / (displayActivities.length - 1)
-                        : 0;
-
-                      // The dot ONLY appears once the truck has reached or passed it
-                      const isPassedByTruck = roadProgress >= threshold - 0.05;
                       const style = getCheckpointStyle(act);
 
                       return (
                         <div
                           key={act.id || idx}
-                          ref={(el) => {
-                            itemRefs.current[idx] = el;
-                          }}
-                          className={`relative rounded-2xl border p-4 transition-all duration-200 ${
-                            isPassedByTruck
-                              ? "bg-slate-50/80 border-slate-300 dark:bg-slate-800/80 dark:border-slate-700 shadow-2xs"
-                              : "bg-white border-slate-100 dark:bg-slate-900/40 dark:border-slate-800/60 opacity-60"
-                          }`}
+                          className="relative flex items-start gap-3 sm:gap-4"
                         >
-                          {/* Point marker on the vertical track: REVEALED ONLY AFTER TRUCK PASSES */}
-                          <div className="absolute -left-10 sm:-left-12 top-5 flex items-center justify-center w-7 h-7 -translate-x-1/2 z-10">
-                            {isPassedByTruck ? (
-                              <span
-                                className={`h-3.5 w-3.5 rounded-full ${style.dotColor} transition-transform duration-200 scale-100 animate-in zoom-in-50`}
-                              />
-                            ) : (
-                              /* Empty invisible placeholder before truck arrival */
-                              <span className="h-2 w-2 rounded-full bg-slate-300 dark:bg-slate-700/60 opacity-40" />
-                            )}
+                          {/* Node Column: exactly w-8 (32px wide), center is 16px (left-4), matching vertical track */}
+                          <div className="relative shrink-0 w-8 flex items-center justify-center pt-5">
+                            <div className="relative flex items-center justify-center h-6 w-6 z-20 pointer-events-none">
+                              {idx === 0 ? (
+                                <span className="relative flex h-4 w-4 items-center justify-center">
+                                  <span
+                                    className={`animate-ping absolute inline-flex h-full w-full rounded-full ${style.dotColor} opacity-40`}
+                                  />
+                                  <span
+                                    className={`relative inline-flex rounded-full h-3.5 w-3.5 ${style.dotColor} ring-4 ring-white dark:ring-slate-850 shadow-xs`}
+                                  />
+                                </span>
+                              ) : (
+                                <span
+                                  className={`relative inline-flex rounded-full h-3 w-3 ${style.dotColor} ring-4 ring-white dark:ring-slate-850 shadow-xs`}
+                                />
+                              )}
+                            </div>
                           </div>
 
-                          {/* Event Header with Distinct Status Badge */}
-                          <div className="flex flex-wrap items-center justify-between gap-1.5">
-                            <div className="flex items-center gap-2">
-                              <span className={`p-1.5 rounded-xl ${style.iconBg} transition-colors`}>
-                                {style.icon}
+                          {/* Event Card on the right */}
+                          <div className="flex-1 min-w-0 rounded-2xl border border-slate-200/90 bg-white p-4 shadow-2xs hover:border-slate-300 dark:border-slate-800 dark:bg-slate-850/90 dark:hover:border-slate-700 transition-all">
+                            {/* Event Header with Distinct Status Badge */}
+                            <div className="flex flex-wrap items-center justify-between gap-1.5">
+                              <div className="flex items-center gap-2">
+                                <span className={`p-1.5 rounded-xl ${style.iconBg} transition-colors`}>
+                                  {style.icon}
+                                </span>
+                                <span className="text-sm font-extrabold text-slate-900 dark:text-white">
+                                  {act.statusText}
+                                </span>
+                              </div>
+
+                              {/* Chronological tags: Destination at top, Starting Point on actual origin */}
+                              {idx === 0 && (
+                                <span className="rounded-md bg-emerald-100 px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wide text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 border border-emerald-200/60 dark:border-emerald-800/60">
+                                  {isDelivered ? "Destination (Delivered)" : isReturned ? "Destination (Return)" : "Destination Point"}
+                                </span>
+                              )}
+                              {(act.stage === "booked" || (isExpandedAll && idx === displayActivities.length - 1) || (chronologicalActivities.length <= INITIAL_VISIBLE_COUNT && idx === displayActivities.length - 1)) && (
+                                <span className="rounded-md bg-indigo-50 px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wide text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300 border border-indigo-200/60 dark:border-indigo-800/60">
+                                  Starting Point (Origin)
+                                </span>
+                              )}
+                            </div>
+
+                            {/* Location, Date and Time with High Legibility */}
+                            <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs font-bold text-slate-600 dark:text-slate-300">
+                              <span className="inline-flex items-center gap-1.5 text-slate-800 dark:text-slate-200">
+                                <MapPin className="h-3.5 w-3.5 text-indigo-500 stroke-[2.2]" />
+                                <span>{act.facility}</span>
                               </span>
-                              <span className="text-sm font-extrabold text-slate-900 dark:text-white">
-                                {act.statusText}
+                              <span aria-hidden="true" className="text-slate-300 dark:text-slate-600">·</span>
+                              <span className="inline-flex items-center gap-1.5 font-mono text-slate-600 dark:text-slate-400 tabular-nums">
+                                <Calendar className="h-3.5 w-3.5 text-indigo-500 stroke-[2.2]" />
+                                <span>{act.date} · {act.time}</span>
                               </span>
                             </div>
 
-                            {idx === 0 && (
-                              <span className="rounded-md bg-emerald-100 px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wide text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300">
-                                Latest Scan
-                              </span>
+                            {act.details && (
+                              <div className="mt-2 text-xs font-medium text-slate-700 dark:text-slate-300 bg-slate-50/70 dark:bg-slate-800/70 p-2.5 rounded-xl border border-slate-200/60 dark:border-slate-800">
+                                {act.details}
+                              </div>
                             )}
                           </div>
-
-                          {/* Location, Date and Time with High Legibility */}
-                          <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs font-bold text-slate-600 dark:text-slate-300">
-                            <span className="inline-flex items-center gap-1.5 text-slate-800 dark:text-slate-200">
-                              <MapPin className="h-3.5 w-3.5 text-indigo-500 stroke-[2.2]" />
-                              <span>{act.facility}</span>
-                            </span>
-                            <span aria-hidden="true" className="text-slate-300 dark:text-slate-600">·</span>
-                            <span className="inline-flex items-center gap-1.5 font-mono text-slate-600 dark:text-slate-400 tabular-nums">
-                              <Calendar className="h-3.5 w-3.5 text-indigo-500 stroke-[2.2]" />
-                              <span>{act.date} · {act.time}</span>
-                            </span>
-                          </div>
-
-                          {act.details && (
-                            <div className="mt-2 text-xs font-medium text-slate-700 dark:text-slate-300 bg-white/90 dark:bg-slate-850 p-2.5 rounded-xl border border-slate-200/60 dark:border-slate-800">
-                              {act.details}
-                            </div>
-                          )}
                         </div>
                       );
                     })}
@@ -622,17 +694,17 @@ export function TrackingModalPopup({
                 </div>
 
                 {/* "SEE ALL UPDATES" ACCESSIBLE BUTTON */}
-                {activities.length > 4 && (
+                {chronologicalActivities.length > INITIAL_VISIBLE_COUNT && (
                   <div className="mt-4 pt-2 border-t border-slate-100 dark:border-slate-800">
                     <button
                       type="button"
-                      onClick={() => setIsExpandedAll(!isExpandedAll)}
+                      onClick={handleToggleExpand}
                       className="w-full flex items-center justify-center gap-2 rounded-xl bg-slate-100 hover:bg-slate-200/90 text-slate-900 dark:bg-slate-800 dark:hover:bg-slate-750 dark:text-white py-3 px-4 text-xs font-extrabold transition-all shadow-2xs cursor-pointer"
                     >
                       <span>
                         {isExpandedAll
-                          ? "Collapse to Recent Checkpoints"
-                          : `See all ${activities.length} checkpoint updates`}
+                          ? "Collapse History"
+                          : `See remaining ${chronologicalActivities.length - INITIAL_VISIBLE_COUNT} updates (${chronologicalActivities.length} total)`}
                       </span>
                       {isExpandedAll ? (
                         <ChevronUp className="h-4 w-4 stroke-[2.5]" />
@@ -648,7 +720,7 @@ export function TrackingModalPopup({
               <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-1 pb-2">
                 <div className="flex items-center gap-2 text-xs font-semibold text-slate-600 dark:text-slate-400">
                   <Phone className="h-3.5 w-3.5 text-indigo-600" />
-                  <span>Support: </span>
+                  <span>Carrier Support: </span>
                   <a
                     href={`tel:${trackingResult.courier.supportPhone || "1800-266-6868"}`}
                     className="font-extrabold text-slate-900 hover:underline dark:text-white"
@@ -667,7 +739,7 @@ export function TrackingModalPopup({
                     className="w-full sm:w-auto inline-flex items-center justify-center gap-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 py-3 px-6 text-xs font-extrabold text-white shadow-xs transition-colors cursor-pointer"
                   >
                     <PlusCircle className="h-4 w-4 stroke-[2.5]" />
-                    <span>Track Next Order</span>
+                    <span>Track Another Parcel</span>
                   </button>
                 </div>
               </div>

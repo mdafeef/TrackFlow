@@ -32,6 +32,8 @@ import { Footer } from "@/components/Footer";
 import { TrackingFetchingAnimation } from "@/components/TrackingFetchingAnimation";
 import { NotTrackableCard } from "@/components/NotTrackableCard";
 import { TrackingModalPopup } from "@/components/TrackingModalPopup";
+import { PartnerMarquee } from "@/components/PartnerMarquee";
+import { BulkDashboard } from "@/components/BulkDashboard";
 import { COURIER_MAP, autoDetectCourier } from "@/lib/couriers";
 import { TrackingResult } from "@/app/api/track/route";
 
@@ -79,6 +81,9 @@ function TrackingAppContent() {
 
   // Dark mode
   const [isDark, setIsDark] = useState(false);
+
+  // Active view: single tracker vs bulk dashboard
+  const [activeView, setActiveView] = useState<"single" | "bulk">("single");
 
   // Track Next Order Action: Clears active results/errors, resets URL, and smoothly focuses input
   const handleTrackNextOrder = useCallback(() => {
@@ -448,78 +453,118 @@ function TrackingAppContent() {
         isDark={isDark}
         onToggleTheme={toggleTheme}
         onNavigateSection={navigateSection}
+        activeView={activeView}
+        onChangeView={setActiveView}
       />
 
       <main className="flex-1">
-        {/* Hero & Search Section */}
-        <TrackerHero
-          onSearch={(num, cId) => {
-            performSearch(num, cId, undefined, true);
-          }}
-          isLoading={isLoading}
-          initialTracking={activeResult ? activeResult.trackingNumber : ""}
-          initialCourier={activeResult ? activeResult.courier.id : ""}
-        />
+        {activeView === "bulk" ? (
+          /* Enterprise Bulk Operations Dashboard */
+          <BulkDashboard
+            onOpenTrackingResult={(trackingNum, courierId) => {
+              performSearch(trackingNum, courierId, undefined, false);
+            }}
+          />
+        ) : (
+          /* Normal Single Tracker View */
+          <>
+            {/* Hero & Search Section */}
+            <TrackerHero
+              onSearch={(num, cId) => {
+                performSearch(num, cId, undefined, true);
+              }}
+              isLoading={isLoading}
+              initialTracking={activeResult ? activeResult.trackingNumber : ""}
+              initialCourier={activeResult ? activeResult.courier.id : ""}
+            />
 
-        {/* Streamlined Status Banner if activeResult is present outside modal or after modal dismissal */}
-        {activeResult && !isLoading && !isTrackingModalOpen && (
-          <div className="mx-auto max-w-4xl px-4 sm:px-6 mb-12">
-            <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs dark:border-slate-800 dark:bg-slate-900 flex flex-col sm:flex-row items-center justify-between gap-4">
-              <div className="flex items-center gap-3">
-                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 shrink-0">
-                  <Package className="h-5 w-5" />
-                </div>
-                <div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-bold text-slate-900 dark:text-white">
-                      {activeResult.courier.name}
-                    </span>
-                    <span className="text-xs font-mono text-slate-500">
-                      #{activeResult.trackingNumber}
-                    </span>
-                    <span className="text-xs font-semibold text-emerald-600 dark:text-emerald-400">
-                      · {activeResult.overallStatus.phrase}
-                    </span>
+            {/* Scrolling Supported Partners Logo Ribbon */}
+            <PartnerMarquee
+              onSelectCourier={(courierId) => {
+                const cMeta = COURIER_MAP[courierId];
+                if (cMeta && cMeta.sampleNumber) {
+                  performSearch(cMeta.sampleNumber, courierId, undefined, true);
+                } else {
+                  performSearch("", courierId, undefined, true);
+                }
+              }}
+            />
+
+            {/* Streamlined Status Banner if activeResult is present outside modal or after modal dismissal */}
+            {activeResult && !isLoading && !isTrackingModalOpen && (
+              <div className="mx-auto max-w-4xl px-4 sm:px-6 my-10">
+                <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs dark:border-slate-800 dark:bg-slate-900 flex flex-col sm:flex-row items-center justify-between gap-4">
+                  <div className="flex items-center gap-3">
+                    <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 shrink-0">
+                      <Package className="h-5 w-5" />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-bold text-slate-900 dark:text-white">
+                          {activeResult.courier.name}
+                        </span>
+                        <span className="text-xs font-mono text-slate-500">
+                          #{activeResult.trackingNumber}
+                        </span>
+                        <span className="text-xs font-semibold text-emerald-600 dark:text-emerald-400">
+                          · {activeResult.overallStatus.phrase}
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-500 dark:text-slate-400">
+                        Route: {activeResult.bookingDetails.origin.split(",")[0]} → {activeResult.bookingDetails.destination.split(",")[0]}
+                      </p>
+                    </div>
                   </div>
-                  <p className="text-xs text-slate-500 dark:text-slate-400">
-                    Route: {activeResult.bookingDetails.origin.split(",")[0]} → {activeResult.bookingDetails.destination.split(",")[0]}
-                  </p>
+                  <div className="flex items-center gap-2 w-full sm:w-auto">
+                    <button
+                      type="button"
+                      onClick={() => setIsTrackingModalOpen(true)}
+                      className="flex-1 sm:flex-initial inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2 text-xs font-bold text-white hover:bg-indigo-700 shadow-xs cursor-pointer"
+                    >
+                      <span>View Details Popup</span>
+                      <ArrowRight className="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleTrackNextOrder}
+                      className="flex-1 sm:flex-initial inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-800 dark:text-slate-200 cursor-pointer"
+                    >
+                      <PlusCircle className="h-3.5 w-3.5" />
+                      <span>New</span>
+                    </button>
+                  </div>
                 </div>
               </div>
-              <div className="flex items-center gap-2 w-full sm:w-auto">
-                <button
-                  type="button"
-                  onClick={() => setIsTrackingModalOpen(true)}
-                  className="flex-1 sm:flex-initial inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2 text-xs font-bold text-white hover:bg-indigo-700 shadow-xs"
-                >
-                  <span>View Details Popup</span>
-                  <ArrowRight className="h-3.5 w-3.5" />
-                </button>
-                <button
-                  type="button"
-                  onClick={handleTrackNextOrder}
-                  className="flex-1 sm:flex-initial inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-800 dark:text-slate-200"
-                >
-                  <PlusCircle className="h-3.5 w-3.5" />
-                  <span>New</span>
-                </button>
-              </div>
-            </div>
-          </div>
+            )}
+
+            {/* Features & Capabilities */}
+            <FeaturesOverview />
+
+            {/* 20+ Supported Couriers Directory */}
+            <CourierDirectory
+              onSelectCourierSample={(num, cId) => {
+                if (num) {
+                  performSearch(num, cId, undefined, true);
+                } else {
+                  const el = document.getElementById("track-section");
+                  if (el) {
+                    el.scrollIntoView({ behavior: "smooth", block: "start" });
+                  }
+                  setTimeout(() => {
+                    const inputEl = document.getElementById("tracking-input") as HTMLInputElement | null;
+                    if (inputEl) {
+                      inputEl.focus();
+                      inputEl.select();
+                    }
+                  }, 200);
+                }
+              }}
+            />
+
+            {/* FAQ Section */}
+            <FaqSection />
+          </>
         )}
-
-        {/* Features & Capabilities */}
-        <FeaturesOverview />
-
-        {/* 20+ Supported Couriers Directory */}
-        <CourierDirectory
-          onSelectCourierSample={(num, cId) => {
-            performSearch(num, cId, undefined, true);
-          }}
-        />
-
-        {/* FAQ Section */}
-        <FaqSection />
       </main>
 
       {/* Primary Tracking Details & Fetching Animation Dialog Popup */}

@@ -2,7 +2,7 @@
 
 import React from "react";
 import Link from "next/link";
-import { PackageSearch, Moon, Sun, BookmarkCheck, ArrowRight } from "lucide-react";
+import { PackageSearch, Moon, Sun, BookmarkCheck, ArrowRight, LayoutDashboard, Search } from "lucide-react";
 
 interface NavbarProps {
   watchlistCount: number;
@@ -10,6 +10,8 @@ interface NavbarProps {
   isDark: boolean;
   onToggleTheme: () => void;
   onNavigateSection: (id: string) => void;
+  activeView: "single" | "bulk";
+  onChangeView: (view: "single" | "bulk") => void;
 }
 
 export function Navbar({
@@ -18,48 +20,87 @@ export function Navbar({
   isDark,
   onToggleTheme,
   onNavigateSection,
+  activeView,
+  onChangeView,
 }: NavbarProps) {
   return (
     <header className="sticky top-0 z-40 w-full border-b border-slate-200/80 bg-white/95 backdrop-blur-md dark:border-slate-800/80 dark:bg-slate-900/95 transition-colors">
-      <div className="mx-auto flex h-16 max-w-7xl items-center justify-between gap-8 px-4 sm:px-6 lg:px-8">
+      <div className="mx-auto flex h-16 max-w-7xl items-center justify-between gap-4 sm:gap-8 px-4 sm:px-6 lg:px-8">
         {/* Zone 1: Brand Wordmark */}
-        <Link
-          href="/"
-          className="flex items-center gap-2.5 text-lg font-bold tracking-tight text-slate-900 dark:text-white whitespace-nowrap shrink-0 group"
-        >
-          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-indigo-600 text-white shadow-sm transition-transform group-hover:scale-105">
-            <PackageSearch className="h-5 w-5" />
-          </div>
-          <span className="text-xl font-bold tracking-tight">
-            Track<span className="text-indigo-600 dark:text-indigo-400">Flow</span>
-          </span>
-        </Link>
+        <div className="flex items-center gap-4">
+          <Link
+            href="/"
+            onClick={() => onChangeView("single")}
+            className="flex items-center gap-2.5 text-lg font-bold tracking-tight text-slate-900 dark:text-white whitespace-nowrap shrink-0 group"
+          >
+            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-indigo-600 text-white shadow-sm transition-transform group-hover:scale-105">
+              <PackageSearch className="h-5 w-5" />
+            </div>
+            <span className="text-xl font-bold tracking-tight">
+              Track<span className="text-indigo-600 dark:text-indigo-400">Flow</span>
+            </span>
+          </Link>
 
-        {/* Zone 2: 4 Single-line Navigation Links */}
-        <nav className="hidden md:flex items-center gap-8 text-sm font-medium text-slate-600 dark:text-slate-300">
+          {/* View Toggle Tabs (Single vs Bulk Dashboard) */}
+          <div className="flex items-center rounded-xl bg-slate-100 p-1 dark:bg-slate-800">
+            <button
+              type="button"
+              onClick={() => onChangeView("single")}
+              className={`flex items-center gap-1.5 rounded-lg px-2.5 sm:px-3 py-1.5 text-xs font-semibold transition-all cursor-pointer ${
+                activeView === "single"
+                  ? "bg-white text-indigo-600 shadow-xs dark:bg-slate-900 dark:text-indigo-400"
+                  : "text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200"
+              }`}
+            >
+              <Search className="h-3.5 w-3.5" />
+              <span>Single</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => onChangeView("bulk")}
+              className={`flex items-center gap-1.5 rounded-lg px-2.5 sm:px-3 py-1.5 text-xs font-semibold transition-all cursor-pointer ${
+                activeView === "bulk"
+                  ? "bg-white text-indigo-600 shadow-xs dark:bg-slate-900 dark:text-indigo-400"
+                  : "text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200"
+              }`}
+            >
+              <LayoutDashboard className="h-3.5 w-3.5" />
+              <span>Bulk Track</span>
+              <span className="hidden sm:inline-block rounded bg-indigo-100 px-1 py-0.2 text-[9px] font-bold text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">
+                PRO
+              </span>
+            </button>
+          </div>
+        </div>
+
+        {/* Zone 2: Navigation Links */}
+        <nav className="hidden lg:flex items-center gap-6 text-xs font-medium text-slate-600 dark:text-slate-300">
           <button
-            onClick={() => onNavigateSection("track-section")}
-            className="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors whitespace-nowrap shrink-0"
+            onClick={() => {
+              onChangeView("single");
+              setTimeout(() => onNavigateSection("track-section"), 50);
+            }}
+            className="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors whitespace-nowrap cursor-pointer"
           >
-            Track Shipment
-          </button>
-          <button
-            onClick={() => onNavigateSection("features-section")}
-            className="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors whitespace-nowrap shrink-0"
-          >
-            Capabilities
+            Track Parcel
           </button>
           <button
             onClick={() => onNavigateSection("couriers-section")}
-            className="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors whitespace-nowrap shrink-0"
+            className="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors whitespace-nowrap cursor-pointer"
           >
             20+ Carriers
           </button>
           <button
-            onClick={() => onNavigateSection("faq-section")}
-            className="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors whitespace-nowrap shrink-0"
+            onClick={() => onNavigateSection("features-section")}
+            className="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors whitespace-nowrap cursor-pointer"
           >
-            Tracking FAQ
+            Capabilities
+          </button>
+          <button
+            onClick={() => onNavigateSection("faq-section")}
+            className="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors whitespace-nowrap cursor-pointer"
+          >
+            FAQ
           </button>
         </nav>
 
