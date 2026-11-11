@@ -37,10 +37,6 @@ import { BulkDashboard } from "@/components/BulkDashboard";
 import { COURIER_MAP, autoDetectCourier } from "@/lib/couriers";
 import { TrackingResult } from "@/app/api/track/route";
 
-// Module-level token tracker to avoid mutating refs across render/callback boundaries
-let moduleLastAppliedToken = "";
-let moduleIsInitialUrlHandled = false;
-
 function TrackingAppContent() {
   const searchParams = useSearchParams();
 
@@ -77,7 +73,6 @@ function TrackingAppContent() {
 
   // Share Modal state
   const [isShareModalOpen, setIsShareModalOpen] = useState(false);
-  const [copiedLink, setCopiedLink] = useState(false);
 
   // Dark mode
   const [isDark, setIsDark] = useState(false);
@@ -85,16 +80,16 @@ function TrackingAppContent() {
   // Active view: single tracker vs bulk dashboard
   const [activeView, setActiveView] = useState<"single" | "bulk">("single");
 
-  // Track Next Order Action: Clears active results/errors, resets URL, and smoothly focuses input
+  // Track Next Order Action: Clears active results/errors and smoothly focuses input
   const handleTrackNextOrder = useCallback(() => {
     setActiveResult(null);
     setNotTrackableInfo(null);
     setErrorMsg(null);
-    moduleLastAppliedToken = "";
 
     try {
-      const cleanUrl = new URL(window.location.origin);
-      window.history.replaceState(null, "", cleanUrl.toString());
+      if (window.location.search || window.location.pathname !== "/") {
+        window.history.replaceState(null, "", "/");
+      }
     } catch (e) {
       console.warn("Could not replace history state:", e);
     }
@@ -218,25 +213,28 @@ function TrackingAppContent() {
       setErrorMsg(null);
       setNotTrackableInfo(null);
 
+      // Ensure browser URL stays strictly clean (no ?token=, ?t=, ?c=, ?d= parameters)
       try {
-        const url = new URL("/api/track", window.location.origin);
-        // Add cache buster timestamp to ensure fresh data every single time
-        url.searchParams.set("_t", Date.now().toString());
-
-        if (cleanToken) {
-          url.searchParams.set("token", cleanToken);
-        } else {
-          url.searchParams.set("t", cleanNum);
-          if (courierId) {
-            url.searchParams.set("c", courierId);
-          }
+        if (window.location.search || window.location.pathname !== "/") {
+          window.history.replaceState(null, "", "/");
         }
+      } catch {
+        // ignore history state errors
+      }
 
-        const res = await fetch(url.toString(), {
+      try {
+        const res = await fetch("/api/track", {
+          method: "POST",
           cache: "no-store",
           headers: {
+            "Content-Type": "application/json",
             "Cache-Control": "no-cache",
           },
+          body: JSON.stringify({
+            trackingNumber: cleanNum,
+            courierId: courierId || "",
+            token: cleanToken || undefined,
+          }),
         });
         const json = await res.json();
 
@@ -270,20 +268,6 @@ function TrackingAppContent() {
         setActiveResult(json.data);
         setNotTrackableInfo(null);
 
-        // Update URL quietly with tamper-protected token without triggering re-render cascades
-        if (json.data?.secureToken) {
-          moduleLastAppliedToken = json.data.secureToken;
-
-          const newUrl = new URL(window.location.href);
-          if (newUrl.searchParams.get("token") !== json.data.secureToken) {
-            newUrl.searchParams.set("token", json.data.secureToken);
-            newUrl.searchParams.delete("t");
-            newUrl.searchParams.delete("c");
-            newUrl.searchParams.delete("d");
-            window.history.replaceState(null, "", newUrl.toString());
-          }
-        }
-
         // Only scroll if the user explicitly submitted from UI
         if (shouldScroll) {
           setTimeout(() => {
@@ -303,51 +287,18 @@ function TrackingAppContent() {
     []
   );
 
-
-
-  // Check URL query parameters on initial mount only, or when user navigates to a new URL
+  // Keep URL strictly clean on mount and prevent unauthorized third-party URL query usage
   useEffect(() => {
-    // If the URL already has the token that performSearch just set, ignore to prevent re-fetch loop
-    const token = searchParams.get("token");
-    if (token) {
-      if (token === moduleLastAppliedToken) {
-        return;
-      }
-      moduleLastAppliedToken = token;
-      const timer = setTimeout(() => {
-        performSearch("", "", token, false);
-      }, 0);
-      return () => clearTimeout(timer);
-    }
-
-    // Only process raw query params (d or t) on initial page load
-    if (moduleIsInitialUrlHandled) return;
-    moduleIsInitialUrlHandled = true;
-
-    const encodedPayload = searchParams.get("d");
-    if (encodedPayload) {
-      try {
-        const decoded = JSON.parse(atob(encodedPayload));
-        if (decoded.t) {
-          const timer = setTimeout(() => {
-            performSearch(decoded.t, decoded.c, undefined, false);
-          }, 0);
-          return () => clearTimeout(timer);
+    if (typeof window !== "undefined") {
+      if (window.location.search || window.location.pathname !== "/") {
+        try {
+          window.history.replaceState(null, "", "/");
+        } catch {
+          // ignore
         }
-      } catch (e) {
-        console.warn("Failed to decode base64 d parameter:", e);
       }
     }
-
-    const t = searchParams.get("t") || searchParams.get("tracking");
-    const c = searchParams.get("c") || searchParams.get("courier");
-    if (t) {
-      const timer = setTimeout(() => {
-        performSearch(t, c || undefined, undefined, false);
-      }, 0);
-      return () => clearTimeout(timer);
-    }
-  }, [searchParams, performSearch]);
+  }, [searchParams]);
 
   // Watchlist helpers
   const handleAddToWatchlist = () => {
@@ -401,7 +352,14 @@ function TrackingAppContent() {
       const updatedList: WatchlistItem[] = [];
       for (const item of watchlist) {
         try {
-          const res = await fetch(`/api/track?t=${item.trackingNumber}&c=${item.courierId}`);
+          const res = await fetch("/api/track", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              trackingNumber: item.trackingNumber,
+              courierId: item.courierId,
+            }),
+          });
           const json = await res.json();
           if (json.success && json.data) {
             updatedList.push({
@@ -421,15 +379,6 @@ function TrackingAppContent() {
       localStorage.setItem("trackflow_watchlist", JSON.stringify(updatedList));
     } finally {
       setIsRefreshingWatchlist(false);
-    }
-  };
-
-  const handleCopyLink = () => {
-    if (typeof navigator !== "undefined" && activeResult) {
-      const secureUrl = `${window.location.origin}/tracking-result?token=${activeResult.secureToken}`;
-      navigator.clipboard.writeText(secureUrl);
-      setCopiedLink(true);
-      setTimeout(() => setCopiedLink(false), 2000);
     }
   };
 

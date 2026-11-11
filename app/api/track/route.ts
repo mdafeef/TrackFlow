@@ -644,145 +644,65 @@ const VERIFIED_REAL_SAMPLES: Record<string, Partial<TrackingResult>> = {
   },
 };
 
-export async function GET(req: NextRequest) {
-  try {
-    const { searchParams } = new URL(req.url);
-    const token = searchParams.get("token");
-    let trackingNumber = (searchParams.get("t") || searchParams.get("tracking") || "").trim().toUpperCase();
-    let courierId = (searchParams.get("c") || searchParams.get("courier") || "").trim().toLowerCase();
+async function processTrackingQuery(
+  rawTrackingNumber: string,
+  rawCourierId: string,
+  token?: string | null,
+  untrackedFlag?: boolean
+) {
+  let trackingNumber = (rawTrackingNumber || "").trim().toUpperCase();
+  let courierId = (rawCourierId || "").trim().toLowerCase();
 
-    // If access is requested via secure token, verify its cryptographic signature
-    if (token) {
-      const tokenCheck = verifySecureTrackingToken(token);
-      if (!tokenCheck.valid || !tokenCheck.trackingNumber) {
-        return NextResponse.json(
-          {
-            error: "Security Check Failed: This tracking link is invalid or has been modified. Tampering with tracking links is prevented.",
-            code: "LINK_TAMPERED",
-          },
-          { status: 403 }
-        );
-      }
-      trackingNumber = tokenCheck.trackingNumber;
-      courierId = tokenCheck.courierId || courierId;
-    }
-
-    if (!trackingNumber) {
-      return NextResponse.json(
-        { error: "Tracking number is required", code: "MISSING_NUMBER" },
-        { status: 400 }
-      );
-    }
-
-    // Auto-detect carrier if courierId is missing or unknown
-    let courier = COURIER_MAP[courierId];
-    if (!courier) {
-      courier = autoDetectCourier(trackingNumber) || COURIER_LIST[0];
-      courierId = courier.id;
-    }
-
-    const responseHeaders = {
-      "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
-    };
-
-    // Check if the tracking number is explicitly untrackable / pending / invalid format
-    const isUntrackable =
-      trackingNumber.length < 6 ||
-      /^0+$/.test(trackingNumber) ||
-      /^[A-Z]{2}0{9}[A-Z]{2}$/i.test(trackingNumber) ||
-      /^(NOTRACK|UNTRACK|PENDING|INVALID|DUMMY|TEST)/i.test(trackingNumber) ||
-      searchParams.get("untracked") === "true";
-
-    if (isUntrackable) {
+  // If access is requested via secure token, verify its cryptographic signature
+  if (token) {
+    const tokenCheck = verifySecureTrackingToken(token);
+    if (!tokenCheck.valid || !tokenCheck.trackingNumber) {
       return NextResponse.json(
         {
-          success: false,
-          notTrackable: true,
-          code: "NOT_TRACKABLE_YET",
-          error: "Your parcel is not trackable yet.",
-          trackingNumber,
-          courier: {
-            id: courier.id,
-            name: courier.name,
-            shortName: courier.shortName,
-            supportPhone: courier.supportPhone,
-            supportEmail: courier.supportEmail,
-          },
-          message:
-            "Your parcel is not trackable yet. It may take up to 24-48 hours for the carrier to update the manifest, or please verify the consignment number.",
+          error:
+            "Security Check Failed: This tracking request is invalid or has been modified.",
+          code: "LINK_TAMPERED",
         },
-        { headers: responseHeaders }
+        { status: 403 }
       );
     }
+    trackingNumber = tokenCheck.trackingNumber;
+    courierId = tokenCheck.courierId || courierId;
+  }
 
-    const secureToken = generateSecureTrackingToken(trackingNumber, courierId);
+  if (!trackingNumber) {
+    return NextResponse.json(
+      { error: "Tracking number is required", code: "MISSING_NUMBER" },
+      { status: 400 }
+    );
+  }
 
-    // 1. Attempt live real-time query first
-    try {
-      const liveRaw = await fetchLiveTracking(trackingNumber, courierId);
-      if (liveRaw && liveRaw.status === "OK" && liveRaw.data) {
-        const details = Array.isArray(liveRaw.data.details) ? liveRaw.data.details : [];
-        const booking = liveRaw.data.booking || {};
-        const hasRealEvents = details.length > 0;
-        const hasRealBooking = Boolean(
-          booking.booked_at ||
-            booking.booking_date ||
-            booking.origin_city ||
-            booking.destination_office_name ||
-            booking.origin_office_name
-        );
+  // Auto-detect carrier if courierId is missing or unknown
+  let courier = COURIER_MAP[courierId];
+  if (!courier) {
+    courier = autoDetectCourier(trackingNumber) || COURIER_LIST[0];
+    courierId = courier.id;
+  }
 
-        // ONLY treat as success if real tracking checkpoints or booking records exist
-        if (hasRealEvents || hasRealBooking) {
-          const normalized = normalizeLiveTrackingData(liveRaw, trackingNumber, courier);
-          normalized.secureToken = secureToken;
-          return NextResponse.json(
-            { success: true, data: normalized, live: true },
-            { headers: responseHeaders }
-          );
-        }
-      }
-    } catch (liveErr) {
-      console.warn("Live socket fetch attempt notice:", (liveErr as any)?.message || liveErr);
-    }
+  const responseHeaders = {
+    "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+  };
 
-    // 2. Check verified real sample datasets
-    if (VERIFIED_REAL_SAMPLES[trackingNumber]) {
-      const sample = VERIFIED_REAL_SAMPLES[trackingNumber];
-      const result: TrackingResult = {
-        trackingNumber,
-        courier: {
-          id: courier.id,
-          name: courier.name,
-          shortName: courier.shortName,
-          label: courier.label,
-          badgeColor: courier.badgeColor,
-          supportPhone: courier.supportPhone,
-          supportEmail: courier.supportEmail,
-          avgTransitDays: courier.avgTransitDays,
-        },
-        overallStatus: sample.overallStatus!,
-        estimatedDelivery: sample.estimatedDelivery!,
-        bookingDetails: sample.bookingDetails!,
-        activities: sample.activities!,
-        routeMilestones: sample.routeMilestones!,
-        payloadHash: Buffer.from(JSON.stringify({ t: trackingNumber, c: courierId })).toString("base64"),
-        secureToken,
-      };
-      return NextResponse.json(
-        { success: true, data: result, verified: true },
-        { headers: responseHeaders }
-      );
-    }
+  // Check if the tracking number is explicitly untrackable / pending / invalid format
+  const isUntrackable =
+    trackingNumber.length < 6 ||
+    /^0+$/.test(trackingNumber) ||
+    /^[A-Z]{2}0{9}[A-Z]{2}$/i.test(trackingNumber) ||
+    /^(NOTRACK|UNTRACK|PENDING|INVALID|DUMMY|TEST)/i.test(trackingNumber) ||
+    untrackedFlag === true;
 
-    // 3. If live carrier network has no record and no verified manifest exists:
-    // Do NOT generate fake checkpoints, fake routes, or assumed details.
+  if (isUntrackable) {
     return NextResponse.json(
       {
         success: false,
         notTrackable: true,
-        code: "NO_DATA_AVAILABLE",
-        error: "No tracking details available for this consignment number.",
+        code: "NOT_TRACKABLE_YET",
+        error: "Your parcel is not trackable yet.",
         trackingNumber,
         courierName: courier.name,
         courierId: courier.id,
@@ -794,12 +714,144 @@ export async function GET(req: NextRequest) {
           supportEmail: courier.supportEmail,
         },
         message:
-          `No tracking records or manifest data found for consignment #${trackingNumber} with ${courier.name}. If this package was dispatched recently, please allow 12–24 hours for initial scan logs to be uploaded by the carrier, or verify the consignment number.`,
+          "Your parcel is not trackable yet. It may take up to 24-48 hours for the carrier to update the manifest, or please verify the consignment number.",
       },
       { headers: responseHeaders }
     );
+  }
+
+  const secureToken = generateSecureTrackingToken(trackingNumber, courierId);
+
+  // 1. Attempt live real-time query first
+  try {
+    const liveRaw = await fetchLiveTracking(trackingNumber, courierId);
+    if (liveRaw && liveRaw.status === "OK" && liveRaw.data) {
+      const details = Array.isArray(liveRaw.data.details) ? liveRaw.data.details : [];
+      const booking = liveRaw.data.booking || {};
+      const hasRealEvents = details.length > 0;
+      const hasRealBooking = Boolean(
+        booking.booked_at ||
+          booking.booking_date ||
+          booking.origin_city ||
+          booking.destination_office_name ||
+          booking.origin_office_name
+      );
+
+      // ONLY treat as success if real tracking checkpoints or booking records exist
+      if (hasRealEvents || hasRealBooking) {
+        const normalized = normalizeLiveTrackingData(liveRaw, trackingNumber, courier);
+        normalized.secureToken = secureToken;
+        return NextResponse.json(
+          { success: true, data: normalized, live: true },
+          { headers: responseHeaders }
+        );
+      }
+    }
+  } catch (liveErr) {
+    console.warn("Live socket fetch attempt notice:", (liveErr as any)?.message || liveErr);
+  }
+
+  // 2. Check verified real sample datasets
+  if (VERIFIED_REAL_SAMPLES[trackingNumber]) {
+    const sample = VERIFIED_REAL_SAMPLES[trackingNumber];
+    const result: TrackingResult = {
+      trackingNumber,
+      courier: {
+        id: courier.id,
+        name: courier.name,
+        shortName: courier.shortName,
+        label: courier.label,
+        badgeColor: courier.badgeColor,
+        supportPhone: courier.supportPhone,
+        supportEmail: courier.supportEmail,
+        avgTransitDays: courier.avgTransitDays,
+      },
+      overallStatus: sample.overallStatus!,
+      estimatedDelivery: sample.estimatedDelivery!,
+      bookingDetails: sample.bookingDetails!,
+      activities: sample.activities!,
+      routeMilestones: sample.routeMilestones!,
+      payloadHash: Buffer.from(JSON.stringify({ t: trackingNumber, c: courierId })).toString("base64"),
+      secureToken,
+    };
+    return NextResponse.json(
+      { success: true, data: result, verified: true },
+      { headers: responseHeaders }
+    );
+  }
+
+  // 3. If live carrier network has no record and no verified manifest exists:
+  // Do NOT generate fake checkpoints, fake routes, or assumed details.
+  return NextResponse.json(
+    {
+      success: false,
+      notTrackable: true,
+      code: "NO_DATA_AVAILABLE",
+      error: "No tracking details available for this consignment number.",
+      trackingNumber,
+      courierName: courier.name,
+      courierId: courier.id,
+      courier: {
+        id: courier.id,
+        name: courier.name,
+        shortName: courier.shortName,
+        supportPhone: courier.supportPhone,
+        supportEmail: courier.supportEmail,
+      },
+      message: `No tracking records or manifest data found for consignment #${trackingNumber} with ${courier.name}. If this package was dispatched recently, please allow 12–24 hours for initial scan logs to be uploaded by the carrier, or verify the consignment number.`,
+    },
+    { headers: responseHeaders }
+  );
+}
+
+export async function POST(req: NextRequest) {
+  try {
+    // Reject cross-site third-party requests
+    const secFetchSite = req.headers.get("sec-fetch-site");
+    if (secFetchSite === "cross-site") {
+      return NextResponse.json(
+        { error: "Unauthorized third-party request blocked.", code: "FORBIDDEN_ORIGIN" },
+        { status: 403 }
+      );
+    }
+
+    const body = await req.json();
+    return await processTrackingQuery(
+      body.trackingNumber || body.t || "",
+      body.courierId || body.c || "",
+      body.token || null,
+      Boolean(body.untracked)
+    );
   } catch (err: any) {
-    console.error("Tracking API error:", err);
+    console.error("Tracking POST API error:", err);
+    return NextResponse.json(
+      { error: "Failed to fetch tracking details. Please try again.", code: "SERVER_ERROR" },
+      { status: 500 }
+    );
+  }
+}
+
+export async function GET(req: NextRequest) {
+  try {
+    // Block direct browser navigation or cross-site third-party scraping
+    const secFetchSite = req.headers.get("sec-fetch-site");
+    const secFetchMode = req.headers.get("sec-fetch-mode");
+    if (secFetchSite === "cross-site" || secFetchMode === "navigate") {
+      return NextResponse.json(
+        { error: "Direct URL query access is disabled to prevent unauthorized third-party usage.", code: "DIRECT_URL_DISABLED" },
+        { status: 403 }
+      );
+    }
+
+    const { searchParams } = new URL(req.url);
+    return await processTrackingQuery(
+      searchParams.get("t") || searchParams.get("tracking") || "",
+      searchParams.get("c") || searchParams.get("courier") || "",
+      searchParams.get("token"),
+      searchParams.get("untracked") === "true"
+    );
+  } catch (err: any) {
+    console.error("Tracking GET API error:", err);
     return NextResponse.json(
       { error: "Failed to fetch tracking details. Please try again.", code: "SERVER_ERROR" },
       { status: 500 }

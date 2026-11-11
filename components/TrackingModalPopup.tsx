@@ -117,14 +117,23 @@ export function TrackingModalPopup({
     setIsExpandedAll((prev) => !prev);
   };
 
-  // Lock background scroll when modal is open
+  // Lock background scroll and hide behind-page scrollbar when modal is open
   useEffect(() => {
     if (isOpen) {
+      document.documentElement.classList.add("modal-scroll-lock");
+      document.body.classList.add("modal-scroll-lock");
+      document.documentElement.style.overflow = "hidden";
       document.body.style.overflow = "hidden";
     } else {
+      document.documentElement.classList.remove("modal-scroll-lock");
+      document.body.classList.remove("modal-scroll-lock");
+      document.documentElement.style.overflow = "";
       document.body.style.overflow = "";
     }
     return () => {
+      document.documentElement.classList.remove("modal-scroll-lock");
+      document.body.classList.remove("modal-scroll-lock");
+      document.documentElement.style.overflow = "";
       document.body.style.overflow = "";
     };
   }, [isOpen]);
@@ -133,8 +142,8 @@ export function TrackingModalPopup({
 
   const handleCopyLink = () => {
     if (typeof navigator !== "undefined" && trackingResult) {
-      const url = `${window.location.origin}/?token=${trackingResult.secureToken}`;
-      navigator.clipboard.writeText(url);
+      const summary = `TrackFlow Consignment #${trackingResult.trackingNumber} (${trackingResult.courier.name}) — Status: ${trackingResult.overallStatus.phrase} (${trackingResult.overallStatus.timestamp})`;
+      navigator.clipboard.writeText(summary);
       setCopiedLink(true);
       setTimeout(() => setCopiedLink(false), 2000);
     }

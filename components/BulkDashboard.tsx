@@ -37,6 +37,15 @@ import {
   CameraOff,
 } from "lucide-react";
 import * as XLSX from "xlsx";
+import {
+  MultiFormatReader,
+  BarcodeFormat,
+  DecodeHintType,
+  HTMLCanvasElementLuminanceSource,
+  BinaryBitmap,
+  HybridBinarizer,
+} from "@zxing/library";
+import jsQR from "jsqr";
 import { autoDetectCourier, COURIER_LIST, COURIER_MAP } from "@/lib/couriers";
 
 export interface BulkShipment {
@@ -277,14 +286,20 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [cameraGuideMode, setCameraGuideMode] = useState<"barcode" | "qr" | "both">("both");
   const [cameraError, setCameraError] = useState<string | null>(null);
+  const [cameraScanSuccess, setCameraScanSuccess] = useState<{ code: string; carrier: string } | null>(null);
   const intakeInputRef = useRef<HTMLInputElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const cameraStreamRef = useRef<MediaStream | null>(null);
+  const scanCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const lastScannedRef = useRef<{ code: string; timestamp: number }>({ code: "", timestamp: 0 });
+  const scanSuccessTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   // Batch Wise Ingestion state
   const [selectedBatchId, setSelectedBatchId] = useState<string>("all");
   const [editingBatchId, setEditingBatchId] = useState<string | null>(null);
   const [editingBatchName, setEditingBatchName] = useState("");
+  const [isBatchManagerOpen, setIsBatchManagerOpen] = useState(false);
+  const [batchPendingDeleteId, setBatchPendingDeleteId] = useState<string | null>(null);
 
   // Backup & Restore Review in Separate state
   const [isBackupModalOpen, setIsBackupModalOpen] = useState(false);
@@ -303,6 +318,8 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
   // Upload & Preview Modal state
   const [previewShipments, setPreviewShipments] = useState<BulkShipment[] | null>(null);
   const [previewFileName, setPreviewFileName] = useState<string>("");
+  const [previewBatchName, setPreviewBatchName] = useState<string>("");
+  const [bulkPasteText, setBulkPasteText] = useState<string>("");
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploadSuccessMsg, setUploadSuccessMsg] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
@@ -327,10 +344,40 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
     }
   };
 
-  // Clean up auto-close timer on component unmount
+  // Lock background page scroll and hide behind-page scrollbar when any modal/popup is open
+  const isAnyModalOpen =
+    isSettingsOpen ||
+    isAddConsignmentsModalOpen ||
+    isUploadModalOpen ||
+    isBackupModalOpen ||
+    isBulkDeleteModalOpen ||
+    isDeleteExportedModalOpen;
+
+  useEffect(() => {
+    if (isAnyModalOpen) {
+      document.documentElement.classList.add("modal-scroll-lock");
+      document.body.classList.add("modal-scroll-lock");
+      document.documentElement.style.overflow = "hidden";
+      document.body.style.overflow = "hidden";
+    } else {
+      document.documentElement.classList.remove("modal-scroll-lock");
+      document.body.classList.remove("modal-scroll-lock");
+      document.documentElement.style.overflow = "";
+      document.body.style.overflow = "";
+    }
+    return () => {
+      document.documentElement.classList.remove("modal-scroll-lock");
+      document.body.classList.remove("modal-scroll-lock");
+      document.documentElement.style.overflow = "";
+      document.body.style.overflow = "";
+    };
+  }, [isAnyModalOpen]);
+
+  // Clean up timers on component unmount
   useEffect(() => {
     return () => {
       if (autoCloseTimerRef.current) clearTimeout(autoCloseTimerRef.current);
+      if (scanSuccessTimerRef.current) clearTimeout(scanSuccessTimerRef.current);
     };
   }, []);
 
@@ -653,7 +700,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
   };
 
   // Toggle Camera Viewfinder
-  const handleToggleCamera = async () => {
+  const handleToggleCamera = () => {
     if (isCameraActive) {
       if (cameraStreamRef.current) {
         cameraStreamRef.current.getTracks().forEach((t) => t.stop());
@@ -661,26 +708,275 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
       }
       setIsCameraActive(false);
       setCameraError(null);
+      setCameraScanSuccess(null);
     } else {
       setCameraError(null);
+      setCameraScanSuccess(null);
       setIsCameraActive(true);
-      try {
-        if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-          const stream = await navigator.mediaDevices.getUserMedia({
-            video: { facingMode: "environment" },
-          });
-          cameraStreamRef.current = stream;
-          if (videoRef.current) {
-            videoRef.current.srcObject = stream;
-            videoRef.current.play().catch(() => {});
-          }
-        }
-      } catch (err: unknown) {
-        console.warn("Camera access fallback to reticle simulator:", err);
-        setCameraError("Camera permission not granted or device camera unavailable. Use targeting reticle and sample scans below.");
-      }
     }
   };
+
+  // Extract clean AWB / Consignment ID from raw barcode or QR payload (handles URLs, JSON, or plain codes)
+  const extractCleanScannedCode = useCallback((rawValue: string): string => {
+    const trimmed = rawValue.trim();
+    if (!trimmed) return "";
+
+    // If QR contains a URL with tracking parameter or path segment
+    if (/^https?:\/\//i.test(trimmed)) {
+      try {
+        const url = new URL(trimmed);
+        const paramKeys = ["awb", "track", "tracking", "id", "consignment", "number", "code", "q"];
+        for (const key of paramKeys) {
+          const val = url.searchParams.get(key) || url.searchParams.get(key.toUpperCase());
+          if (val && val.trim().length >= 4) {
+            return val.trim().toUpperCase();
+          }
+        }
+        const segments = url.pathname.split("/").filter(Boolean);
+        const lastSeg = segments[segments.length - 1];
+        if (lastSeg && /^[A-Z0-9-]{5,30}$/i.test(lastSeg)) {
+          return lastSeg.toUpperCase();
+        }
+      } catch {
+        // Fallback to regex extraction below
+      }
+    }
+
+    // Check if JSON string
+    if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        const candidate =
+          parsed.trackingNumber || parsed.awb || parsed.consignment || parsed.id || parsed.code;
+        if (candidate && String(candidate).trim().length >= 4) {
+          return String(candidate).trim().toUpperCase();
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    // Standard alphanumeric barcode / QR string
+    const cleaned = trimmed.replace(/[^a-zA-Z0-9-_]/g, "").toUpperCase();
+    return cleaned.length >= 4 ? cleaned : trimmed.toUpperCase();
+  }, []);
+
+  // Real-time Camera Stream + Multi-Engine Barcode & QR Code Decoder Loop
+  useEffect(() => {
+    if (!isCameraActive) return;
+
+    let isCancelled = false;
+    let scanIntervalId: NodeJS.Timeout | null = null;
+
+    // Set up ZXing MultiFormatReader with both 1D Barcodes and 2D QR formats
+    const zxingReader = new MultiFormatReader();
+    const hints = new Map();
+    const formats =
+      cameraGuideMode === "barcode"
+        ? [
+            BarcodeFormat.CODE_128,
+            BarcodeFormat.CODE_39,
+            BarcodeFormat.CODE_93,
+            BarcodeFormat.CODABAR,
+            BarcodeFormat.EAN_13,
+            BarcodeFormat.EAN_8,
+            BarcodeFormat.ITF,
+            BarcodeFormat.UPC_A,
+            BarcodeFormat.UPC_E,
+          ]
+        : cameraGuideMode === "qr"
+        ? [BarcodeFormat.QR_CODE, BarcodeFormat.DATA_MATRIX, BarcodeFormat.PDF_417, BarcodeFormat.AZTEC]
+        : [
+            BarcodeFormat.QR_CODE,
+            BarcodeFormat.CODE_128,
+            BarcodeFormat.CODE_39,
+            BarcodeFormat.CODE_93,
+            BarcodeFormat.CODABAR,
+            BarcodeFormat.EAN_13,
+            BarcodeFormat.EAN_8,
+            BarcodeFormat.ITF,
+            BarcodeFormat.UPC_A,
+            BarcodeFormat.UPC_E,
+            BarcodeFormat.DATA_MATRIX,
+            BarcodeFormat.PDF_417,
+            BarcodeFormat.AZTEC,
+          ];
+    hints.set(DecodeHintType.POSSIBLE_FORMATS, formats);
+    hints.set(DecodeHintType.TRY_HARDER, true);
+    zxingReader.setHints(hints);
+
+    // Optional Native BarcodeDetector if browser supports it
+    let nativeDetector: any = null;
+    if (typeof window !== "undefined" && "BarcodeDetector" in window) {
+      try {
+        const NativeBarcodeDetector = (window as any).BarcodeDetector;
+        const nativeFormats =
+          cameraGuideMode === "barcode"
+            ? ["code_128", "code_39", "code_93", "codabar", "ean_13", "ean_8", "itf", "upc_a", "upc_e"]
+            : cameraGuideMode === "qr"
+            ? ["qr_code", "data_matrix", "pdf417", "aztec"]
+            : [
+                "qr_code",
+                "code_128",
+                "code_39",
+                "code_93",
+                "codabar",
+                "ean_13",
+                "ean_8",
+                "itf",
+                "upc_a",
+                "upc_e",
+                "data_matrix",
+                "pdf417",
+                "aztec",
+              ];
+        nativeDetector = new NativeBarcodeDetector({ formats: nativeFormats });
+      } catch {
+        nativeDetector = null;
+      }
+    }
+
+    const handleDetectedValue = (rawVal: string) => {
+      const code = extractCleanScannedCode(rawVal);
+      if (!code || code.length < 4) return;
+
+      const now = Date.now();
+      // Prevent duplicate rapid scans of the exact same code within 2.2 seconds
+      if (
+        lastScannedRef.current.code === code &&
+        now - lastScannedRef.current.timestamp < 2200
+      ) {
+        return;
+      }
+      lastScannedRef.current = { code, timestamp: now };
+
+      const detectedCarrier = autoDetectCourier(code);
+      if (!isAutoNextEnabled) {
+        setIntakeAwb(code);
+      }
+      handleStageConsignment(code, detectedCarrier?.id);
+
+      // Trigger Quick Visual Success Mark inside Camera Viewfinder
+      setCameraScanSuccess({
+        code,
+        carrier: detectedCarrier?.shortName || detectedCarrier?.name || "Auto-Detected",
+      });
+      if (scanSuccessTimerRef.current) clearTimeout(scanSuccessTimerRef.current);
+      scanSuccessTimerRef.current = setTimeout(() => {
+        setCameraScanSuccess(null);
+      }, 1400);
+    };
+
+    const startCameraAndScanner = async () => {
+      try {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          setCameraError("Camera access is not supported in this browser.");
+          return;
+        }
+
+        // Reuse existing stream if already open, otherwise request environment camera
+        let stream = cameraStreamRef.current;
+        if (!stream || !stream.active) {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+              facingMode: { ideal: "environment" },
+              width: { ideal: 1280 },
+              height: { ideal: 720 },
+            },
+            audio: false,
+          });
+        }
+
+        if (isCancelled) {
+          stream.getTracks().forEach((t) => t.stop());
+          return;
+        }
+
+        cameraStreamRef.current = stream;
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          await videoRef.current.play().catch(() => {});
+        }
+
+        if (!scanCanvasRef.current) {
+          scanCanvasRef.current = document.createElement("canvas");
+        }
+
+        // Continuous frame decoding every 180ms
+        scanIntervalId = setInterval(async () => {
+          if (isCancelled || !videoRef.current || !scanCanvasRef.current) return;
+          const video = videoRef.current;
+          if (video.readyState < 2 || video.videoWidth === 0 || video.videoHeight === 0) return;
+
+          const canvas = scanCanvasRef.current;
+          const maxDim = 640;
+          const scale = Math.min(1, maxDim / Math.max(video.videoWidth, video.videoHeight));
+          const w = Math.max(1, Math.floor(video.videoWidth * scale));
+          const h = Math.max(1, Math.floor(video.videoHeight * scale));
+
+          if (canvas.width !== w) canvas.width = w;
+          if (canvas.height !== h) canvas.height = h;
+
+          const ctx = canvas.getContext("2d", { willReadFrequently: true });
+          if (!ctx) return;
+          ctx.drawImage(video, 0, 0, w, h);
+
+          // 1. Try Native BarcodeDetector first if available
+          if (nativeDetector) {
+            try {
+              const detected = await nativeDetector.detect(canvas);
+              if (detected && detected.length > 0 && detected[0].rawValue) {
+                handleDetectedValue(detected[0].rawValue);
+                return;
+              }
+            } catch {
+              // Fall through to jsQR and ZXing
+            }
+          }
+
+          // 2. Try jsQR for fast 2D QR code detection (when mode is 'qr' or 'both')
+          if (cameraGuideMode !== "barcode") {
+            try {
+              const imageData = ctx.getImageData(0, 0, w, h);
+              const qrResult = jsQR(imageData.data, w, h, {
+                inversionAttempts: "attemptBoth",
+              });
+              if (qrResult && qrResult.data) {
+                handleDetectedValue(qrResult.data);
+                return;
+              }
+            } catch {
+              // Fall through to ZXing
+            }
+          }
+
+          // 3. Try ZXing MultiFormatReader (1D Barcodes + 2D QR Codes)
+          try {
+            const luminanceSource = new HTMLCanvasElementLuminanceSource(canvas);
+            const binaryBitmap = new BinaryBitmap(new HybridBinarizer(luminanceSource));
+            const result = zxingReader.decodeWithState(binaryBitmap);
+            if (result && result.getText()) {
+              handleDetectedValue(result.getText());
+              return;
+            }
+          } catch {
+            // No code in this frame; continue scanning next frame
+          }
+        }, 180);
+      } catch {
+        if (!isCancelled) {
+          setCameraError("Camera permission not granted or camera unavailable on this device.");
+        }
+      }
+    };
+
+    startCameraAndScanner();
+
+    return () => {
+      isCancelled = true;
+      if (scanIntervalId) clearInterval(scanIntervalId);
+    };
+  }, [isCameraActive, cameraGuideMode, isAutoNextEnabled, extractCleanScannedCode, handleStageConsignment]);
 
   // Close Add Consignments Modal
   const handleCloseAddConsignmentsModal = () => {
@@ -689,6 +985,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
       cameraStreamRef.current = null;
     }
     setIsCameraActive(false);
+    setCameraScanSuccess(null);
     setIsAddConsignmentsModalOpen(false);
     setIsIntakeCourierDropdownOpen(false);
     setIsIntakeStatusDropdownOpen(false);
@@ -706,7 +1003,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
     }
   }, [isAddConsignmentsModalOpen]);
 
-  // File Format Validation & Preview for Excel / Google Sheet files
+  // File Format Validation & Preview for Excel / CSV / Google Sheet files
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setUploadError(null);
     setUploadSuccessMsg(null);
@@ -714,34 +1011,26 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    // Security Check 1: File Extension Verification
+    // Security Check 1: File Extension Verification (.xlsx, .xls, .csv)
     const fileName = file.name.toLowerCase();
-    const isValidExtension = fileName.endsWith(".xlsx") || fileName.endsWith(".xls");
-
-    // Security Check 2: MIME Type Verification
-    const validMimes = [
-      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-      "application/vnd.ms-excel",
-      "application/wps-office.xlsx",
-      "application/octet-stream", // Fallback for some OS file pickers
-    ];
-    const isValidMime = validMimes.includes(file.type) || file.type === "";
+    const isValidExtension =
+      fileName.endsWith(".xlsx") || fileName.endsWith(".xls") || fileName.endsWith(".csv");
 
     // Reject dangerous file formats (executables, scripts, archives)
-    const dangerousExtensions = [".exe", ".bat", ".cmd", ".sh", ".vbs", ".js", ".zip", ".tar", ".gz", ".pdf", ".csv", ".py", ".bin"];
+    const dangerousExtensions = [".exe", ".bat", ".cmd", ".sh", ".vbs", ".js", ".zip", ".tar", ".gz", ".pdf", ".py", ".bin"];
     const isDangerous = dangerousExtensions.some((ext) => fileName.endsWith(ext));
 
     if (!isValidExtension || isDangerous) {
       setUploadError(
-        "Invalid file format: Please upload a genuine Microsoft Excel (.xlsx, .xls) or exported Google Sheets workbook."
+        "Invalid file format: Please upload a Microsoft Excel (.xlsx, .xls), CSV (.csv), or exported Google Sheets file."
       );
       if (fileInputRef.current) fileInputRef.current.value = "";
       return;
     }
 
-    // Security Check 3: File Size Limit (Max 5MB)
+    // Security Check 2: File Size Limit (Max 5MB)
     if (file.size > 5 * 1024 * 1024) {
-      setUploadError("File size exceeds 5MB limit. Please upload an Excel file under 5MB.");
+      setUploadError("File size exceeds 5MB limit. Please upload a spreadsheet under 5MB.");
       if (fileInputRef.current) fileInputRef.current.value = "";
       return;
     }
@@ -756,31 +1045,42 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
 
         const firstSheetName = workbook.SheetNames[0];
         if (!firstSheetName) {
-          throw new Error("No worksheets found in this Excel workbook.");
+          throw new Error("No worksheets found in this workbook.");
         }
 
         const worksheet = workbook.Sheets[firstSheetName];
         const rows = XLSX.utils.sheet_to_json<unknown[]>(worksheet, { header: 1 });
 
-        if (rows.length < 2) {
-          throw new Error("The Excel spreadsheet contains no data rows. Please add tracking numbers below the header row.");
+        if (rows.length < 1) {
+          throw new Error("The spreadsheet contains no rows. Please add tracking numbers.");
         }
 
-        // Header row
-        const firstRow = rows[0] || [];
-        const headerRow = (firstRow as unknown[]).map((h) => String(h || "").toLowerCase().trim());
-        let awbColIdx = headerRow.findIndex((h) => h.includes("track") || h.includes("awb") || h.includes("consign") || h.includes("number"));
-        if (awbColIdx === -1) {
-          // Fallback to first column
-          awbColIdx = 0;
-        }
+        // Determine if row 0 is a header row or data row
+        const firstRow = (rows[0] || []) as unknown[];
+        const headerRow = firstRow.map((h) => String(h || "").toLowerCase().trim());
+        const hasHeader = headerRow.some(
+          (h) =>
+            h.includes("track") ||
+            h.includes("awb") ||
+            h.includes("consign") ||
+            h.includes("number") ||
+            h.includes("courier") ||
+            h.includes("carrier") ||
+            h.includes("recipient")
+        );
+
+        let awbColIdx = headerRow.findIndex(
+          (h) => h.includes("track") || h.includes("awb") || h.includes("consign") || h.includes("number")
+        );
+        if (awbColIdx === -1) awbColIdx = 0;
 
         const courierColIdx = headerRow.findIndex((h) => h.includes("courier") || h.includes("carrier"));
         const recipientColIdx = headerRow.findIndex((h) => h.includes("recipient") || h.includes("customer") || h.includes("name"));
         const destColIdx = headerRow.findIndex((h) => h.includes("dest") || h.includes("city") || h.includes("address"));
 
+        const startIdx = hasHeader ? 1 : 0;
         const parsedItems: BulkShipment[] = [];
-        for (let i = 1; i < rows.length; i++) {
+        for (let i = startIdx; i < rows.length; i++) {
           const row = rows[i] as unknown[];
           if (!row || row.length === 0) continue;
 
@@ -813,9 +1113,9 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
               : "Active In-Transit Scan",
             origin: "Origin Logistics Facility",
             destination: rawDest || "Destination Center",
-            articleType: "Excel Import",
+            articleType: "Bulk Import",
             weight: "320 g",
-            lastUpdated: "Just Imported",
+            lastUpdated: "Staged for Review",
             lastLocation: isReturnedSim ? "Return Hub" : "Regional Sort Facility",
             recipientName: rawRecipient || "Recipient",
             returnReason: isReturnedSim ? "Customer Refused Delivery" : undefined,
@@ -824,26 +1124,122 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
         }
 
         if (parsedItems.length === 0) {
-          throw new Error("No valid tracking numbers were found in this Excel sheet.");
+          throw new Error("No valid tracking numbers were found in this file.");
         }
 
-        // SHOW PREVIEW (DO NOT IMPORT DIRECTLY)
+        // SHOW REVIEW BEFORE IMPORT (DO NOT IMPORT DIRECTLY)
+        const cleanFile = file.name.replace(/\.(xlsx|xls|csv)$/i, "");
         setPreviewFileName(file.name);
+        setPreviewBatchName(`Batch #${uniqueBatches.length + 1} • ${cleanFile || "Bulk Import"}`);
         setPreviewShipments(parsedItems);
         if (fileInputRef.current) fileInputRef.current.value = "";
       } catch (err: unknown) {
-        setUploadError((err as Error)?.message || "Failed to parse Excel workbook. Please verify the file integrity.");
+        setUploadError((err as Error)?.message || "Failed to parse spreadsheet. Please verify the file integrity.");
       } finally {
         setIsUploading(false);
       }
     };
 
     reader.onerror = () => {
-      setUploadError("Could not read the uploaded file. Please verify it is a valid Excel spreadsheet.");
+      setUploadError("Could not read the uploaded file. Please verify it is a valid spreadsheet.");
       setIsUploading(false);
     };
 
     reader.readAsArrayBuffer(file);
+  };
+
+  // Parse bulk pasted AWB numbers into the Review Before Import screen
+  const handleParseBulkPasteForReview = () => {
+    setUploadError(null);
+    setUploadSuccessMsg(null);
+    const rawTokens = bulkPasteText
+      .split(/[\n,;|\t]+/)
+      .map((t) => t.trim().toUpperCase())
+      .filter((t) => t.length >= 4);
+
+    if (rawTokens.length === 0) {
+      setUploadError("Please enter or paste at least one valid Consignment / AWB number (min 4 characters).");
+      return;
+    }
+
+    const uniqueTokens = Array.from(new Set(rawTokens));
+    const parsedItems: BulkShipment[] = uniqueTokens.map((rawAwb, idx) => {
+      const detected = autoDetectCourier(rawAwb) || COURIER_LIST[0];
+      const isReturnedSim = rawAwb.includes("RT") || rawAwb.includes("RETURN");
+      const isDeliveredSim = rawAwb.endsWith("IN") && !isReturnedSim;
+
+      return {
+        id: `bulk-paste-${Date.now()}-${idx}`,
+        trackingNumber: rawAwb,
+        courierId: detected.id,
+        courierName: detected.name,
+        status: isReturnedSim ? "returned" : isDeliveredSim ? "delivered" : "in_transit",
+        statusText: isReturnedSim
+          ? "Returned to Origin Hub (RTO)"
+          : isDeliveredSim
+          ? "Delivered to Recipient"
+          : "Active In-Transit Scan",
+        origin: "Origin Logistics Facility",
+        destination: "Destination Center",
+        articleType: "Bulk Paste",
+        weight: "250 g",
+        lastUpdated: "Staged for Review",
+        lastLocation: isReturnedSim ? "Return Hub" : "Regional Sort Facility",
+        recipientName: "Recipient",
+        returnReason: isReturnedSim ? "Delivery Attempt Failed" : undefined,
+        isImported: true,
+      };
+    });
+
+    setPreviewFileName("Pasted Consignment List");
+    setPreviewBatchName(`Batch #${uniqueBatches.length + 1} • Bulk List`);
+    setPreviewShipments(parsedItems);
+  };
+
+  // Modify or remove individual items during Bulk Import Review
+  const handleUpdatePreviewCourier = (id: string, newCourierId: string) => {
+    const courierMeta = COURIER_MAP[newCourierId];
+    if (!courierMeta || !previewShipments) return;
+    setPreviewShipments(
+      previewShipments.map((item) =>
+        item.id === id ? { ...item, courierId: courierMeta.id, courierName: courierMeta.name } : item
+      )
+    );
+  };
+
+  const handleUpdatePreviewStatus = (
+    id: string,
+    newStatus: "in_transit" | "out_for_delivery" | "delivered" | "returned"
+  ) => {
+    if (!previewShipments) return;
+    setPreviewShipments(
+      previewShipments.map((item) =>
+        item.id === id
+          ? {
+              ...item,
+              status: newStatus,
+              statusText:
+                newStatus === "delivered"
+                  ? "Delivered to Recipient"
+                  : newStatus === "out_for_delivery"
+                  ? "Out for Delivery Today"
+                  : newStatus === "returned"
+                  ? "Returned to Origin Hub (RTO)"
+                  : "Active In-Transit Scan",
+            }
+          : item
+      )
+    );
+  };
+
+  const handleRemovePreviewItem = (id: string) => {
+    if (!previewShipments) return;
+    const next = previewShipments.filter((item) => item.id !== id);
+    if (next.length === 0) {
+      setPreviewShipments(null);
+    } else {
+      setPreviewShipments(next);
+    }
   };
 
   // Compute unique import batches
@@ -884,7 +1280,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
 
   const uniqueBatches = Array.from(batchMap.values());
 
-  // User confirms importing the previewed shipments
+  // User confirms importing the reviewed shipments
   const handleConfirmImport = () => {
     if (!previewShipments || previewShipments.length === 0) return;
 
@@ -894,7 +1290,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
     );
 
     if (newItems.length === 0) {
-      setUploadError("All parsed tracking numbers are already in your dashboard.");
+      setUploadError("All reviewed tracking numbers already exist in your live dashboard.");
       return;
     }
 
@@ -903,14 +1299,16 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
     const timeStr = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     const cleanFileName = previewFileName.replace(/\.(xlsx|xls|csv)$/i, "");
     const newBatchId = `batch-${Date.now()}`;
-    const newBatchName = `Batch #${nextBatchNum} • ${cleanFileName || "Excel File"}`;
+    const finalBatchName =
+      previewBatchName.trim() || `Batch #${nextBatchNum} • ${cleanFileName || "Bulk Import"}`;
     const importedAtStr = `Today, ${timeStr}`;
 
     const taggedItems: BulkShipment[] = newItems.map((item) => ({
       ...item,
+      lastUpdated: "Just Imported",
       isImported: true,
       batchId: newBatchId,
-      batchName: newBatchName,
+      batchName: finalBatchName,
       importedAt: importedAtStr,
     }));
 
@@ -921,11 +1319,12 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
     // Show Successfully imported status and batch info in modal
     setImportSuccessState({
       count: taggedItems.length,
-      batchName: newBatchName,
+      batchName: finalBatchName,
       batchId: newBatchId,
     });
     setUploadError(null);
     setUploadSuccessMsg(null);
+    setBulkPasteText("");
 
     // After Click confirm show Successfully imported and if there is no issue close Bulk Import popup automatically
     if (autoCloseTimerRef.current) clearTimeout(autoCloseTimerRef.current);
@@ -941,6 +1340,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
   // User cancels preview and wants to pick another file
   const handleCancelPreview = () => {
     setPreviewShipments(null);
+    setPreviewBatchName("");
     setUploadError(null);
     setUploadSuccessMsg(null);
     setImportSuccessState(null);
@@ -952,6 +1352,8 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
     if (autoCloseTimerRef.current) clearTimeout(autoCloseTimerRef.current);
     setIsUploadModalOpen(false);
     setPreviewShipments(null);
+    setPreviewBatchName("");
+    setBulkPasteText("");
     setImportSuccessState(null);
     setUploadError(null);
     setUploadSuccessMsg(null);
@@ -960,19 +1362,13 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
 
   // Delete an entire batch
   const handleDeleteBatch = (batchId: string) => {
-    const targetBatch = uniqueBatches.find((b) => b.id === batchId);
-    const confirmName = targetBatch ? targetBatch.name : "this batch";
-    if (
-      window.confirm(
-        `Are you sure you want to remove ${confirmName} (${targetBatch?.count || 0} consignments) from your dashboard?`
-      )
-    ) {
-      const updated = shipments.filter((s) => s.batchId !== batchId);
-      saveShipments(updated);
-      if (selectedBatchId === batchId) {
-        setSelectedBatchId("all");
-      }
+    const updated = shipments.filter((s) => s.batchId !== batchId);
+    saveShipments(updated);
+    if (selectedBatchId === batchId) {
+      setSelectedBatchId("all");
     }
+    setBatchPendingDeleteId(null);
+    playChime(false);
   };
 
   // Batch name inline editing
@@ -1121,16 +1517,10 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
   // Restore & Overwrite Live Data with Backup Data
   const handleRestoreBackupOverwrite = () => {
     if (!backupReviewData) return;
-    if (
-      window.confirm(
-        `Are you sure you want to replace all ${shipments.length} live consignments with the ${backupReviewData.shipments.length} records from ${backupReviewData.fileName}?`
-      )
-    ) {
-      saveShipments(backupReviewData.shipments);
-      playChime(false);
-      setBackupSuccessMsg(`Restored ${backupReviewData.shipments.length} shipments from backup!`);
-      setIsReviewingSeparately(false);
-    }
+    saveShipments(backupReviewData.shipments);
+    playChime(false);
+    setBackupSuccessMsg(`Restored ${backupReviewData.shipments.length} shipments from backup!`);
+    setIsReviewingSeparately(false);
   };
 
   // Generate & Download Verified Sample Excel Template (.xlsx)
@@ -1166,13 +1556,6 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
     }
   };
 
-  // Delete shipment
-  const handleDeleteShipment = (id: string) => {
-    const updated = shipments.filter((s) => s.id !== id);
-    saveShipments(updated);
-    setSelectedShipmentIds((prev) => prev.filter((item) => item !== id));
-  };
-
   // Toggle selection for all visible filtered shipments
   const handleToggleSelectAll = () => {
     if (selectedShipmentIds.length === filteredShipments.length && filteredShipments.length > 0) {
@@ -1203,7 +1586,8 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
   const handleExportDeliveredOnly = () => {
     const deliveredShipments = shipments.filter((s) => s.status === "delivered");
     if (deliveredShipments.length === 0) {
-      alert("No delivered consignments found to export.");
+      setExportDeliveredSuccessMsg("No delivered consignments available to export right now.");
+      setTimeout(() => setExportDeliveredSuccessMsg(null), 5000);
       return;
     }
 
@@ -1396,32 +1780,6 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
               <FileSpreadsheet className="h-4 w-4 stroke-[2.4]" />
               <span>Bulk Import</span>
             </button>
-
-            {/* Export Delivered Only */}
-            {deliveredCount > 0 && (
-              <button
-                type="button"
-                onClick={handleExportDeliveredOnly}
-                className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/70 dark:text-emerald-300 px-3.5 py-2.5 text-xs font-bold shadow-2xs transition-all cursor-pointer"
-                title="Export all delivered consignments to Excel (.xlsx)"
-              >
-                <Download className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
-                <span>Export Delivered ({deliveredCount})</span>
-              </button>
-            )}
-
-            {/* Quick Delete Exported Delivered (Only for delivered data) */}
-            {lastExportedDeliveredIds.length > 0 && (
-              <button
-                type="button"
-                onClick={() => setIsDeleteExportedModalOpen(true)}
-                className="inline-flex items-center gap-1.5 rounded-xl border border-rose-300 bg-rose-50 hover:bg-rose-100 text-rose-700 dark:border-rose-800 dark:bg-rose-950/70 dark:text-rose-300 px-3.5 py-2.5 text-xs font-bold shadow-2xs transition-all cursor-pointer animate-in fade-in"
-                title="Quick delete previously exported delivered consignments"
-              >
-                <Trash2 className="h-4 w-4 text-rose-600 dark:text-rose-400" />
-                <span>Delete Exported Delivered ({lastExportedDeliveredIds.length})</span>
-              </button>
-            )}
           </div>
         </div>
 
@@ -1468,35 +1826,6 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                 <X className="h-4 w-4" />
               </button>
             </div>
-          </div>
-        )}
-
-        {/* Post-Export Delivered Notice & Quick Delete Action */}
-        {exportDeliveredSuccessMsg && (
-          <div className="mt-4 rounded-2xl border border-emerald-300 bg-emerald-50/90 dark:border-emerald-800 dark:bg-emerald-950/80 p-3.5 shadow-sm flex flex-wrap items-center justify-between gap-3 animate-in fade-in">
-            <div className="flex items-center gap-2 text-xs font-bold text-emerald-800 dark:text-emerald-300">
-              <Check className="h-4 w-4 text-emerald-600 stroke-[3]" />
-              <span>{exportDeliveredSuccessMsg}</span>
-            </div>
-            {lastExportedDeliveredIds.length > 0 && (
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => setIsDeleteExportedModalOpen(true)}
-                  className="inline-flex items-center gap-1.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white px-3 py-1.5 text-xs font-bold shadow-xs cursor-pointer transition-colors"
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                  <span>Quick Delete Exported Delivered ({lastExportedDeliveredIds.length})</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setExportDeliveredSuccessMsg(null)}
-                  className="text-xs text-emerald-700 hover:underline cursor-pointer"
-                >
-                  Dismiss
-                </button>
-              </div>
-            )}
           </div>
         )}
 
@@ -1672,298 +2001,413 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
       </div>
 
       {/* ============================================================== */}
-      {/* 3. TABLE FILTER CONTROLS                                       */}
+      {/* 3. REFINED NON-SCROLLABLE FILTER HUB & MULTI-BATCH MANAGER     */}
       {/* ============================================================== */}
-      <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
-        {/* Search Input & Quick Imported Filter Button */}
-        <div className="flex items-center gap-2 flex-1 max-w-xl">
+      <div className="rounded-3xl border border-slate-200/90 bg-white p-4 sm:p-5 shadow-xs dark:border-slate-800 dark:bg-slate-900 space-y-4">
+        {/* Top Row: Search Bar + Quick Batch Selector Dropdown + Manage Batches Toggle */}
+        <div className="flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-3">
+          {/* Search Input */}
           <div className="relative flex-1">
-            <Search className="absolute left-3.5 top-2.5 h-4 w-4 text-slate-400" />
+            <Search className="absolute left-3.5 top-3 h-4 w-4 text-slate-400" />
             <input
               type="text"
               value={searchFilter}
               onChange={(e) => setSearchFilter(e.target.value)}
-              placeholder="Search AWB, Courier, Recipient, or City..."
-              className="w-full rounded-xl border border-slate-200 bg-white pl-9 pr-3.5 py-2 text-xs font-medium text-slate-900 placeholder:text-slate-400 focus:border-indigo-500 focus:outline-none dark:border-slate-800 dark:bg-slate-900 dark:text-white"
+              placeholder="Search AWB, Courier, Recipient, Batch, or City..."
+              className="w-full rounded-2xl border border-slate-200 bg-slate-50/70 pl-10 pr-9 py-2.5 text-xs font-semibold text-slate-900 placeholder:text-slate-400 focus:border-indigo-500 focus:bg-white focus:outline-none dark:border-slate-800 dark:bg-slate-800/60 dark:text-white dark:focus:bg-slate-900 transition-colors"
             />
+            {searchFilter && (
+              <button
+                type="button"
+                onClick={() => setSearchFilter("")}
+                className="absolute right-3 top-2.5 rounded-lg p-0.5 text-slate-400 hover:bg-slate-200/70 hover:text-slate-600 dark:hover:bg-slate-700"
+                title="Clear search"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            )}
           </div>
 
-          {/* Quick Filter: Imported Data Only */}
-          {importedCount > 0 && (
-            <button
-              type="button"
-              onClick={() => {
-                if (statusFilter === "imported") {
-                  setStatusFilter("all");
-                  setSelectedBatchId("all");
-                } else {
-                  setStatusFilter("imported");
-                }
-              }}
-              className={`inline-flex items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-bold transition-all cursor-pointer shrink-0 ${
-                statusFilter === "imported"
-                  ? "border-emerald-500 bg-emerald-50 text-emerald-800 dark:border-emerald-700 dark:bg-emerald-950/70 dark:text-emerald-300 shadow-xs"
-                  : "border-slate-200 bg-white text-slate-700 hover:border-emerald-300 hover:bg-emerald-50/40 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300"
-              }`}
-              title="Quick filter: View imported consignments only"
-            >
-              <FileSpreadsheet className="h-3.5 w-3.5 text-emerald-600" />
-              <span>Imported ({importedCount})</span>
-              {statusFilter === "imported" && <Check className="h-3.5 w-3.5 text-emerald-600" />}
-            </button>
-          )}
+          {/* Batch Filter Controls (Dropdown + Manage Batches Drawer Trigger) */}
+          {uniqueBatches.length > 0 && (
+            <div className="flex flex-wrap sm:flex-nowrap items-center gap-2">
+              <div className="relative flex-1 sm:flex-initial min-w-[200px]">
+                <select
+                  value={selectedBatchId}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setSelectedBatchId(val);
+                    if (val !== "all" && statusFilter !== "imported") {
+                      // Keep status filter flexible so user can view all or specific status within batch
+                    }
+                  }}
+                  aria-label="Filter by Batch"
+                  className="w-full appearance-none rounded-2xl border border-slate-200 bg-slate-50/90 pl-3.5 pr-9 py-2.5 text-xs font-bold text-slate-800 focus:border-indigo-500 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 cursor-pointer"
+                >
+                  <option value="all">All Batches ({importedCount} imported)</option>
+                  {uniqueBatches.map((b) => (
+                    <option key={b.id} value={b.id}>
+                      {b.name} ({b.count})
+                    </option>
+                  ))}
+                </select>
+                <ChevronDown className="pointer-events-none absolute right-3 top-3 h-4 w-4 text-slate-400" />
+              </div>
 
-          {/* Active Batch Filter Tag */}
-          {selectedBatchId !== "all" && (
-            <button
-              type="button"
-              onClick={() => setSelectedBatchId("all")}
-              className="inline-flex items-center gap-1 rounded-xl bg-indigo-50 hover:bg-indigo-100 px-2.5 py-2 text-xs font-bold text-indigo-700 dark:bg-indigo-950/70 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800 transition-colors cursor-pointer shrink-0 shadow-2xs"
-              title="Clear active batch filter"
-            >
-              <span>{uniqueBatches.find((b) => b.id === selectedBatchId)?.name.split(" • ")[0] || "Active Batch"}</span>
-              <X className="h-3 w-3 text-indigo-500" />
-            </button>
+              <button
+                type="button"
+                onClick={() => setIsBatchManagerOpen((prev) => !prev)}
+                className={`inline-flex items-center justify-center gap-1.5 rounded-2xl border px-3.5 py-2.5 text-xs font-bold transition-all cursor-pointer shrink-0 ${
+                  isBatchManagerOpen || selectedBatchId !== "all" || statusFilter === "imported"
+                    ? "border-emerald-500 bg-emerald-50 text-emerald-800 dark:border-emerald-700 dark:bg-emerald-950/70 dark:text-emerald-300 shadow-2xs"
+                    : "border-slate-200 bg-white text-slate-700 hover:border-emerald-300 hover:bg-emerald-50/40 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+                }`}
+                title="View, rename, or delete imported batches"
+              >
+                <FileSpreadsheet className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
+                <span>Manage Batches ({uniqueBatches.length})</span>
+                <ChevronDown
+                  className={`h-3.5 w-3.5 transition-transform ${
+                    isBatchManagerOpen || selectedBatchId !== "all" || statusFilter === "imported" ? "rotate-180" : ""
+                  }`}
+                />
+              </button>
+            </div>
           )}
         </div>
 
-        {/* Status Filter Tabs - Reordered to Delivered, Out for Delivery, In Transit, Returned (RTO), Imported */}
-        <div className="flex items-center gap-1 overflow-x-auto max-w-full rounded-xl bg-slate-100 p-1 dark:bg-slate-800 self-start sm:self-auto scrollbar-none">
+        {/* Non-Scrollable Responsive Status Filter Grid (Order: All, Delivered, Out for Delivery, In Transit, Returned (RTO), Imported) */}
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
           <button
             type="button"
             onClick={() => {
               setStatusFilter("all");
               setSelectedBatchId("all");
             }}
-            className={`rounded-lg px-2.5 py-1 text-xs font-bold transition-all cursor-pointer shrink-0 ${
+            className={`flex items-center justify-between rounded-2xl border px-3.5 py-2.5 text-xs font-bold transition-all cursor-pointer ${
               statusFilter === "all"
-                ? "bg-white text-indigo-600 shadow-xs dark:bg-slate-900 dark:text-indigo-400"
-                : "text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200"
+                ? "border-indigo-600 bg-indigo-600 text-white shadow-xs dark:border-indigo-500 dark:bg-indigo-600"
+                : "border-slate-200/90 bg-slate-50/70 text-slate-700 hover:bg-slate-100 dark:border-slate-800 dark:bg-slate-800/50 dark:text-slate-300 dark:hover:bg-slate-800"
             }`}
           >
-            All ({totalCount})
+            <span className="truncate">All</span>
+            <span
+              className={`ml-1.5 rounded-lg px-2 py-0.5 font-mono text-[11px] font-black tabular-nums ${
+                statusFilter === "all"
+                  ? "bg-white/20 text-white"
+                  : "bg-slate-200/80 text-slate-700 dark:bg-slate-700 dark:text-slate-300"
+              }`}
+            >
+              {totalCount}
+            </span>
           </button>
+
           <button
             type="button"
             onClick={() => setStatusFilter("delivered")}
-            className={`rounded-lg px-2.5 py-1 text-xs font-bold transition-all cursor-pointer shrink-0 ${
+            className={`flex items-center justify-between rounded-2xl border px-3.5 py-2.5 text-xs font-bold transition-all cursor-pointer ${
               statusFilter === "delivered"
-                ? "bg-white text-emerald-600 shadow-xs dark:bg-slate-900 dark:text-emerald-400"
-                : "text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200"
+                ? "border-emerald-600 bg-emerald-600 text-white shadow-xs dark:border-emerald-500 dark:bg-emerald-600"
+                : "border-slate-200/90 bg-slate-50/70 text-slate-700 hover:bg-emerald-50/60 dark:border-slate-800 dark:bg-slate-800/50 dark:text-slate-300 dark:hover:bg-slate-800"
             }`}
           >
-            Delivered ({deliveredCount})
+            <span className="truncate">Delivered</span>
+            <span
+              className={`ml-1.5 rounded-lg px-2 py-0.5 font-mono text-[11px] font-black tabular-nums ${
+                statusFilter === "delivered"
+                  ? "bg-white/20 text-white"
+                  : "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/80 dark:text-emerald-300"
+              }`}
+            >
+              {deliveredCount}
+            </span>
           </button>
+
           <button
             type="button"
             onClick={() => setStatusFilter("out_for_delivery")}
-            className={`rounded-lg px-2.5 py-1 text-xs font-bold transition-all cursor-pointer shrink-0 ${
+            className={`flex items-center justify-between rounded-2xl border px-3.5 py-2.5 text-xs font-bold transition-all cursor-pointer ${
               statusFilter === "out_for_delivery"
-                ? "bg-white text-amber-600 shadow-xs dark:bg-slate-900 dark:text-amber-400"
-                : "text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200"
+                ? "border-amber-500 bg-amber-500 text-white shadow-xs dark:border-amber-500 dark:bg-amber-500"
+                : "border-slate-200/90 bg-slate-50/70 text-slate-700 hover:bg-amber-50/60 dark:border-slate-800 dark:bg-slate-800/50 dark:text-slate-300 dark:hover:bg-slate-800"
             }`}
           >
-            Out for Delivery ({outCount})
+            <span className="truncate">Out for Delivery</span>
+            <span
+              className={`ml-1.5 rounded-lg px-2 py-0.5 font-mono text-[11px] font-black tabular-nums ${
+                statusFilter === "out_for_delivery"
+                  ? "bg-white/20 text-white"
+                  : "bg-amber-100 text-amber-800 dark:bg-amber-950/80 dark:text-amber-300"
+              }`}
+            >
+              {outCount}
+            </span>
           </button>
+
           <button
             type="button"
             onClick={() => setStatusFilter("in_transit")}
-            className={`rounded-lg px-2.5 py-1 text-xs font-bold transition-all cursor-pointer shrink-0 ${
+            className={`flex items-center justify-between rounded-2xl border px-3.5 py-2.5 text-xs font-bold transition-all cursor-pointer ${
               statusFilter === "in_transit"
-                ? "bg-white text-sky-600 shadow-xs dark:bg-slate-900 dark:text-sky-400"
-                : "text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200"
+                ? "border-sky-600 bg-sky-600 text-white shadow-xs dark:border-sky-500 dark:bg-sky-600"
+                : "border-slate-200/90 bg-slate-50/70 text-slate-700 hover:bg-sky-50/60 dark:border-slate-800 dark:bg-slate-800/50 dark:text-slate-300 dark:hover:bg-slate-800"
             }`}
           >
-            In Transit ({inTransitCount})
+            <span className="truncate">In Transit</span>
+            <span
+              className={`ml-1.5 rounded-lg px-2 py-0.5 font-mono text-[11px] font-black tabular-nums ${
+                statusFilter === "in_transit"
+                  ? "bg-white/20 text-white"
+                  : "bg-sky-100 text-sky-800 dark:bg-sky-950/80 dark:text-sky-300"
+              }`}
+            >
+              {inTransitCount}
+            </span>
           </button>
+
           <button
             type="button"
             onClick={() => setStatusFilter("returned")}
-            className={`rounded-lg px-2.5 py-1 text-xs font-bold transition-all cursor-pointer shrink-0 ${
+            className={`flex items-center justify-between rounded-2xl border px-3.5 py-2.5 text-xs font-bold transition-all cursor-pointer ${
               statusFilter === "returned"
-                ? "bg-white text-rose-600 shadow-xs dark:bg-slate-900 dark:text-rose-400"
-                : "text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200"
+                ? "border-rose-600 bg-rose-600 text-white shadow-xs dark:border-rose-500 dark:bg-rose-600"
+                : "border-slate-200/90 bg-slate-50/70 text-slate-700 hover:bg-rose-50/60 dark:border-slate-800 dark:bg-slate-800/50 dark:text-slate-300 dark:hover:bg-slate-800"
             }`}
           >
-            Returned (RTO) ({returnedCount})
+            <span className="truncate">Returned (RTO)</span>
+            <span
+              className={`ml-1.5 rounded-lg px-2 py-0.5 font-mono text-[11px] font-black tabular-nums ${
+                statusFilter === "returned"
+                  ? "bg-white/20 text-white"
+                  : "bg-rose-100 text-rose-800 dark:bg-rose-950/80 dark:text-rose-300"
+              }`}
+            >
+              {returnedCount}
+            </span>
           </button>
+
           <button
             type="button"
             onClick={() => setStatusFilter("imported")}
-            className={`rounded-lg px-2.5 py-1 text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 shrink-0 ${
+            className={`flex items-center justify-between rounded-2xl border px-3.5 py-2.5 text-xs font-bold transition-all cursor-pointer ${
               statusFilter === "imported"
-                ? "bg-white text-emerald-700 shadow-xs dark:bg-slate-900 dark:text-emerald-400 font-extrabold"
-                : "text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200"
+                ? "border-emerald-700 bg-emerald-700 text-white shadow-xs dark:border-emerald-600 dark:bg-emerald-700"
+                : "border-slate-200/90 bg-slate-50/70 text-slate-700 hover:bg-emerald-50/60 dark:border-slate-800 dark:bg-slate-800/50 dark:text-slate-300 dark:hover:bg-slate-800"
             }`}
-            title="View imported items from Excel"
           >
-            <FileSpreadsheet className="h-3 w-3 text-emerald-600" />
-            <span>Imported ({importedCount})</span>
+            <span className="inline-flex items-center gap-1.5 truncate">
+              <FileSpreadsheet className="h-3.5 w-3.5 shrink-0" />
+              <span className="truncate">Imported</span>
+            </span>
+            <span
+              className={`ml-1.5 rounded-lg px-2 py-0.5 font-mono text-[11px] font-black tabular-nums ${
+                statusFilter === "imported"
+                  ? "bg-white/20 text-white"
+                  : "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/80 dark:text-emerald-300"
+              }`}
+            >
+              {importedCount}
+            </span>
           </button>
         </div>
-      </div>
 
-      {/* ============================================================== */}
-      {/* 3B. BATCH-WISE INGESTION NAVIGATOR                             */}
-      {/* ============================================================== */}
-      {(statusFilter === "imported" || selectedBatchId !== "all") && uniqueBatches.length > 0 && (
-        <div className="rounded-2xl border border-emerald-200/90 bg-emerald-50/50 p-4 dark:border-emerald-900/60 dark:bg-emerald-950/30 space-y-3">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div className="flex items-center gap-2.5">
-              <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-emerald-600 text-white shadow-2xs">
-                <FileSpreadsheet className="h-4 w-4" />
-              </span>
-              <div>
-                <div className="text-xs font-black text-slate-900 dark:text-white">
-                  Imported Batches ({uniqueBatches.length} Available)
-                </div>
-                <div className="text-[11px] text-slate-500 dark:text-slate-400">
-                  Select a batch to inspect consignments, tracking states, or manage records
-                </div>
+        {/* ============================================================== */}
+        {/* 3B. MULTI-BATCH DIRECTORY & INLINE MANAGER (EDIT & DELETE)     */}
+        {/* ============================================================== */}
+        {(isBatchManagerOpen || statusFilter === "imported" || selectedBatchId !== "all") && uniqueBatches.length > 0 && (
+          <div className="pt-3 border-t border-slate-200/80 dark:border-slate-800 space-y-3 animate-in fade-in">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-emerald-600 text-white">
+                  <FileSpreadsheet className="h-3.5 w-3.5" />
+                </span>
+                <span className="text-xs font-extrabold text-slate-900 dark:text-white">
+                  Batch Directory & Management ({uniqueBatches.length})
+                </span>
+                <span className="text-[11px] text-slate-500 dark:text-slate-400 hidden sm:inline">
+                  — Click any batch to filter, or use the edit and delete icons on each card
+                </span>
               </div>
-            </div>
 
-            {/* Batch Selector Pills */}
-            <div className="flex flex-wrap items-center gap-1.5">
-              <button
-                type="button"
-                onClick={() => setSelectedBatchId("all")}
-                className={`rounded-xl px-3 py-1.5 text-xs font-bold transition-all cursor-pointer ${
-                  selectedBatchId === "all"
-                    ? "bg-emerald-600 text-white shadow-xs"
-                    : "bg-white text-slate-700 hover:bg-slate-100 dark:bg-slate-800 dark:text-slate-300 border border-slate-200 dark:border-slate-700"
-                }`}
-              >
-                All Batches ({importedCount})
-              </button>
-              {uniqueBatches.map((batch) => (
-                <button
-                  key={batch.id}
-                  type="button"
-                  onClick={() => setSelectedBatchId(batch.id)}
-                  className={`rounded-xl px-3 py-1.5 text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
-                    selectedBatchId === batch.id
-                      ? "bg-emerald-600 text-white shadow-xs"
-                      : "bg-white text-slate-700 hover:bg-slate-100 dark:bg-slate-800 dark:text-slate-300 border border-slate-200 dark:border-slate-700"
-                  }`}
-                  title={`${batch.name} • ${batch.importedAt}`}
-                >
-                  <span>{batch.name.split(" • ")[0]}</span>
-                  <span
-                    className={`rounded-full px-1.5 py-0.2 text-[10px] font-mono ${
-                      selectedBatchId === batch.id
-                        ? "bg-emerald-700/90 text-white"
-                        : "bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-300"
-                    }`}
-                  >
-                    {batch.count}
-                  </span>
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Active Batch Summary & Quick Actions */}
-          {selectedBatchId !== "all" && (() => {
-            const activeBatch = uniqueBatches.find((b) => b.id === selectedBatchId);
-            if (!activeBatch) return null;
-            return (
-              <div className="pt-3 border-t border-emerald-200/60 dark:border-emerald-900/60 flex flex-wrap items-center justify-between gap-3 text-xs">
-                {editingBatchId === activeBatch.id ? (
-                  <div className="flex items-center gap-1.5 bg-white dark:bg-slate-900 px-2 py-1 rounded-xl border border-emerald-400 dark:border-emerald-600 shadow-xs">
-                    <input
-                      type="text"
-                      value={editingBatchName}
-                      onChange={(e) => setEditingBatchName(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") handleSaveBatchName(activeBatch.id);
-                        if (e.key === "Escape") handleCancelEditBatch();
-                      }}
-                      autoFocus
-                      className="text-xs font-bold text-slate-900 dark:text-white bg-transparent outline-none w-48 sm:w-64"
-                      placeholder="Enter new batch name..."
-                    />
-                    <button
-                      type="button"
-                      onClick={() => handleSaveBatchName(activeBatch.id)}
-                      className="p-1 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 transition-colors cursor-pointer"
-                      title="Save batch name"
-                    >
-                      <Check className="h-3 w-3" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleCancelEditBatch}
-                      className="p-1 rounded-lg bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-300 hover:bg-slate-300 dark:hover:bg-slate-600 transition-colors cursor-pointer"
-                      title="Cancel edit"
-                    >
-                      <X className="h-3 w-3" />
-                    </button>
-                  </div>
-                ) : (
-                  <div className="flex flex-wrap items-center gap-2 sm:gap-3 text-slate-700 dark:text-slate-300">
-                    <div className="flex items-center gap-1.5">
-                      <span className="font-extrabold text-slate-900 dark:text-white">
-                        {activeBatch.name}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => handleStartEditBatch(activeBatch.id, activeBatch.name)}
-                        className="p-1 rounded-lg hover:bg-emerald-100 dark:hover:bg-emerald-900/60 text-slate-400 hover:text-emerald-700 dark:hover:text-emerald-300 transition-colors cursor-pointer"
-                        title="Edit batch name"
-                      >
-                        <Pencil className="h-3 w-3" />
-                      </button>
-                    </div>
-                    <span className="text-slate-400">•</span>
-                    <span className="text-slate-500 text-[11px]">
-                      Imported: {activeBatch.importedAt}
-                    </span>
-                    <span className="text-slate-400">•</span>
-                    <span className="inline-flex items-center gap-1 font-bold text-emerald-700 dark:text-emerald-400">
-                      <CheckCircle2 className="h-3.5 w-3.5" />
-                      {activeBatch.delivered} Delivered
-                    </span>
-                    <span className="text-slate-400">•</span>
-                    <span className="inline-flex items-center gap-1 font-bold text-sky-700 dark:text-sky-400">
-                      <Truck className="h-3.5 w-3.5" />
-                      {activeBatch.inTransit} In Transit
-                    </span>
-                    {activeBatch.returned > 0 && (
-                      <>
-                        <span className="text-slate-400">•</span>
-                        <span className="inline-flex items-center gap-1 font-bold text-rose-700 dark:text-rose-400">
-                          <RotateCcw className="h-3.5 w-3.5" />
-                          {activeBatch.returned} Returned
-                        </span>
-                      </>
-                    )}
-                  </div>
-                )}
-
-                <div className="flex items-center gap-2.5">
+              <div className="flex items-center gap-2">
+                {selectedBatchId !== "all" && (
                   <button
                     type="button"
                     onClick={() => setSelectedBatchId("all")}
-                    className="text-[11px] font-bold text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200 underline cursor-pointer"
+                    className="rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 px-3 py-1 text-[11px] font-bold text-slate-700 dark:text-slate-300 transition-colors cursor-pointer"
                   >
-                    View All Batches
+                    Show All Batches ({importedCount})
                   </button>
+                )}
+                {isBatchManagerOpen && statusFilter !== "imported" && selectedBatchId === "all" && (
                   <button
                     type="button"
-                    onClick={() => handleDeleteBatch(activeBatch.id)}
-                    className="inline-flex items-center gap-1 rounded-lg bg-rose-50 px-2 py-1 text-[11px] font-bold text-rose-700 hover:bg-rose-100 dark:bg-rose-950/80 dark:text-rose-300 transition-colors cursor-pointer"
-                    title="Remove this batch of shipments"
+                    onClick={() => setIsBatchManagerOpen(false)}
+                    className="rounded-xl p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800 cursor-pointer"
+                    title="Collapse batch manager"
                   >
-                    <Trash2 className="h-3 w-3" />
-                    <span>Delete Batch</span>
+                    <X className="h-4 w-4" />
                   </button>
-                </div>
+                )}
               </div>
-            );
-          })()}
-        </div>
-      )}
+            </div>
+
+            {/* Responsive Multi-Batch Cards Grid (No horizontal scrolling) */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 max-h-80 overflow-y-auto pr-1">
+              {uniqueBatches.map((batch) => {
+                const isSelected = selectedBatchId === batch.id;
+                const isEditing = editingBatchId === batch.id;
+                const isPendingDelete = batchPendingDeleteId === batch.id;
+
+                return (
+                  <div
+                    key={batch.id}
+                    className={`rounded-2xl border p-3.5 transition-all flex flex-col justify-between gap-2.5 ${
+                      isSelected
+                        ? "border-emerald-500 bg-emerald-50/70 dark:border-emerald-500/80 dark:bg-emerald-950/40 shadow-xs"
+                        : "border-slate-200/90 bg-slate-50/60 hover:border-slate-300 dark:border-slate-800 dark:bg-slate-800/40"
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      {isEditing ? (
+                        <div className="flex items-center gap-1.5 flex-1 bg-white dark:bg-slate-900 px-2.5 py-1.5 rounded-xl border border-emerald-500 shadow-2xs">
+                          <input
+                            type="text"
+                            value={editingBatchName}
+                            onChange={(e) => setEditingBatchName(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") handleSaveBatchName(batch.id);
+                              if (e.key === "Escape") handleCancelEditBatch();
+                            }}
+                            autoFocus
+                            className="text-xs font-bold text-slate-900 dark:text-white bg-transparent outline-none flex-1 min-w-0"
+                            placeholder="Enter batch name..."
+                          />
+                          <button
+                            type="button"
+                            onClick={() => handleSaveBatchName(batch.id)}
+                            className="p-1 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 transition-colors cursor-pointer shrink-0"
+                            title="Save batch name"
+                          >
+                            <Check className="h-3.5 w-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleCancelEditBatch}
+                            className="p-1 rounded-lg bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-300 hover:bg-slate-300 transition-colors cursor-pointer shrink-0"
+                            title="Cancel rename"
+                          >
+                            <X className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      ) : (
+                        <div
+                          onClick={() => setSelectedBatchId(isSelected ? "all" : batch.id)}
+                          className="flex-1 min-w-0 cursor-pointer group"
+                        >
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-extrabold text-slate-900 dark:text-white truncate group-hover:text-emerald-700 dark:group-hover:text-emerald-400 transition-colors">
+                              {batch.name}
+                            </span>
+                            {isSelected && (
+                              <span className="rounded-md bg-emerald-600 px-1.5 py-0.5 text-[9px] font-black uppercase text-white shrink-0">
+                                Active Filter
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                            Imported: {batch.importedAt} • {batch.count} consignment{batch.count > 1 ? "s" : ""}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Batch Rename & Delete Actions */}
+                      {!isEditing && (
+                        <div className="flex items-center gap-1 shrink-0">
+                          {isPendingDelete ? (
+                            <div className="flex items-center gap-1 bg-rose-50 dark:bg-rose-950/90 border border-rose-200 dark:border-rose-800 rounded-xl px-2 py-1">
+                              <span className="text-[10px] font-extrabold text-rose-700 dark:text-rose-300 mr-1">
+                                Delete ({batch.count})?
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteBatch(batch.id)}
+                                className="rounded-lg bg-rose-600 hover:bg-rose-700 text-white px-2 py-0.5 text-[10px] font-bold cursor-pointer"
+                              >
+                                Confirm
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setBatchPendingDeleteId(null)}
+                                className="rounded-lg bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 px-1.5 py-0.5 text-[10px] font-bold border border-slate-200 dark:border-slate-700 cursor-pointer"
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          ) : (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => handleStartEditBatch(batch.id, batch.name)}
+                                className="inline-flex items-center gap-1 rounded-xl border border-slate-200/90 bg-white hover:bg-emerald-50 hover:border-emerald-300 text-slate-600 hover:text-emerald-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300 dark:hover:text-emerald-300 px-2 py-1 text-[11px] font-bold transition-colors cursor-pointer"
+                                title="Edit batch name"
+                              >
+                                <Pencil className="h-3 w-3" />
+                                <span>Rename</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setBatchPendingDeleteId(batch.id)}
+                                className="inline-flex items-center gap-1 rounded-xl border border-rose-200/80 bg-rose-50/70 hover:bg-rose-100 text-rose-600 dark:border-rose-900/60 dark:bg-rose-950/60 dark:text-rose-300 px-2 py-1 text-[11px] font-bold transition-colors cursor-pointer"
+                                title="Delete entire batch"
+                              >
+                                <Trash2 className="h-3 w-3" />
+                                <span>Delete</span>
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Batch Status Breakdown Footer */}
+                    <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-200/60 dark:border-slate-800/80 text-[11px]">
+                      <div className="flex flex-wrap items-center gap-2.5">
+                        <span className="inline-flex items-center gap-1 font-bold text-emerald-700 dark:text-emerald-400">
+                          <CheckCircle2 className="h-3 w-3" />
+                          {batch.delivered} Delivered
+                        </span>
+                        <span className="inline-flex items-center gap-1 font-bold text-sky-700 dark:text-sky-400">
+                          <Truck className="h-3 w-3" />
+                          {batch.inTransit} Active
+                        </span>
+                        {batch.returned > 0 && (
+                          <span className="inline-flex items-center gap-1 font-bold text-rose-600 dark:text-rose-400">
+                            <RotateCcw className="h-3 w-3" />
+                            {batch.returned} RTO
+                          </span>
+                        )}
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => setSelectedBatchId(isSelected ? "all" : batch.id)}
+                        className={`text-[11px] font-bold underline cursor-pointer ${
+                          isSelected
+                            ? "text-emerald-700 dark:text-emerald-300"
+                            : "text-indigo-600 hover:text-indigo-800 dark:text-indigo-400"
+                        }`}
+                      >
+                        {isSelected ? "Clear Batch Filter" : "Filter Batch"}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+      </div>
 
       {/* Multiple Selection Action Toolbar */}
       {selectedShipmentIds.length > 0 && (
@@ -2152,23 +2596,15 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                       </div>
                     </td>
 
-                    {/* Action buttons */}
+                    {/* Action buttons (Quick delete removed from row end; use checkboxes for safe deletion) */}
                     <td className="py-3.5 px-4 text-right">
-                      <div className="flex items-center justify-end gap-1.5">
+                      <div className="flex items-center justify-end">
                         <button
                           type="button"
                           onClick={() => onOpenTrackingResult(item.trackingNumber, item.courierId)}
-                          className="rounded-lg bg-indigo-50 hover:bg-indigo-600 hover:text-white px-2.5 py-1 text-xs font-bold text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300 dark:hover:bg-indigo-600 dark:hover:text-white transition-all cursor-pointer"
+                          className="rounded-xl bg-indigo-50 hover:bg-indigo-600 hover:text-white px-3 py-1.5 text-xs font-bold text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300 dark:hover:bg-indigo-600 dark:hover:text-white transition-all cursor-pointer"
                         >
                           Track
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleDeleteShipment(item.id)}
-                          className="rounded-lg p-1 text-slate-400 hover:bg-rose-50 hover:text-rose-600 dark:hover:bg-rose-950/40 dark:hover:text-rose-400 transition-colors"
-                          title="Remove from dashboard"
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
                         </button>
                       </div>
                     </td>
@@ -2181,39 +2617,48 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
       </div>
 
       {/* ============================================================== */}
-      {/* 5. AUTO-CHECK SETTINGS MODAL                                   */}
+      {/* 5. AUTO-CHECK, EXPORT & DATA SETTINGS MODAL (FULLSCREEN MOBILE) */}
       {/* ============================================================== */}
       {isSettingsOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs animate-in fade-in">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-0 sm:p-4 bg-slate-950/75 backdrop-blur-xs animate-in fade-in">
           <div className="fixed inset-0" onClick={() => setIsSettingsOpen(false)} />
           <div
-            className="relative z-10 w-full max-w-md rounded-3xl border border-slate-200 bg-white p-6 shadow-2xl dark:border-slate-800 dark:bg-slate-900 text-left"
+            className="relative z-10 w-full h-full sm:h-auto sm:max-h-[92vh] sm:max-w-xl rounded-none sm:rounded-3xl border-0 sm:border border-slate-200 bg-white shadow-2xl dark:border-slate-800 dark:bg-slate-900 text-left flex flex-col overflow-hidden"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-4">
-              <div className="flex items-center gap-2">
-                <Settings className="h-5 w-5 text-indigo-600" />
-                <h3 className="text-base font-bold text-slate-900 dark:text-white">
-                  Auto-Check Frequency & Settings
-                </h3>
+            {/* Modal Header */}
+            <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 px-5 sm:px-6 py-4 shrink-0 bg-white dark:bg-slate-900">
+              <div className="flex items-center gap-2.5">
+                <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-indigo-50 text-indigo-600 dark:bg-indigo-950/80 dark:text-indigo-400">
+                  <Settings className="h-5 w-5" />
+                </span>
+                <div>
+                  <h3 className="text-base font-extrabold text-slate-900 dark:text-white">
+                    Operations, Export & Sync Settings
+                  </h3>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                    Configure auto-sync intervals, delivered exports, clean-up, and backups
+                  </p>
+                </div>
               </div>
               <button
                 type="button"
                 onClick={() => setIsSettingsOpen(false)}
-                className="rounded-xl p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800"
+                className="rounded-xl p-2 text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800 cursor-pointer"
               >
-                <X className="h-4 w-4" />
+                <X className="h-5 w-5" />
               </button>
             </div>
 
-            <div className="mt-5 space-y-5">
+            {/* Scrollable Modal Body */}
+            <div className="flex-1 overflow-y-auto p-5 sm:p-6 space-y-5">
               {/* Auto check toggle */}
-              <div className="flex items-center justify-between rounded-2xl bg-slate-50 dark:bg-slate-800/80 p-3.5 border border-slate-200/80 dark:border-slate-700">
-                <div>
+              <div className="flex items-center justify-between rounded-2xl bg-slate-50 dark:bg-slate-800/80 p-4 border border-slate-200/80 dark:border-slate-700">
+                <div className="pr-3">
                   <div className="text-xs font-bold text-slate-900 dark:text-white">
                     Automatic Background Check
                   </div>
-                  <div className="text-[11px] text-slate-500">
+                  <div className="text-[11px] text-slate-500 mt-0.5">
                     Periodically query carriers for fresh shipment delivery scans.
                   </div>
                 </div>
@@ -2235,9 +2680,9 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
               {/* Frequency Chooser Options: 5 mins, 10, 15, 30, 1hr, custom */}
               <div>
                 <label className="text-xs font-bold text-slate-700 dark:text-slate-300 mb-2 block">
-                  Select Frequency:
+                  Select Sync Frequency:
                 </label>
-                <div className="grid grid-cols-3 gap-2">
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
                   {[
                     { label: "5 mins", sec: 300 },
                     { label: "10 mins", sec: 600 },
@@ -2265,9 +2710,9 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
               </div>
 
               {/* Custom Frequency Input */}
-              <div className="rounded-2xl border border-slate-200 bg-slate-50/60 p-3.5 dark:border-slate-800 dark:bg-slate-800/40">
-                <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1">
-                  Custom Frequency:
+              <div className="rounded-2xl border border-slate-200 bg-slate-50/60 p-4 dark:border-slate-800 dark:bg-slate-800/40">
+                <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1.5">
+                  Custom Frequency (Minutes):
                 </label>
                 <div className="flex items-center gap-2">
                   <input
@@ -2277,7 +2722,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                     placeholder="Enter minutes (e.g. 8)"
                     value={customMinutesInput}
                     onChange={(e) => setCustomMinutesInput(e.target.value)}
-                    className="flex-1 rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-900 focus:border-indigo-500 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+                    className="flex-1 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-900 focus:border-indigo-500 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
                   />
                   <button
                     type="button"
@@ -2287,7 +2732,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                         handleChangeInterval(mins * 60);
                       }
                     }}
-                    className="rounded-xl bg-indigo-600 px-3.5 py-1.5 text-xs font-bold text-white hover:bg-indigo-700 cursor-pointer"
+                    className="rounded-xl bg-indigo-600 px-4 py-2 text-xs font-bold text-white hover:bg-indigo-700 cursor-pointer"
                   >
                     Set
                   </button>
@@ -2295,6 +2740,66 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                 <p className="mt-1.5 text-[11px] text-slate-400">
                   Current active interval: {Math.round(checkIntervalSec / 60)} minutes ({checkIntervalSec} seconds).
                 </p>
+              </div>
+
+              {/* Delivered Consignments Export & Clean-Up (Moved from Front Page into Settings) */}
+              <div className="rounded-2xl border border-emerald-200/80 bg-emerald-50/50 p-4 dark:border-emerald-900/60 dark:bg-emerald-950/30 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <CheckCircle2 className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
+                    <span className="text-xs font-bold text-slate-900 dark:text-white">
+                      Delivered Consignments Export & Clean-Up
+                    </span>
+                  </div>
+                  <span className="rounded-lg bg-emerald-100 dark:bg-emerald-950/90 px-2 py-0.5 text-[10px] font-mono font-bold text-emerald-800 dark:text-emerald-300">
+                    {deliveredCount} delivered
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-600 dark:text-slate-400">
+                  Export completed deliveries to an Excel (.xlsx) report and optionally remove exported delivered items from the live workspace.
+                </p>
+
+                {exportDeliveredSuccessMsg && (
+                  <div className="rounded-xl border border-emerald-300 bg-white/90 dark:border-emerald-800 dark:bg-slate-900 px-3 py-2 text-xs font-bold text-emerald-700 dark:text-emerald-300 flex items-center justify-between gap-2">
+                    <span className="flex items-center gap-1.5">
+                      <Check className="h-3.5 w-3.5 text-emerald-600 shrink-0" />
+                      {exportDeliveredSuccessMsg}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setExportDeliveredSuccessMsg(null)}
+                      className="text-[10px] text-slate-400 hover:text-slate-600"
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                )}
+
+                <div className="flex flex-col sm:flex-row gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={handleExportDeliveredOnly}
+                    disabled={deliveredCount === 0}
+                    className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 px-3.5 py-2.5 text-xs font-bold text-white shadow-2xs transition-colors cursor-pointer disabled:cursor-not-allowed"
+                  >
+                    <Download className="h-3.5 w-3.5" />
+                    <span>Export Delivered ({deliveredCount})</span>
+                  </button>
+
+                  {lastExportedDeliveredIds.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsSettingsOpen(false);
+                        setIsDeleteExportedModalOpen(true);
+                      }}
+                      className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-xl border border-rose-300 bg-rose-50 hover:bg-rose-100 text-rose-700 dark:border-rose-800 dark:bg-rose-950/70 dark:text-rose-300 px-3.5 py-2.5 text-xs font-bold transition-colors cursor-pointer"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                      <span>Delete Exported ({lastExportedDeliveredIds.length})</span>
+                    </button>
+                  )}
+                </div>
               </div>
 
               {/* Data Backup & Recovery Section Inside Settings */}
@@ -2318,7 +2823,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                   <button
                     type="button"
                     onClick={handleExportBackup}
-                    className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:hover:bg-slate-700/80 px-3 py-2 text-xs font-bold text-slate-700 dark:text-slate-200 shadow-2xs transition-colors cursor-pointer"
+                    className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:hover:bg-slate-700/80 px-3.5 py-2.5 text-xs font-bold text-slate-700 dark:text-slate-200 shadow-2xs transition-colors cursor-pointer"
                   >
                     <Download className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" />
                     <span>Export JSON Backup</span>
@@ -2332,18 +2837,21 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                       setBackupSuccessMsg(null);
                       setIsBackupModalOpen(true);
                     }}
-                    className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-3 py-2 text-xs font-bold text-white shadow-2xs transition-colors cursor-pointer"
+                    className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-3.5 py-2.5 text-xs font-bold text-white shadow-2xs transition-colors cursor-pointer"
                   >
                     <ExternalLink className="h-3.5 w-3.5" />
                     <span>Import & Review Backup</span>
                   </button>
                 </div>
               </div>
+            </div>
 
+            {/* Sticky Modal Footer */}
+            <div className="border-t border-slate-100 dark:border-slate-800 px-5 sm:px-6 py-4 bg-slate-50/70 dark:bg-slate-900/90 shrink-0">
               <button
                 type="button"
                 onClick={() => setIsSettingsOpen(false)}
-                className="w-full rounded-xl bg-indigo-600 py-2.5 text-xs font-bold text-white hover:bg-indigo-700 transition-colors cursor-pointer"
+                className="w-full rounded-xl bg-indigo-600 py-2.5 text-xs font-bold text-white hover:bg-indigo-700 transition-colors cursor-pointer shadow-xs"
               >
                 Save & Close
               </button>
@@ -2685,22 +3193,12 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                 )}
               </div>
 
-              {/* Camera Scanner Viewfinder (when active) */}
+              {/* Clean Camera Scanner Viewfinder (No cluttering text/icons on camera feed + Quick Success Mark) */}
               {isCameraActive && (
-                <div className="rounded-2xl border border-slate-200 bg-slate-900 p-4 text-white space-y-3.5 animate-in fade-in">
-                  {/* Viewfinder Header & Guideline Switcher */}
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 border-b border-slate-800 pb-3">
-                    <div className="flex items-center gap-2 text-xs font-bold text-indigo-400">
-                      <ScanLine className="h-4 w-4" />
-                      <span>Camera Scanner Viewfinder</span>
-                      <span className="rounded bg-indigo-950 px-1.5 py-0.5 text-[10px] font-mono text-indigo-300 border border-indigo-800/60">
-                        Auto-Detect Partner ON
-                      </span>
-                    </div>
-
-                    {/* Guideline Switch: Barcode (1D) | QR Code (2D) | Both */}
-                    <div className="flex items-center gap-1 self-start sm:self-auto rounded-xl bg-slate-800/90 p-1 border border-slate-700/80 text-[11px] font-bold">
-                      <span className="text-[10px] text-slate-400 px-1.5 hidden sm:inline">Guide:</span>
+                <div className="rounded-2xl border border-slate-800 bg-slate-950 p-3 sm:p-4 text-white space-y-3 animate-in fade-in">
+                  {/* Minimal Mode Switcher Bar */}
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="inline-flex items-center gap-1 rounded-xl bg-slate-900 p-1 border border-slate-800 text-[11px] font-bold">
                       <button
                         type="button"
                         onClick={() => setCameraGuideMode("barcode")}
@@ -2710,7 +3208,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                             : "text-slate-400 hover:text-slate-200"
                         }`}
                       >
-                        Barcode (1D)
+                        Barcode
                       </button>
                       <button
                         type="button"
@@ -2721,7 +3219,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                             : "text-slate-400 hover:text-slate-200"
                         }`}
                       >
-                        QR Code (2D)
+                        QR
                       </button>
                       <button
                         type="button"
@@ -2735,60 +3233,78 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                         Both
                       </button>
                     </div>
+
+                    <button
+                      type="button"
+                      onClick={handleToggleCamera}
+                      className="rounded-lg bg-slate-900 hover:bg-slate-800 px-2.5 py-1 text-[11px] font-bold text-slate-300 border border-slate-800 cursor-pointer"
+                    >
+                      Close Camera
+                    </button>
                   </div>
 
                   {cameraError && (
-                    <div className="text-[11px] text-amber-300 bg-amber-950/70 p-2 rounded-lg border border-amber-800/80">
+                    <div className="text-[11px] text-amber-300 bg-amber-950/70 p-2.5 rounded-xl border border-amber-800/80">
                       {cameraError}
                     </div>
                   )}
 
-                  {/* Adaptive Viewfinder Frame according to Guideline Switch */}
-                  <div className="relative h-48 sm:h-56 rounded-xl bg-slate-950 overflow-hidden flex items-center justify-center border border-slate-800">
-                    <video ref={videoRef} className="absolute inset-0 w-full h-full object-cover opacity-80" playsInline muted />
+                  {/* Unobstructed Camera Video Feed with Clean Guide Frame & Quick Success Mark */}
+                  <div
+                    className={`relative h-52 sm:h-64 rounded-2xl bg-black overflow-hidden flex items-center justify-center border-2 transition-colors duration-200 ${
+                      cameraScanSuccess
+                        ? "border-emerald-500 shadow-[0_0_25px_rgba(16,185,129,0.45)]"
+                        : "border-slate-800"
+                    }`}
+                  >
+                    <video
+                      ref={videoRef}
+                      className="absolute inset-0 w-full h-full object-cover"
+                      playsInline
+                      muted
+                      autoPlay
+                    />
 
-                    {/* Laser Scan Beam */}
-                    <div className="absolute left-6 right-6 h-0.5 bg-red-500 shadow-[0_0_14px_#ef4444] animate-bounce z-10" />
+                    {/* Subtle Scan Line */}
+                    {!cameraScanSuccess && (
+                      <div className="absolute left-8 right-8 h-0.5 bg-emerald-400/90 shadow-[0_0_12px_#10b981] animate-pulse z-10 pointer-events-none" />
+                    )}
 
-                    {/* Guideline Overlay: Barcode (1D) */}
+                    {/* Clean Guide Frame Only (No icons or text blocking the camera) */}
                     {cameraGuideMode === "barcode" && (
-                      <div className="relative z-10 w-4/5 max-w-sm h-24 rounded-xl border-2 border-dashed border-indigo-400/90 bg-indigo-500/10 flex flex-col items-center justify-center p-2 text-center pointer-events-none shadow-[0_0_20px_rgba(99,102,241,0.25)]">
-                        <ScanLine className="h-6 w-6 text-indigo-400 mb-1" />
-                        <span className="text-[11px] font-bold text-white tracking-wide">
-                          Align 1D Barcode horizontally within frame
-                        </span>
-                        <span className="text-[9px] text-indigo-200 mt-0.5">
-                          Carrier Partner will be auto-detected upon scan
-                        </span>
-                      </div>
+                      <div
+                        className={`relative z-10 w-4/5 max-w-sm h-24 rounded-xl border-2 pointer-events-none transition-colors ${
+                          cameraScanSuccess ? "border-emerald-400 bg-emerald-500/15" : "border-indigo-400/80"
+                        }`}
+                      />
                     )}
 
-                    {/* Guideline Overlay: QR Code (2D) */}
                     {cameraGuideMode === "qr" && (
-                      <div className="relative z-10 w-36 h-36 sm:w-40 sm:h-40 rounded-2xl border-2 border-emerald-400 bg-emerald-500/10 flex flex-col items-center justify-center p-2 text-center pointer-events-none shadow-[0_0_20px_rgba(16,185,129,0.25)]">
-                        <QrCode className="h-8 w-8 text-emerald-400 mb-1" />
-                        <span className="text-[11px] font-bold text-white tracking-wide">
-                          Position 2D QR Code inside box
-                        </span>
-                        <span className="text-[9px] text-emerald-200 mt-0.5">
-                          Target QR symbol
-                        </span>
+                      <div
+                        className={`relative z-10 w-40 h-40 sm:w-44 sm:h-44 rounded-2xl border-2 pointer-events-none transition-colors ${
+                          cameraScanSuccess ? "border-emerald-400 bg-emerald-500/15" : "border-emerald-400/80"
+                        }`}
+                      />
+                    )}
+
+                    {cameraGuideMode === "both" && (
+                      <div
+                        className={`relative z-10 w-4/5 max-w-md h-36 rounded-2xl border-2 pointer-events-none flex items-center justify-center transition-colors ${
+                          cameraScanSuccess ? "border-emerald-400 bg-emerald-500/15" : "border-white/50"
+                        }`}
+                      >
+                        <div className="w-28 h-28 rounded-xl border border-emerald-400/60" />
                       </div>
                     )}
 
-                    {/* Guideline Overlay: Both (Universal Reticle) */}
-                    {cameraGuideMode === "both" && (
-                      <div className="relative z-10 w-5/6 max-w-md h-32 rounded-xl border border-white/30 bg-black/20 flex items-center justify-center pointer-events-none">
-                        {/* Outer 1D slot */}
-                        <div className="w-full h-20 border-2 border-dashed border-indigo-400/80 rounded-lg flex items-center justify-center">
-                          {/* Inner 2D QR Target */}
-                          <div className="w-20 h-20 border-2 border-emerald-400/80 rounded-lg flex flex-col items-center justify-center bg-black/40">
-                            <QrCode className="h-5 w-5 text-emerald-300" />
-                            <span className="text-[8px] font-bold text-white">QR / 1D</span>
-                          </div>
+                    {/* Quick Success Mark Overlay when Barcode or QR is Read & Added */}
+                    {cameraScanSuccess && (
+                      <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-slate-950/65 backdrop-blur-[2px] animate-in zoom-in-95 duration-150 pointer-events-none">
+                        <div className="flex h-14 w-14 items-center justify-center rounded-full bg-emerald-500 text-white shadow-lg shadow-emerald-500/40 ring-4 ring-emerald-400/30">
+                          <Check className="h-8 w-8 stroke-[3.5]" />
                         </div>
-                        <div className="absolute bottom-1 text-[10px] text-slate-300 font-semibold text-center w-full">
-                          Universal Scanner: Auto-detects Barcode & QR Code
+                        <div className="mt-2.5 rounded-full bg-emerald-500/95 px-3.5 py-1 text-xs font-black tracking-wider text-white font-mono shadow-md">
+                          ✓ {cameraScanSuccess.code}
                         </div>
                       </div>
                     )}
@@ -2946,22 +3462,24 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
       )}
 
       {/* ============================================================== */}
-      {/* 8. BULK IMPORT MODAL WITH PREVIEW & CONFIRMATION               */}
+      {/* 8. BULK IMPORT MODAL WITH FULL REVIEW BEFORE IMPORT             */}
       {/* ============================================================== */}
       {isUploadModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs animate-in fade-in">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-0 sm:p-4 bg-slate-950/75 backdrop-blur-xs animate-in fade-in">
           <div className="fixed inset-0" onClick={() => setIsUploadModalOpen(false)} />
           <div
-            className="relative z-10 w-full max-w-xl sm:max-w-2xl rounded-3xl border border-slate-200 bg-white p-6 shadow-2xl dark:border-slate-800 dark:bg-slate-900 text-left"
+            className="relative z-10 w-full h-full sm:h-auto sm:max-h-[92vh] sm:max-w-3xl rounded-none sm:rounded-3xl border-0 sm:border border-slate-200 bg-white shadow-2xl dark:border-slate-800 dark:bg-slate-900 text-left flex flex-col overflow-hidden"
             onClick={(e) => e.stopPropagation()}
           >
             {/* Header */}
-            <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-4">
+            <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 px-5 sm:px-6 py-4 shrink-0 bg-white dark:bg-slate-900">
               <div className="flex items-center gap-2.5">
                 <div
-                  className={`flex h-9 w-9 items-center justify-center rounded-xl ${
+                  className={`flex h-9 w-9 items-center justify-center rounded-xl shrink-0 ${
                     importSuccessState
                       ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
+                      : previewShipments
+                      ? "bg-indigo-100 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300"
                       : "bg-emerald-50 text-emerald-600 dark:bg-emerald-950 dark:text-emerald-400"
                   }`}
                 >
@@ -2972,33 +3490,33 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                   )}
                 </div>
                 <div>
-                  <h3 className="text-base font-bold text-slate-900 dark:text-white">
+                  <h3 className="text-base font-extrabold text-slate-900 dark:text-white">
                     {importSuccessState
                       ? "Successfully Imported!"
                       : previewShipments
-                      ? "Review & Confirm Bulk Import"
-                      : "Bulk Import"}
+                      ? "Review Bulk Data Before Import"
+                      : "Bulk Import & Review"}
                   </h3>
                   <p className="text-[11px] text-slate-500">
                     {importSuccessState
                       ? "Consignments verified and committed to dashboard"
                       : previewShipments
-                      ? `Previewing parsed rows from ${previewFileName}`
-                      : "Upload Microsoft Excel (.xlsx, .xls) or Google Sheets workbooks"}
+                      ? `Inspect, edit carrier/status, or remove rows from ${previewFileName} before importing`
+                      : "Upload Excel (.xlsx, .xls, .csv) or paste AWB numbers to review before importing"}
                   </p>
                 </div>
               </div>
               <button
                 type="button"
                 onClick={handleCloseUploadModal}
-                className="rounded-xl p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800 cursor-pointer"
+                className="rounded-xl p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800 cursor-pointer"
                 title="Close modal"
               >
-                <X className="h-4 w-4" />
+                <X className="h-5 w-5" />
               </button>
             </div>
 
-            <div className="mt-5 space-y-4">
+            <div className="flex-1 overflow-y-auto p-5 sm:p-6 space-y-4">
               {/* SUCCESS STATE: Shows confirmation & closes automatically */}
               {importSuccessState ? (
                 <div className="py-6 px-3 text-center space-y-4 animate-in zoom-in-95 duration-200">
@@ -3050,104 +3568,185 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                   </div>
                 </div>
               ) : previewShipments ? (
-                /* PREVIEW MODE: Review & Confirm before adding to dashboard */
-                <div className="space-y-4">
-                  {/* Preview Summary Banner */}
-                  <div className="flex items-center justify-between rounded-2xl bg-indigo-50/80 p-3.5 border border-indigo-200/80 dark:bg-indigo-950/40 dark:border-indigo-800">
-                    <div className="flex items-center gap-2.5">
-                      <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-indigo-600 text-white font-black text-xs">
-                        <FileSpreadsheet className="h-4 w-4" />
-                      </span>
-                      <div>
-                        <div className="text-xs font-extrabold text-slate-900 dark:text-white">
-                          {previewShipments.length} Consignments Ready to Import
+                /* PRE-IMPORT REVIEW MODE: Inspect, Edit Batch Name, Adjust Carrier/Status, Remove Rows before Import */
+                (() => {
+                  const newReadyCount = previewShipments.filter(
+                    (p) => !shipments.some((s) => s.trackingNumber === p.trackingNumber)
+                  ).length;
+                  const duplicateCount = previewShipments.length - newReadyCount;
+
+                  return (
+                    <div className="space-y-4">
+                      {/* Review Summary & Editable Batch Name */}
+                      <div className="rounded-2xl bg-indigo-50/80 p-4 border border-indigo-200/80 dark:bg-indigo-950/40 dark:border-indigo-800 space-y-3">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex items-center gap-2.5">
+                            <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-indigo-600 text-white font-black text-xs shrink-0">
+                              <ShieldCheck className="h-4 w-4" />
+                            </span>
+                            <div>
+                              <div className="text-xs font-extrabold text-slate-900 dark:text-white">
+                                Pre-Import Data Verification & Review
+                              </div>
+                              <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                                Source: <span className="font-mono font-semibold">{previewFileName}</span> — Nothing is imported until you click Confirm below.
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="flex flex-wrap items-center gap-1.5 text-[11px] font-bold">
+                            <span className="rounded-lg bg-white dark:bg-slate-900 px-2.5 py-1 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700">
+                              Total Rows: {previewShipments.length}
+                            </span>
+                            <span className="rounded-lg bg-emerald-100 dark:bg-emerald-950 px-2.5 py-1 text-emerald-800 dark:text-emerald-300">
+                              Ready to Import: {newReadyCount}
+                            </span>
+                            {duplicateCount > 0 && (
+                              <span className="rounded-lg bg-amber-100 dark:bg-amber-950 px-2.5 py-1 text-amber-800 dark:text-amber-300">
+                                Duplicates Skipped: {duplicateCount}
+                              </span>
+                            )}
+                          </div>
                         </div>
-                        <div className="text-[11px] font-mono text-slate-500 truncate max-w-xs">
-                          {previewFileName} • Will create <strong>Batch #{uniqueBatches.length + 1}</strong>
+
+                        {/* Editable Batch Name Before Import */}
+                        <div className="flex flex-col sm:flex-row sm:items-center gap-2 pt-2 border-t border-indigo-200/60 dark:border-indigo-800/60">
+                          <label className="text-xs font-bold text-slate-700 dark:text-slate-300 shrink-0">
+                            Batch Name:
+                          </label>
+                          <input
+                            type="text"
+                            value={previewBatchName}
+                            onChange={(e) => setPreviewBatchName(e.target.value)}
+                            placeholder="Enter batch name..."
+                            className="flex-1 rounded-xl border border-indigo-200 bg-white px-3 py-1.5 text-xs font-bold text-slate-900 focus:border-indigo-500 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+                          />
                         </div>
                       </div>
-                    </div>
-                    <span className="rounded-md bg-emerald-100 px-2.5 py-1 text-[11px] font-extrabold text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300">
-                      Format Verified
-                    </span>
-                  </div>
 
-                  {/* Preview Table */}
-                  <div className="overflow-hidden rounded-2xl border border-slate-200 dark:border-slate-800">
-                    <div className="max-h-60 overflow-y-auto">
-                      <table className="w-full text-left text-xs">
-                        <thead className="sticky top-0 bg-slate-50 text-[10px] font-extrabold uppercase tracking-wider text-slate-500 dark:bg-slate-800 dark:text-slate-400 border-b border-slate-200 dark:border-slate-700">
-                          <tr>
-                            <th className="py-2.5 px-3">#</th>
-                            <th className="py-2.5 px-3">AWB / Consignment</th>
-                            <th className="py-2.5 px-3">Courier</th>
-                            <th className="py-2.5 px-3">Destination</th>
-                            <th className="py-2.5 px-3">Status</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-100 dark:divide-slate-800 bg-white dark:bg-slate-900">
-                          {previewShipments.map((p, idx) => (
-                            <tr key={p.id} className="hover:bg-slate-50/60 dark:hover:bg-slate-800/40">
-                              <td className="py-2.5 px-3 text-slate-400 font-mono text-[11px]">{idx + 1}</td>
-                              <td className="py-2.5 px-3 font-mono font-bold text-indigo-600 dark:text-indigo-400">
-                                {p.trackingNumber}
-                              </td>
-                              <td className="py-2.5 px-3">
-                                <span className="inline-flex items-center gap-1.5 font-semibold text-slate-700 dark:text-slate-300">
-                                  <span
-                                    className="h-2 w-2 rounded-full bg-indigo-500 dark:bg-indigo-400"
-                                  />
-                                  {p.courierName}
-                                </span>
-                              </td>
-                              <td className="py-2.5 px-3 text-slate-600 dark:text-slate-400 truncate max-w-[130px]">
-                                {p.destination}
-                              </td>
-                              <td className="py-2.5 px-3">
-                                <span
-                                  className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold ${
-                                    p.status === "delivered"
-                                      ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
-                                      : p.status === "returned"
-                                      ? "bg-rose-50 text-rose-700 dark:bg-rose-950 dark:text-rose-300"
-                                      : "bg-sky-50 text-sky-700 dark:bg-sky-950 dark:text-sky-300"
-                                  }`}
-                                >
-                                  {p.status === "delivered"
-                                    ? "Delivered"
-                                    : p.status === "returned"
-                                    ? "Returned"
-                                    : "In Transit"}
-                                </span>
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
+                      {uploadError && (
+                        <div className="rounded-2xl border border-rose-200 bg-rose-50 p-3 dark:border-rose-900/60 dark:bg-rose-950/60 flex items-start gap-2 text-xs text-rose-800 dark:text-rose-300">
+                          <ShieldAlert className="h-4 w-4 text-rose-600 shrink-0 mt-0.5" />
+                          <span>{uploadError}</span>
+                        </div>
+                      )}
 
-                  {/* Confirm & Cancel Actions */}
-                  <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3">
-                    <button
-                      type="button"
-                      onClick={handleCancelPreview}
-                      className="rounded-xl border border-slate-200 px-4 py-2.5 text-xs font-bold text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800 cursor-pointer"
-                    >
-                      Cancel / Choose Another File
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleConfirmImport}
-                      className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 px-5 py-2.5 text-xs font-extrabold text-white shadow-xs cursor-pointer transition-colors"
-                    >
-                      <Check className="h-4 w-4 stroke-[3]" />
-                      <span>Confirm Import ({previewShipments.length} Shipments)</span>
-                    </button>
-                  </div>
-                </div>
+                      {/* Interactive Review Table */}
+                      <div className="overflow-hidden rounded-2xl border border-slate-200 dark:border-slate-800">
+                        <div className="max-h-72 overflow-y-auto overflow-x-auto">
+                          <table className="w-full text-left text-xs min-w-[580px]">
+                            <thead className="sticky top-0 z-10 bg-slate-50 text-[10px] font-extrabold uppercase tracking-wider text-slate-500 dark:bg-slate-800 dark:text-slate-400 border-b border-slate-200 dark:border-slate-700">
+                              <tr>
+                                <th className="py-2.5 px-3">#</th>
+                                <th className="py-2.5 px-3">AWB / Consignment</th>
+                                <th className="py-2.5 px-3">Carrier Partner</th>
+                                <th className="py-2.5 px-3">Destination</th>
+                                <th className="py-2.5 px-3">Status</th>
+                                <th className="py-2.5 px-3 text-right">Remove</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-100 dark:divide-slate-800 bg-white dark:bg-slate-900">
+                              {previewShipments.map((p, idx) => {
+                                const isAlreadyInLive = shipments.some(
+                                  (s) => s.trackingNumber === p.trackingNumber
+                                );
+                                return (
+                                  <tr
+                                    key={p.id}
+                                    className={`hover:bg-slate-50/60 dark:hover:bg-slate-800/40 ${
+                                      isAlreadyInLive ? "opacity-60 bg-amber-50/30 dark:bg-amber-950/20" : ""
+                                    }`}
+                                  >
+                                    <td className="py-2.5 px-3 text-slate-400 font-mono text-[11px]">
+                                      {idx + 1}
+                                    </td>
+                                    <td className="py-2.5 px-3">
+                                      <div className="flex items-center gap-1.5">
+                                        <span className="font-mono font-bold text-indigo-600 dark:text-indigo-400">
+                                          {p.trackingNumber}
+                                        </span>
+                                        {isAlreadyInLive && (
+                                          <span className="rounded bg-amber-100 dark:bg-amber-950 px-1.5 py-0.5 text-[9px] font-bold text-amber-800 dark:text-amber-300">
+                                            Duplicate
+                                          </span>
+                                        )}
+                                      </div>
+                                    </td>
+                                    <td className="py-2.5 px-3">
+                                      <select
+                                        value={p.courierId}
+                                        onChange={(e) => handleUpdatePreviewCourier(p.id, e.target.value)}
+                                        className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-semibold text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 cursor-pointer"
+                                      >
+                                        {COURIER_LIST.map((c) => (
+                                          <option key={c.id} value={c.id}>
+                                            {c.name}
+                                          </option>
+                                        ))}
+                                      </select>
+                                    </td>
+                                    <td className="py-2.5 px-3 text-slate-600 dark:text-slate-400 truncate max-w-[140px]">
+                                      {p.destination}
+                                    </td>
+                                    <td className="py-2.5 px-3">
+                                      <select
+                                        value={p.status}
+                                        onChange={(e) =>
+                                          handleUpdatePreviewStatus(
+                                            p.id,
+                                            e.target.value as "in_transit" | "out_for_delivery" | "delivered" | "returned"
+                                          )
+                                        }
+                                        className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-bold text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 cursor-pointer"
+                                      >
+                                        <option value="in_transit">In Transit</option>
+                                        <option value="out_for_delivery">Out for Delivery</option>
+                                        <option value="delivered">Delivered</option>
+                                        <option value="returned">Returned (RTO)</option>
+                                      </select>
+                                    </td>
+                                    <td className="py-2.5 px-3 text-right">
+                                      <button
+                                        type="button"
+                                        onClick={() => handleRemovePreviewItem(p.id)}
+                                        className="p-1 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/60 transition-colors cursor-pointer"
+                                        title="Remove row from import"
+                                      >
+                                        <Trash2 className="h-3.5 w-3.5" />
+                                      </button>
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+
+                      {/* Confirm & Cancel Actions */}
+                      <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3">
+                        <button
+                          type="button"
+                          onClick={handleCancelPreview}
+                          className="rounded-xl border border-slate-200 px-4 py-2.5 text-xs font-bold text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800 cursor-pointer"
+                        >
+                          ← Back / Choose Another File
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleConfirmImport}
+                          disabled={newReadyCount === 0}
+                          className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 px-5 py-2.5 text-xs font-extrabold text-white shadow-xs cursor-pointer transition-colors disabled:cursor-not-allowed"
+                        >
+                          <Check className="h-4 w-4 stroke-[3]" />
+                          <span>Confirm & Import ({newReadyCount} Consignments)</span>
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })()
               ) : (
-                /* UPLOAD SELECTION MODE */
+                /* STEP 1: UPLOAD EXCEL/CSV OR PASTE BULK AWBs FOR REVIEW */
                 <div className="space-y-4">
                   {/* Download Sample Template Banner */}
                   <div className="rounded-2xl border border-indigo-200 bg-indigo-50/70 p-4 dark:border-indigo-900/50 dark:bg-indigo-950/40 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -3172,16 +3771,19 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                   {/* Upload Drop Zone */}
                   <div className="rounded-2xl border-2 border-dashed border-slate-300 bg-slate-50/50 p-6 text-center hover:border-indigo-500 hover:bg-indigo-50/20 dark:border-slate-700 dark:bg-slate-800/40 transition-colors">
                     <FileSpreadsheet className="mx-auto h-10 w-10 text-emerald-600 mb-2" />
-                    <label className="text-xs font-bold text-slate-700 dark:text-slate-200 block mb-1 cursor-pointer">
-                      Click to select Excel (.xlsx, .xls) file
+                    <label
+                      htmlFor="excel-file-input"
+                      className="text-xs font-bold text-slate-700 dark:text-slate-200 block mb-1 cursor-pointer"
+                    >
+                      Select Excel (.xlsx, .xls) or CSV (.csv) file to Review
                     </label>
                     <p className="text-[11px] text-slate-400 mb-3">
-                      Exported Google Sheets or Microsoft Excel workbooks (max 5MB)
+                      All rows will be shown in a review table before importing into your dashboard
                     </p>
                     <input
                       ref={fileInputRef}
                       type="file"
-                      accept=".xlsx, .xls, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, application/vnd.ms-excel"
+                      accept=".xlsx, .xls, .csv, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, application/vnd.ms-excel, text/csv"
                       onChange={handleFileChange}
                       className="hidden"
                       id="excel-file-input"
@@ -3191,8 +3793,36 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                       className="inline-flex items-center gap-1.5 rounded-xl border border-slate-300 bg-white px-4 py-2 text-xs font-bold text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 shadow-2xs cursor-pointer"
                     >
                       <Upload className="h-3.5 w-3.5" />
-                      <span>Browse Excel File</span>
+                      <span>{isUploading ? "Reading File..." : "Browse Spreadsheet for Review"}</span>
                     </label>
+                  </div>
+
+                  {/* Quick Bulk Paste Option (Also goes to Review Before Import) */}
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50/60 p-4 dark:border-slate-800 dark:bg-slate-800/40 space-y-2.5">
+                    <div className="flex items-center justify-between">
+                      <label className="text-xs font-bold text-slate-700 dark:text-slate-200">
+                        Or Paste Multiple Consignment / AWB Numbers for Review:
+                      </label>
+                      <span className="text-[10px] text-slate-400">Comma or line separated</span>
+                    </div>
+                    <textarea
+                      rows={3}
+                      value={bulkPasteText}
+                      onChange={(e) => setBulkPasteText(e.target.value)}
+                      placeholder="Paste multiple AWB numbers here (e.g. EL855948618IN, B4000211866)..."
+                      className="w-full rounded-xl border border-slate-200 bg-white p-3 font-mono text-xs text-slate-900 placeholder:font-sans placeholder:text-slate-400 focus:border-indigo-500 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+                    />
+                    <div className="flex justify-end">
+                      <button
+                        type="button"
+                        onClick={handleParseBulkPasteForReview}
+                        disabled={!bulkPasteText.trim()}
+                        className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 px-4 py-2 text-xs font-extrabold text-white shadow-xs cursor-pointer disabled:cursor-not-allowed"
+                      >
+                        <ArrowRight className="h-3.5 w-3.5" />
+                        <span>Review Bulk Data Before Import</span>
+                      </button>
+                    </div>
                   </div>
 
                   {/* Error Alert */}
@@ -3200,31 +3830,8 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                     <div className="rounded-2xl border border-rose-200 bg-rose-50 p-3.5 dark:border-rose-900/60 dark:bg-rose-950/60 flex items-start gap-2.5 text-xs text-rose-800 dark:text-rose-300">
                       <ShieldAlert className="h-5 w-5 text-rose-600 shrink-0 mt-0.5" />
                       <div>
-                        <div className="font-bold">File Rejected</div>
+                        <div className="font-bold">Notice</div>
                         <div className="mt-0.5">{uploadError}</div>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Success Alert */}
-                  {uploadSuccessMsg && (
-                    <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-3.5 dark:border-emerald-900/60 dark:bg-emerald-950/60 flex items-start gap-2.5 text-xs text-emerald-800 dark:text-emerald-300">
-                      <CheckCircle2 className="h-5 w-5 text-emerald-600 shrink-0 mt-0.5" />
-                      <div className="flex-1">
-                        <div className="font-bold">Import Successful</div>
-                        <div className="mt-0.5">{uploadSuccessMsg}</div>
-                        <div className="mt-2">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setStatusFilter("imported");
-                              handleCloseUploadModal();
-                            }}
-                            className="inline-flex items-center gap-1 text-[11px] font-extrabold text-emerald-700 dark:text-emerald-300 hover:underline cursor-pointer"
-                          >
-                            <span>View Imported Consignments in Dashboard →</span>
-                          </button>
-                        </div>
                       </div>
                     </div>
                   )}
@@ -3249,10 +3856,10 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
       {/* 9. DATA BACKUP & IMPORT BACKUP FOR SEPARATE REVIEW MODAL       */}
       {/* ============================================================== */}
       {isBackupModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/70 backdrop-blur-xs animate-in fade-in">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-0 sm:p-4 bg-slate-950/75 backdrop-blur-xs animate-in fade-in">
           <div className="fixed inset-0" onClick={() => setIsBackupModalOpen(false)} />
           <div
-            className="relative z-10 w-full max-w-3xl max-h-[92vh] flex flex-col rounded-3xl border border-slate-200 bg-white shadow-2xl dark:border-slate-800 dark:bg-slate-900 text-left overflow-hidden"
+            className="relative z-10 w-full h-full sm:h-auto sm:max-w-3xl sm:max-h-[92vh] flex flex-col rounded-none sm:rounded-3xl border-0 sm:border border-slate-200 bg-white shadow-2xl dark:border-slate-800 dark:bg-slate-900 text-left overflow-hidden"
             onClick={(e) => e.stopPropagation()}
           >
             {/* Modal Header */}

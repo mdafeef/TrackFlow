@@ -24,6 +24,26 @@ export function ShareCardModal({ data, isOpen, onClose }: ShareCardModalProps) {
   const dest = data.bookingDetails.destination.split(",")[0] || "Destination";
 
   useEffect(() => {
+    if (isOpen) {
+      document.documentElement.classList.add("modal-scroll-lock");
+      document.body.classList.add("modal-scroll-lock");
+      document.documentElement.style.overflow = "hidden";
+      document.body.style.overflow = "hidden";
+    } else {
+      document.documentElement.classList.remove("modal-scroll-lock");
+      document.body.classList.remove("modal-scroll-lock");
+      document.documentElement.style.overflow = "";
+      document.body.style.overflow = "";
+    }
+    return () => {
+      document.documentElement.classList.remove("modal-scroll-lock");
+      document.body.classList.remove("modal-scroll-lock");
+      document.documentElement.style.overflow = "";
+      document.body.style.overflow = "";
+    };
+  }, [isOpen]);
+
+  useEffect(() => {
     if (!isOpen) return;
 
     const renderCard = async () => {
@@ -134,11 +154,7 @@ export function ShareCardModal({ data, isOpen, onClose }: ShareCardModalProps) {
 
   if (!isOpen) return null;
 
-  const secureUrl = typeof window !== "undefined" && data.secureToken
-    ? `${window.location.origin}/tracking-result?token=${data.secureToken}`
-    : typeof window !== "undefined"
-    ? window.location.href
-    : "";
+  const shareSummaryText = `TrackFlow Status Update — #${trackingNumber} (${courierName}): ${statusPhrase} (${dateStr})`;
 
   const handleDownloadImage = () => {
     const canvas = canvasRef.current;
@@ -152,7 +168,7 @@ export function ShareCardModal({ data, isOpen, onClose }: ShareCardModalProps) {
 
   const handleCopyLink = () => {
     if (typeof navigator !== "undefined") {
-      navigator.clipboard.writeText(secureUrl);
+      navigator.clipboard.writeText(shareSummaryText);
       setCopiedLink(true);
       setTimeout(() => setCopiedLink(false), 2000);
     }
@@ -160,7 +176,7 @@ export function ShareCardModal({ data, isOpen, onClose }: ShareCardModalProps) {
 
   const handleShareWhatsApp = async () => {
     const text = encodeURIComponent(
-      `📦 TrackFlow Status Update for #${trackingNumber} (${courierName}):\n*${statusPhrase}*\n\nTrack verified real-time details here: ${secureUrl}`
+      `📦 TrackFlow Status Update for #${trackingNumber} (${courierName}):\n*${statusPhrase}*\nLast Updated: ${dateStr}`
     );
     window.open(`https://wa.me/?text=${text}`, "_blank", "noopener");
   };
@@ -224,19 +240,19 @@ export function ShareCardModal({ data, isOpen, onClose }: ShareCardModalProps) {
           </button>
         </div>
 
-        {/* Copy Share Link bar with Security Badge */}
+        {/* Copy Status Summary bar */}
         <div className="mt-3 space-y-1.5">
           <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 p-2 dark:border-slate-800 dark:bg-slate-950">
             <input
               type="text"
               readOnly
-              value={secureUrl}
+              value={shareSummaryText}
               className="flex-1 bg-transparent px-2 text-xs font-mono text-slate-600 dark:text-slate-300 focus:outline-none"
             />
             <button
               type="button"
               onClick={handleCopyLink}
-              className="flex items-center gap-1.5 rounded-lg bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 shadow-xs hover:bg-slate-100 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700 transition-colors"
+              className="flex items-center gap-1.5 rounded-lg bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 shadow-xs hover:bg-slate-100 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700 transition-colors cursor-pointer"
             >
               {copiedLink ? (
                 <>
@@ -246,13 +262,13 @@ export function ShareCardModal({ data, isOpen, onClose }: ShareCardModalProps) {
               ) : (
                 <>
                   <Copy className="h-3.5 w-3.5" />
-                  <span>Copy</span>
+                  <span>Copy Summary</span>
                 </>
               )}
             </button>
           </div>
           <p className="text-[11px] text-slate-500 dark:text-slate-400 px-1">
-            🔒 <strong>Tamper-Proof Link:</strong> Protected by cryptographic HMAC signature. Anyone attempting to edit the tracking number in this link will be rejected.
+            Protected Mode: Tracking details are rendered in-app without exposing query URLs to unauthorized third-party scrapers.
           </p>
         </div>
       </div>

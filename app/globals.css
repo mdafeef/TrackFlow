@@ -65,3 +65,19 @@
 .dark * {
   scrollbar-color: rgba(100, 116, 139, 0.45) transparent;
 }
+
+/* Completely lock and hide behind-page scrollbar when any modal/popup is open */
+html.modal-scroll-lock,
+body.modal-scroll-lock {
+  overflow: hidden !important;
+  overscroll-behavior: none !important;
+  scrollbar-width: none !important;
+}
+
+html.modal-scroll-lock::-webkit-scrollbar,
+body.modal-scroll-lock::-webkit-scrollbar {
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
+}
+
