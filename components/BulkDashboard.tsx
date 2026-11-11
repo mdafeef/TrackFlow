@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { useRouter } from "next/navigation";
 import {
   Package,
   CheckCircle2,
@@ -35,6 +36,8 @@ import {
   FileJson,
   Camera,
   CameraOff,
+  BarChart3,
+  HardDrive,
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import {
@@ -177,6 +180,7 @@ interface BulkDashboardProps {
 }
 
 export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
+  const router = useRouter();
   // Shipments state with batch metadata normalization
   const [shipments, setShipments] = useState<BulkShipment[]>(() => {
     if (typeof window !== "undefined") {
@@ -204,19 +208,20 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
   });
 
   const [searchFilter, setSearchFilter] = useState("");
-  const [statusFilter, setStatusFilter] = useState<"all" | "delivered" | "in_transit" | "out_for_delivery" | "returned" | "imported">("all");
+  const [statusFilter, setStatusFilter] = useState<"all" | "delivered" | "in_transit" | "out_for_delivery" | "returned" | "booked">("all");
+  const [activeSideTab, setActiveSideTab] = useState<"filters" | "analytics" | "settings">("filters");
+  const [exportBatchTargetId, setExportBatchTargetId] = useState<string>("all");
+  const [batchCsvExportMsg, setBatchCsvExportMsg] = useState<string | null>(null);
 
   // Auto-check Settings
-  // Default interval: 15 minutes = 900 seconds (Default ON)
-  const [isAutoCheckEnabled, setIsAutoCheckEnabled] = useState(() => {
-    if (typeof window !== "undefined") {
-      try {
-        const stored = localStorage.getItem("trackflow_auto_enabled");
-        if (stored !== null) return stored === "true";
-      } catch {}
-    }
-    return true;
-  });
+  // Automatic Background Check is ON by default (15 minutes = 900 seconds)
+  const [isAutoCheckEnabled, setIsAutoCheckEnabled] = useState<boolean>(true);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("trackflow_auto_enabled", "true");
+    } catch {}
+  }, []);
 
   const [checkIntervalSec, setCheckIntervalSec] = useState(() => {
     if (typeof window !== "undefined") {
@@ -260,12 +265,54 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
   const [isDeleteExportedModalOpen, setIsDeleteExportedModalOpen] = useState(false);
   const [exportDeliveredSuccessMsg, setExportDeliveredSuccessMsg] = useState<string | null>(null);
 
-  // Delivered Notification state
-  const [deliveredNotification, setDeliveredNotification] = useState<{
-    count: number;
-    items: { id: string; trackingNumber: string; courierName: string; destination: string }[];
-    timestamp: string;
-  } | null>(null);
+  // Stacked Top-Right Auto-Hiding Delivered Notifications state
+  const [deliveredNotifications, setDeliveredNotifications] = useState<
+    {
+      id: string;
+      shipmentId: string;
+      trackingNumber: string;
+      courierName: string;
+      destination: string;
+      recipientName?: string;
+      timestamp: string;
+    }[]
+  >([]);
+  const notificationTimersRef = useRef<Map<string, NodeJS.Timeout>>(new Map());
+
+  const dismissDeliveredNotification = useCallback((notifId: string) => {
+    const existingTimer = notificationTimersRef.current.get(notifId);
+    if (existingTimer) {
+      clearTimeout(existingTimer);
+      notificationTimersRef.current.delete(notifId);
+    }
+    setDeliveredNotifications((prev) => prev.filter((n) => n.id !== notifId));
+  }, []);
+
+  const pushDeliveredNotifications = useCallback(
+    (items: BulkShipment[]) => {
+      const nowStr = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      const newCards = items.map((d, idx) => ({
+        id: `deliv-toast-${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 6)}`,
+        shipmentId: d.id,
+        trackingNumber: d.trackingNumber,
+        courierName: d.courierName,
+        destination: d.destination,
+        recipientName: d.recipientName,
+        timestamp: nowStr,
+      }));
+
+      setDeliveredNotifications((prev) => [...newCards, ...prev].slice(0, 6));
+
+      newCards.forEach((card) => {
+        const timer = setTimeout(() => {
+          setDeliveredNotifications((prev) => prev.filter((n) => n.id !== card.id));
+          notificationTimersRef.current.delete(card.id);
+        }, 6500);
+        notificationTimersRef.current.set(card.id, timer);
+      });
+    },
+    []
+  );
 
   // Settings custom interval input
   const [customMinutesInput, setCustomMinutesInput] = useState("");
@@ -275,9 +322,11 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
   const [intakeAwb, setIntakeAwb] = useState("");
   const [intakeCourier, setIntakeCourier] = useState("speedpost");
   const [isIntakeCourierDropdownOpen, setIsIntakeCourierDropdownOpen] = useState(false);
+  const [intakeCourierSearch, setIntakeCourierSearch] = useState("");
+  const intakeCourierSearchRef = useRef<HTMLInputElement | null>(null);
   const [intakeRecipient, setIntakeRecipient] = useState("");
   const [intakeDestination, setIntakeDestination] = useState("");
-  const [intakeStatus, setIntakeStatus] = useState<"in_transit" | "out_for_delivery" | "delivered" | "returned">("in_transit");
+  const [intakeStatus, setIntakeStatus] = useState<"booked" | "in_transit" | "out_for_delivery" | "delivered" | "returned">("in_transit");
   const [isIntakeStatusDropdownOpen, setIsIntakeStatusDropdownOpen] = useState(false);
   const [intakeReturnReason, setIntakeReturnReason] = useState("");
   const [intakeError, setIntakeError] = useState("");
@@ -287,12 +336,48 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
   const [cameraGuideMode, setCameraGuideMode] = useState<"barcode" | "qr" | "both">("both");
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [cameraScanSuccess, setCameraScanSuccess] = useState<{ code: string; carrier: string } | null>(null);
+  const [isCancelIntakeConfirmOpen, setIsCancelIntakeConfirmOpen] = useState(false);
   const intakeInputRef = useRef<HTMLInputElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const cameraStreamRef = useRef<MediaStream | null>(null);
   const scanCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const lastScannedRef = useRef<{ code: string; timestamp: number }>({ code: "", timestamp: 0 });
   const scanSuccessTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Auto-filter when typing any letters while Add Consignments carrier dropdown is open
+  useEffect(() => {
+    if (!isIntakeCourierDropdownOpen) return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setIsIntakeCourierDropdownOpen(false);
+        return;
+      }
+      if (document.activeElement === intakeCourierSearchRef.current) return;
+      if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault();
+        setIntakeCourierSearch((prev) => prev + e.key);
+        intakeCourierSearchRef.current?.focus();
+      } else if (e.key === "Backspace") {
+        setIntakeCourierSearch((prev) => prev.slice(0, -1));
+        intakeCourierSearchRef.current?.focus();
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isIntakeCourierDropdownOpen]);
+
+  const filteredIntakeCouriers = useMemo(() => {
+    const q = intakeCourierSearch.trim().toLowerCase();
+    if (!q) return COURIER_LIST;
+    return COURIER_LIST.filter(
+      (c) =>
+        c.name.toLowerCase().includes(q) ||
+        c.shortName.toLowerCase().includes(q) ||
+        c.id.toLowerCase().includes(q)
+    );
+  }, [intakeCourierSearch]);
 
   // Batch Wise Ingestion state
   const [selectedBatchId, setSelectedBatchId] = useState<string>("all");
@@ -375,9 +460,12 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
 
   // Clean up timers on component unmount
   useEffect(() => {
+    const timersMap = notificationTimersRef.current;
     return () => {
       if (autoCloseTimerRef.current) clearTimeout(autoCloseTimerRef.current);
       if (scanSuccessTimerRef.current) clearTimeout(scanSuccessTimerRef.current);
+      timersMap.forEach((t) => clearTimeout(t));
+      timersMap.clear();
     };
   }, []);
 
@@ -420,13 +508,13 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
   const handleRunAutoCheck = useCallback(() => {
     setIsRefreshing(true);
 
-    // Simulate progress: advance one in-transit shipment towards delivery
+    // Simulate progress: advance shipments towards delivery
     setTimeout(() => {
       setShipments((prev) => {
         let updatedCount = 0;
         const newlyDeliveredShipments: BulkShipment[] = [];
         const nextList = prev.map((item) => {
-          if (item.status === "out_for_delivery" && updatedCount === 0) {
+          if (item.status === "out_for_delivery" && updatedCount < 2) {
             updatedCount++;
             const deliveredItem = {
               ...item,
@@ -446,21 +534,21 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
               lastUpdated: "Just Now",
             };
           }
+          if (item.status === "booked" && updatedCount === 0) {
+            updatedCount++;
+            return {
+              ...item,
+              status: "in_transit" as const,
+              statusText: "Dispatched from Origin Hub",
+              lastUpdated: "Just Now",
+            };
+          }
           return item;
         });
 
         if (newlyDeliveredShipments.length > 0) {
           playChime(true);
-          setDeliveredNotification({
-            count: newlyDeliveredShipments.length,
-            items: newlyDeliveredShipments.map((d) => ({
-              id: d.id,
-              trackingNumber: d.trackingNumber,
-              courierName: d.courierName,
-              destination: d.destination,
-            })),
-            timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-          });
+          pushDeliveredNotifications(newlyDeliveredShipments);
 
           if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "granted") {
             try {
@@ -484,7 +572,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
       setIsRefreshing(false);
       setSecondsRemaining(checkIntervalSec);
     }, 700);
-  }, [checkIntervalSec, playChime]);
+  }, [checkIntervalSec, playChime, pushDeliveredNotifications]);
 
   // Countdown timer for automatic check interval
   useEffect(() => {
@@ -545,8 +633,9 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
     courierOverride?: string,
     recipientOverride?: string,
     destinationOverride?: string,
-    statusOverride?: "in_transit" | "out_for_delivery" | "delivered" | "returned",
-    returnReasonOverride?: string
+    statusOverride?: "booked" | "in_transit" | "out_for_delivery" | "delivered" | "returned",
+    returnReasonOverride?: string,
+    scanSource: "manual" | "camera" = "manual"
   ) => {
     const cleanNum = awbToStage.trim().toUpperCase();
     if (!cleanNum || cleanNum.length < 4) {
@@ -573,8 +662,41 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
     }
 
     const isReturnedSim = cleanNum.includes("RT") || cleanNum.includes("RETURN");
-    const isDeliveredSim = cleanNum.endsWith("IN") && !isReturnedSim;
-    const finalStatus = statusOverride || (isReturnedSim ? "returned" : isDeliveredSim ? "delivered" : intakeStatus);
+    // Respect user-selected status in Add Consignment dropdown (including Booked), unless RTO prefix is scanned in camera mode
+    const finalStatus: BulkShipment["status"] =
+      statusOverride ||
+      (scanSource === "camera" && isReturnedSim ? "returned" : intakeStatus);
+
+    const resolvedDest = destinationOverride?.trim() || intakeDestination.trim() || "Destination Center";
+    const resolvedOrigin = "Origin Booking Facility";
+
+    const statusMetaMap: Record<
+      BulkShipment["status"],
+      { statusText: string; lastLocation: string }
+    > = {
+      booked: {
+        statusText: "Consignment Booked at Origin",
+        lastLocation: resolvedOrigin,
+      },
+      in_transit: {
+        statusText: "Active In-Transit Scan",
+        lastLocation: "Regional Sort Hub",
+      },
+      out_for_delivery: {
+        statusText: "Out for Delivery Today",
+        lastLocation: `${resolvedDest} Delivery Hub`,
+      },
+      delivered: {
+        statusText: "Delivered to Recipient",
+        lastLocation: resolvedDest,
+      },
+      returned: {
+        statusText: "Returned to Shipper (RTO)",
+        lastLocation: "Return Processing Hub",
+      },
+    };
+
+    const meta = statusMetaMap[finalStatus];
 
     const newStaged: BulkShipment = {
       id: `staged-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
@@ -582,20 +704,13 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
       courierId: chosenCourier.id,
       courierName: chosenCourier.name,
       status: finalStatus,
-      statusText:
-        finalStatus === "delivered"
-          ? "Delivered to Recipient"
-          : finalStatus === "out_for_delivery"
-          ? "Out for Delivery Today"
-          : finalStatus === "returned"
-          ? "Returned to Shipper (RTO)"
-          : "Active In-Transit Scan",
-      origin: "Origin Facility",
-      destination: destinationOverride?.trim() || intakeDestination.trim() || "Destination Center",
-      articleType: "Registered Consignment",
+      statusText: meta.statusText,
+      origin: resolvedOrigin,
+      destination: resolvedDest,
+      articleType: finalStatus === "booked" ? "Booked Consignment" : "Registered Consignment",
       weight: "250 g",
       lastUpdated: "Staged Just Now",
-      lastLocation: finalStatus === "returned" ? "Return Hub" : "Regional Sort Hub",
+      lastLocation: meta.lastLocation,
       recipientName: recipientOverride?.trim() || intakeRecipient.trim() || undefined,
       returnReason: finalStatus === "returned" ? (returnReasonOverride || intakeReturnReason.trim() || "Delivery Attempt Failed") : undefined,
     };
@@ -605,12 +720,22 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
     setRecentStagedCode(cleanNum);
     setTimeout(() => setRecentStagedCode(null), 3000);
 
-    // Auto-Next handling: if ON, clear input and refocus for next scan
+    // If scanned from camera, NEVER focus the text input so the mobile keyboard does not open!
+    if (scanSource === "camera" || isCameraActive) {
+      if (isAutoNextEnabled) {
+        setIntakeAwb("");
+      }
+      if (typeof document !== "undefined" && document.activeElement instanceof HTMLElement) {
+        document.activeElement.blur();
+      }
+      return;
+    }
+
+    // Manual / hardware input Auto-Next handling: if ON, clear input and refocus for next scan
     if (isAutoNextEnabled) {
       setIntakeAwb("");
       setIntakeRecipient("");
       setIntakeDestination("");
-      setIntakeStatus("in_transit");
       setIntakeReturnReason("");
       if (intakeInputRef.current) {
         intakeInputRef.current.focus();
@@ -620,7 +745,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
         intakeInputRef.current.select();
       }
     }
-  }, [stagedConsignments, intakeCourier, intakeStatus, intakeDestination, intakeRecipient, intakeReturnReason, isAutoNextEnabled, playChime]);
+  }, [stagedConsignments, intakeCourier, intakeStatus, intakeDestination, intakeRecipient, intakeReturnReason, isAutoNextEnabled, isCameraActive, playChime]);
 
   // Handle hardware scanner or manual Enter in input
   const handleIntakeKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -650,6 +775,44 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
       prev.map((item) =>
         item.id === id ? { ...item, courierId: courierMeta.id, courierName: courierMeta.name } : item
       )
+    );
+  };
+
+  // Update status for a staged item in review list
+  const handleUpdateStagedStatus = (
+    id: string,
+    newStatus: "booked" | "in_transit" | "out_for_delivery" | "delivered" | "returned"
+  ) => {
+    setStagedConsignments((prev) =>
+      prev.map((item) => {
+        if (item.id !== id) return item;
+        const statusText =
+          newStatus === "booked"
+            ? "Consignment Booked at Origin"
+            : newStatus === "delivered"
+            ? "Delivered to Recipient"
+            : newStatus === "out_for_delivery"
+            ? "Out for Delivery Today"
+            : newStatus === "returned"
+            ? "Returned to Shipper (RTO)"
+            : "Active In-Transit Scan";
+        const lastLocation =
+          newStatus === "booked"
+            ? item.origin || "Origin Booking Facility"
+            : newStatus === "delivered"
+            ? item.destination
+            : newStatus === "out_for_delivery"
+            ? `${item.destination} Delivery Hub`
+            : newStatus === "returned"
+            ? "Return Processing Hub"
+            : "Regional Sort Hub";
+        return {
+          ...item,
+          status: newStatus,
+          statusText,
+          lastLocation,
+        };
+      })
     );
   };
 
@@ -696,25 +859,84 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
     // Reset and close
     setStagedConsignments([]);
     setIntakeAwb("");
+    setIsCancelIntakeConfirmOpen(false);
     setIsAddConsignmentsModalOpen(false);
   };
 
-  // Toggle Camera Viewfinder
+  // Stop camera stream helper (preserves staged consignments for review)
+  const stopCameraStreamOnly = useCallback(() => {
+    if (cameraStreamRef.current) {
+      cameraStreamRef.current.getTracks().forEach((t) => t.stop());
+      cameraStreamRef.current = null;
+    }
+    setIsCameraActive(false);
+    setCameraError(null);
+    setCameraScanSuccess(null);
+    if (typeof document !== "undefined" && document.activeElement instanceof HTMLElement) {
+      document.activeElement.blur();
+    }
+  }, []);
+
+  // Open Separate Camera Scanner Only (dismisses keyboard immediately)
   const handleToggleCamera = () => {
     if (isCameraActive) {
-      if (cameraStreamRef.current) {
-        cameraStreamRef.current.getTracks().forEach((t) => t.stop());
-        cameraStreamRef.current = null;
-      }
-      setIsCameraActive(false);
-      setCameraError(null);
-      setCameraScanSuccess(null);
+      stopCameraStreamOnly();
     } else {
+      if (intakeInputRef.current) {
+        intakeInputRef.current.blur();
+      }
+      if (typeof document !== "undefined" && document.activeElement instanceof HTMLElement) {
+        document.activeElement.blur();
+      }
       setCameraError(null);
       setCameraScanSuccess(null);
       setIsCameraActive(true);
     }
   };
+
+  // Navigate to Separate Standalone Camera Scan Page (/scan)
+  const handleOpenSeparateCameraPage = useCallback(() => {
+    stopCameraStreamOnly();
+    try {
+      localStorage.setItem("trackflow_staged_consignments", JSON.stringify(stagedConsignments));
+      sessionStorage.setItem(
+        "trackflow_scan_context",
+        JSON.stringify({
+          mode: "bulk",
+          defaultStatus: intakeStatus,
+          defaultCourierId: intakeCourier || "auto",
+        })
+      );
+    } catch {}
+    router.push("/scan");
+  }, [stopCameraStreamOnly, stagedConsignments, intakeStatus, intakeCourier, router]);
+
+  // Check if returning from the dedicated /scan camera page with staged consignments for review
+  useEffect(() => {
+    try {
+      const rawReturn = sessionStorage.getItem("trackflow_scan_return");
+      if (rawReturn) {
+        const parsed = JSON.parse(rawReturn);
+        if (parsed.target === "bulk_review") {
+          sessionStorage.removeItem("trackflow_scan_return");
+          const rawStaged = localStorage.getItem("trackflow_staged_consignments");
+          if (rawStaged) {
+            const list = JSON.parse(rawStaged);
+            if (Array.isArray(list) && list.length > 0) {
+              setTimeout(() => {
+                setStagedConsignments(list);
+                setIsCameraActive(false);
+                setIsAddConsignmentsModalOpen(true);
+              }, 0);
+            }
+            localStorage.removeItem("trackflow_staged_consignments");
+          }
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
 
   // Extract clean AWB / Consignment ID from raw barcode or QR payload (handles URLs, JSON, or plain codes)
   const extractCleanScannedCode = useCallback((rawValue: string): string => {
@@ -854,7 +1076,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
       if (!isAutoNextEnabled) {
         setIntakeAwb(code);
       }
-      handleStageConsignment(code, detectedCarrier?.id);
+      handleStageConsignment(code, detectedCarrier?.id, undefined, undefined, undefined, undefined, "camera");
 
       // Trigger Quick Visual Success Mark inside Camera Viewfinder
       setCameraScanSuccess({
@@ -978,14 +1200,21 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
     };
   }, [isCameraActive, cameraGuideMode, isAutoNextEnabled, extractCleanScannedCode, handleStageConsignment]);
 
-  // Close Add Consignments Modal
-  const handleCloseAddConsignmentsModal = () => {
+  // Force discard all staged / typed intake data and close modal
+  const handleForceDiscardAndCloseIntake = () => {
     if (cameraStreamRef.current) {
       cameraStreamRef.current.getTracks().forEach((t) => t.stop());
       cameraStreamRef.current = null;
     }
     setIsCameraActive(false);
     setCameraScanSuccess(null);
+    setCameraError(null);
+    setStagedConsignments([]);
+    setIntakeAwb("");
+    setIntakeRecipient("");
+    setIntakeDestination("");
+    setIntakeReturnReason("");
+    setIsCancelIntakeConfirmOpen(false);
     setIsAddConsignmentsModalOpen(false);
     setIsIntakeCourierDropdownOpen(false);
     setIsIntakeStatusDropdownOpen(false);
@@ -993,17 +1222,27 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
     setRecentStagedCode(null);
   };
 
-  // Auto-focus input when Add Consignments Modal opens
-  useEffect(() => {
-    if (isAddConsignmentsModalOpen) {
-      const timer = setTimeout(() => {
-        intakeInputRef.current?.focus();
-      }, 100);
-      return () => clearTimeout(timer);
+  // Safe Close / Cancel Handler: Ask before cancel if there is any staged or typed data (both in Manual & Camera Scan)
+  const handleRequestCancelIntake = () => {
+    const hasUnsavedData = stagedConsignments.length > 0 || intakeAwb.trim().length > 0;
+    if (hasUnsavedData) {
+      setIsCancelIntakeConfirmOpen(true);
+      return;
     }
-  }, [isAddConsignmentsModalOpen]);
+    handleForceDiscardAndCloseIntake();
+  };
 
-  // File Format Validation & Preview for Excel / CSV / Google Sheet files
+  // Cancel button inside Separate Camera Scanner: asks before canceling if data exists, or exits camera if empty
+  const handleRequestCancelFromCamera = () => {
+    const hasUnsavedData = stagedConsignments.length > 0 || intakeAwb.trim().length > 0;
+    if (hasUnsavedData) {
+      setIsCancelIntakeConfirmOpen(true);
+      return;
+    }
+    stopCameraStreamOnly();
+  };
+
+  // Platform-Aware File Format Validation & Intelligent Column Analyzer for CSV / Excel / Google Sheets
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setUploadError(null);
     setUploadSuccessMsg(null);
@@ -1022,7 +1261,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
 
     if (!isValidExtension || isDangerous) {
       setUploadError(
-        "Invalid file format: Please upload a Microsoft Excel (.xlsx, .xls), CSV (.csv), or exported Google Sheets file."
+        "Invalid file format: Please upload a CSV (.csv), Microsoft Excel (.xlsx, .xls), or exported Google Sheets file."
       );
       if (fileInputRef.current) fileInputRef.current.value = "";
       return;
@@ -1030,7 +1269,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
 
     // Security Check 2: File Size Limit (Max 5MB)
     if (file.size > 5 * 1024 * 1024) {
-      setUploadError("File size exceeds 5MB limit. Please upload a spreadsheet under 5MB.");
+      setUploadError("File size exceeds 5MB limit. Please upload a CSV or spreadsheet under 5MB.");
       if (fileInputRef.current) fileInputRef.current.value = "";
       return;
     }
@@ -1045,19 +1284,24 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
 
         const firstSheetName = workbook.SheetNames[0];
         if (!firstSheetName) {
-          throw new Error("No worksheets found in this workbook.");
+          throw new Error("No worksheets or CSV rows found in this file.");
         }
 
         const worksheet = workbook.Sheets[firstSheetName];
-        const rows = XLSX.utils.sheet_to_json<unknown[]>(worksheet, { header: 1 });
+        const rows = XLSX.utils.sheet_to_json<unknown[]>(worksheet, { header: 1, defval: "" });
 
         if (rows.length < 1) {
-          throw new Error("The spreadsheet contains no rows. Please add tracking numbers.");
+          throw new Error("The file contains no rows. Please add tracking numbers.");
         }
 
-        // Determine if row 0 is a header row or data row
+        // Intelligent Platform Header Analysis (supports TrackFlow Bulk CSV Export, custom CSVs, and Excel sheets)
         const firstRow = (rows[0] || []) as unknown[];
-        const headerRow = firstRow.map((h) => String(h || "").toLowerCase().trim());
+        const headerRow = firstRow.map((h) =>
+          String(h || "")
+            .toLowerCase()
+            .replace(/[\s_-]+/g, " ")
+            .trim()
+        );
         const hasHeader = headerRow.some(
           (h) =>
             h.includes("track") ||
@@ -1066,25 +1310,48 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
             h.includes("number") ||
             h.includes("courier") ||
             h.includes("carrier") ||
-            h.includes("recipient")
+            h.includes("recipient") ||
+            h.includes("status") ||
+            h.includes("dest")
         );
 
         let awbColIdx = headerRow.findIndex(
-          (h) => h.includes("track") || h.includes("awb") || h.includes("consign") || h.includes("number")
+          (h) => h.includes("track") || h.includes("awb") || h.includes("consign") || h === "id" || h.includes("number")
         );
         if (awbColIdx === -1) awbColIdx = 0;
 
-        const courierColIdx = headerRow.findIndex((h) => h.includes("courier") || h.includes("carrier"));
-        const recipientColIdx = headerRow.findIndex((h) => h.includes("recipient") || h.includes("customer") || h.includes("name"));
-        const destColIdx = headerRow.findIndex((h) => h.includes("dest") || h.includes("city") || h.includes("address"));
+        const courierCodeColIdx = headerRow.findIndex(
+          (h) => h === "courier code" || h === "carrier code" || h === "courier id"
+        );
+        const courierNameColIdx = headerRow.findIndex(
+          (h) => h.includes("courier") || h.includes("carrier") || h.includes("partner")
+        );
+        const statusColIdx = headerRow.findIndex(
+          (h) => h === "status" || h === "delivery status" || h === "shipment status" || h === "current status"
+        );
+        const statusTextColIdx = headerRow.findIndex(
+          (h) => h.includes("status text") || h.includes("last event") || h.includes("remark") || h.includes("notes")
+        );
+        const originColIdx = headerRow.findIndex((h) => h.includes("origin") || h.includes("source") || h.includes("from"));
+        const destColIdx = headerRow.findIndex((h) => h.includes("dest") || h.includes("city") || h.includes("address") || h.includes("to"));
+        const recipientColIdx = headerRow.findIndex((h) => h.includes("recipient") || h.includes("customer") || h.includes("addressee") || h.includes("name"));
+        const articleTypeColIdx = headerRow.findIndex((h) => h.includes("article") || h.includes("type") || h.includes("service"));
+        const weightColIdx = headerRow.findIndex((h) => h.includes("weight"));
+        const returnReasonColIdx = headerRow.findIndex((h) => h.includes("return") || h.includes("rto"));
+        const batchNameColIdx = headerRow.findIndex((h) => h.includes("batch name") || h === "batch");
 
         const startIdx = hasHeader ? 1 : 0;
         const parsedItems: BulkShipment[] = [];
+        let detectedBatchNameFromCsv = "";
+
         for (let i = startIdx; i < rows.length; i++) {
           const row = rows[i] as unknown[];
           if (!row || row.length === 0) continue;
 
-          const rawAwb = String(row[awbColIdx] || "").trim().toUpperCase();
+          const rawAwb = String(row[awbColIdx] || "")
+            .trim()
+            .replace(/^["']|["']$/g, "")
+            .toUpperCase();
           if (!rawAwb || rawAwb.length < 4) continue;
 
           // Deduplicate within this parsed batch
@@ -1092,33 +1359,91 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
             continue;
           }
 
-          const rawCourier = courierColIdx !== -1 ? String(row[courierColIdx] || "").trim().toLowerCase() : "";
-          const detected = (rawCourier && COURIER_MAP[rawCourier]) ? COURIER_MAP[rawCourier] : autoDetectCourier(rawAwb) || COURIER_LIST[0];
-          const rawRecipient = recipientColIdx !== -1 ? String(row[recipientColIdx] || "").trim() : "";
-          const rawDest = destColIdx !== -1 ? String(row[destColIdx] || "").trim() : "";
+          // Match courier by code, name, shortName, or AWB auto-detection
+          const rawCourierCode = courierCodeColIdx !== -1 ? String(row[courierCodeColIdx] || "").trim().toLowerCase() : "";
+          const rawCourierAny = courierNameColIdx !== -1 ? String(row[courierNameColIdx] || "").trim().toLowerCase() : "";
+          const courierQuery = rawCourierCode || rawCourierAny;
 
-          const isReturnedSim = rawAwb.includes("RT") || rawAwb.includes("RETURN");
-          const isDeliveredSim = rawAwb.endsWith("IN") && !isReturnedSim;
+          const matchedCourierFromList = courierQuery
+            ? COURIER_MAP[courierQuery] ||
+              COURIER_LIST.find(
+                (c) =>
+                  c.id.toLowerCase() === courierQuery ||
+                  c.name.toLowerCase().includes(courierQuery) ||
+                  c.shortName.toLowerCase() === courierQuery
+              )
+            : null;
+          const detected = matchedCourierFromList || autoDetectCourier(rawAwb) || COURIER_LIST[0];
+
+          const rawRecipient = recipientColIdx !== -1 ? String(row[recipientColIdx] || "").trim() : "";
+          const rawOrigin = originColIdx !== -1 ? String(row[originColIdx] || "").trim() : "";
+          const rawDest = destColIdx !== -1 ? String(row[destColIdx] || "").trim() : "";
+          const rawArticle = articleTypeColIdx !== -1 ? String(row[articleTypeColIdx] || "").trim() : "";
+          const rawWeight = weightColIdx !== -1 ? String(row[weightColIdx] || "").trim() : "";
+          const rawStatus = statusColIdx !== -1 ? String(row[statusColIdx] || "").trim().toLowerCase() : "";
+          const rawStatusText = statusTextColIdx !== -1 ? String(row[statusTextColIdx] || "").trim() : "";
+          const rawReturnReason = returnReasonColIdx !== -1 ? String(row[returnReasonColIdx] || "").trim() : "";
+          const rawBatchName = batchNameColIdx !== -1 ? String(row[batchNameColIdx] || "").trim() : "";
+          if (rawBatchName && !detectedBatchNameFromCsv && rawBatchName.toLowerCase() !== "standard") {
+            detectedBatchNameFromCsv = rawBatchName;
+          }
+
+          // Platform-aware Status Normalization
+          let normalizedStatus: BulkShipment["status"] = "in_transit";
+          if (rawStatus) {
+            if (rawStatus.includes("book") || rawStatus.includes("manifest") || rawStatus.includes("picked")) {
+              normalizedStatus = "booked";
+            } else if (rawStatus.includes("deliver") && !rawStatus.includes("out") && !rawStatus.includes("undeliver")) {
+              normalizedStatus = "delivered";
+            } else if (rawStatus.includes("out") || rawStatus.includes("ofd") || rawStatus.includes("agent")) {
+              normalizedStatus = "out_for_delivery";
+            } else if (rawStatus.includes("return") || rawStatus.includes("rto") || rawStatus.includes("refused")) {
+              normalizedStatus = "returned";
+            } else {
+              normalizedStatus = "in_transit";
+            }
+          } else {
+            const isReturnedSim = rawAwb.includes("RT") || rawAwb.includes("RETURN");
+            const isDeliveredSim = rawAwb.endsWith("IN") && !isReturnedSim;
+            normalizedStatus = isReturnedSim ? "returned" : isDeliveredSim ? "delivered" : "in_transit";
+          }
+
+          const defaultStatusText =
+            normalizedStatus === "booked"
+              ? "Consignment Booked at Origin"
+              : normalizedStatus === "delivered"
+              ? "Delivered to Recipient"
+              : normalizedStatus === "out_for_delivery"
+              ? "Out for Delivery Today"
+              : normalizedStatus === "returned"
+              ? "Returned to Origin Hub (RTO)"
+              : "Active In-Transit Scan";
 
           parsedItems.push({
-            id: `bulk-excel-${Date.now()}-${i}`,
+            id: `bulk-import-${Date.now()}-${i}`,
             trackingNumber: rawAwb,
             courierId: detected.id,
             courierName: detected.name,
-            status: isReturnedSim ? "returned" : isDeliveredSim ? "delivered" : "in_transit",
-            statusText: isReturnedSim
-              ? "Returned to Origin Hub (RTO)"
-              : isDeliveredSim
-              ? "Delivered to Recipient"
-              : "Active In-Transit Scan",
-            origin: "Origin Logistics Facility",
+            status: normalizedStatus,
+            statusText: rawStatusText || defaultStatusText,
+            origin: rawOrigin || "Origin Logistics Facility",
             destination: rawDest || "Destination Center",
-            articleType: "Bulk Import",
-            weight: "320 g",
+            articleType: rawArticle || (fileName.endsWith(".csv") ? "CSV Import" : "Bulk Import"),
+            weight: rawWeight || "320 g",
             lastUpdated: "Staged for Review",
-            lastLocation: isReturnedSim ? "Return Hub" : "Regional Sort Facility",
-            recipientName: rawRecipient || "Recipient",
-            returnReason: isReturnedSim ? "Customer Refused Delivery" : undefined,
+            lastLocation:
+              normalizedStatus === "booked"
+                ? rawOrigin || "Origin Booking Facility"
+                : normalizedStatus === "returned"
+                ? "Return Hub"
+                : normalizedStatus === "delivered"
+                ? rawDest || "Destination Center"
+                : "Regional Sort Facility",
+            recipientName: rawRecipient && rawRecipient !== "N/A" ? rawRecipient : "Recipient",
+            returnReason:
+              normalizedStatus === "returned"
+                ? rawReturnReason || "Customer Refused / RTO"
+                : undefined,
             isImported: true,
           });
         }
@@ -1130,18 +1455,20 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
         // SHOW REVIEW BEFORE IMPORT (DO NOT IMPORT DIRECTLY)
         const cleanFile = file.name.replace(/\.(xlsx|xls|csv)$/i, "");
         setPreviewFileName(file.name);
-        setPreviewBatchName(`Batch #${uniqueBatches.length + 1} • ${cleanFile || "Bulk Import"}`);
+        setPreviewBatchName(
+          detectedBatchNameFromCsv || `Batch #${uniqueBatches.length + 1} • ${cleanFile || "Bulk Import"}`
+        );
         setPreviewShipments(parsedItems);
         if (fileInputRef.current) fileInputRef.current.value = "";
       } catch (err: unknown) {
-        setUploadError((err as Error)?.message || "Failed to parse spreadsheet. Please verify the file integrity.");
+        setUploadError((err as Error)?.message || "Failed to parse file. Please verify the CSV/Excel format.");
       } finally {
         setIsUploading(false);
       }
     };
 
     reader.onerror = () => {
-      setUploadError("Could not read the uploaded file. Please verify it is a valid spreadsheet.");
+      setUploadError("Could not read the uploaded file. Please verify it is a valid CSV or Excel file.");
       setIsUploading(false);
     };
 
@@ -1209,7 +1536,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
 
   const handleUpdatePreviewStatus = (
     id: string,
-    newStatus: "in_transit" | "out_for_delivery" | "delivered" | "returned"
+    newStatus: "booked" | "in_transit" | "out_for_delivery" | "delivered" | "returned"
   ) => {
     if (!previewShipments) return;
     setPreviewShipments(
@@ -1219,7 +1546,9 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
               ...item,
               status: newStatus,
               statusText:
-                newStatus === "delivered"
+                newStatus === "booked"
+                  ? "Consignment Booked at Origin"
+                  : newStatus === "delivered"
                   ? "Delivered to Recipient"
                   : newStatus === "out_for_delivery"
                   ? "Out for Delivery Today"
@@ -1332,7 +1661,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
       setIsUploadModalOpen(false);
       setPreviewShipments(null);
       setImportSuccessState(null);
-      setStatusFilter("imported");
+      setStatusFilter("all");
       setSelectedBatchId(newBatchId); // View this specific batch
     }, 1400);
   };
@@ -1527,24 +1856,25 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
   const handleDownloadSampleTemplate = () => {
     try {
       const templateData = [
-        ["Tracking_Number", "Courier_Code", "Recipient_Name", "Destination_City", "Weight_or_Type", "Notes"],
-        ["EL855948618IN", "speedpost", "Dr. Rajesh Kumar", "Thrissur, Kerala", "45 g", "Standard Speed Post Document"],
-        ["B4000211866", "dtdc", "Ananya Sharma", "Bangalore, Karnataka", "1.2 kg", "Express Cargo Electronics"],
-        ["FMPP4397267510", "ekart", "Vikram Patel", "Ahmedabad, Gujarat", "500 g", "E-Commerce Apparel"],
-        ["12345678901", "bluedart", "Pooja Verma", "Mumbai, Maharashtra", "200 g", "Priority Air Envelope"],
-        ["RT855948618IN", "speedpost", "K. Ramanathan", "Chennai, Tamil Nadu", "110 g", "Sample Returned / RTO Parcel"],
+        ["Tracking_Number", "Courier_Code", "Status", "Recipient_Name", "Origin", "Destination_City", "Weight", "Status_Text"],
+        ["EL855948618IN", "speedpost", "in_transit", "Dr. Rajesh Kumar", "Kochi, Kerala", "Thrissur, Kerala", "45 g", "Standard Speed Post Document"],
+        ["B4000211866", "dtdc", "booked", "Ananya Sharma", "Hyderabad, TS", "Bangalore, Karnataka", "1.2 kg", "Consignment Booked at Origin"],
+        ["FMPP4397267510", "ekart", "out_for_delivery", "Vikram Patel", "Surat, Gujarat", "Ahmedabad, Gujarat", "500 g", "Out for Delivery Today"],
+        ["12345678901", "bluedart", "delivered", "Pooja Verma", "Delhi Hub", "Mumbai, Maharashtra", "200 g", "Delivered to Recipient"],
+        ["RT855948618IN", "speedpost", "returned", "K. Ramanathan", "Madurai", "Chennai, Tamil Nadu", "110 g", "Returned to Shipper (RTO)"],
       ];
 
       const ws = XLSX.utils.aoa_to_sheet(templateData);
 
-      // Set column widths for readability
       ws["!cols"] = [
-        { wch: 18 }, // Tracking_Number
-        { wch: 14 }, // Courier_Code
-        { wch: 20 }, // Recipient_Name
-        { wch: 22 }, // Destination_City
-        { wch: 16 }, // Weight_or_Type
-        { wch: 30 }, // Notes
+        { wch: 18 },
+        { wch: 14 },
+        { wch: 16 },
+        { wch: 20 },
+        { wch: 18 },
+        { wch: 22 },
+        { wch: 12 },
+        { wch: 30 },
       ];
 
       const wb = XLSX.utils.book_new();
@@ -1554,6 +1884,159 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
     } catch (e) {
       console.error("Failed to generate sample Excel workbook:", e);
     }
+  };
+
+  // Generate & Download Platform-Ready Sample CSV Template (.csv)
+  const handleDownloadSampleCsvTemplate = () => {
+    try {
+      const headers = [
+        "Tracking_Number",
+        "Courier_Code",
+        "Courier_Name",
+        "Status",
+        "Status_Text",
+        "Origin",
+        "Destination",
+        "Recipient_Name",
+        "Article_Type",
+        "Weight",
+      ];
+      const sampleRows = [
+        ["EL855948618IN", "speedpost", "India Post Speed Post", "in_transit", "Active In-Transit Scan", "Kochi Hub", "Thrissur, Kerala", "Dr. Rajesh Kumar", "Speed Post Parcel", "45 g"],
+        ["B4000211866", "dtdc", "DTDC Express", "booked", "Consignment Booked at Origin", "Hyderabad Hub", "Bangalore, Karnataka", "Ananya Sharma", "Express Cargo", "1.2 kg"],
+        ["FMPP4397267510", "ekart", "Ekart Logistics", "out_for_delivery", "Out for Delivery Today", "Surat Facility", "Ahmedabad, Gujarat", "Vikram Patel", "E-Commerce Parcel", "500 g"],
+        ["12345678901", "bluedart", "Blue Dart Express", "delivered", "Delivered to Recipient", "New Delhi", "Mumbai, Maharashtra", "Pooja Verma", "Priority Air", "200 g"],
+      ];
+
+      const escapeCsvVal = (val: string) => {
+        const str = String(val ?? "");
+        if (str.includes(",") || str.includes('"') || str.includes("\n")) {
+          return `"${str.replace(/"/g, '""')}"`;
+        }
+        return str;
+      };
+
+      const csvString = [
+        headers.join(","),
+        ...sampleRows.map((r) => r.map(escapeCsvVal).join(",")),
+      ].join("\n");
+
+      const blob = new Blob([csvString], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "TrackFlow_Platform_Sample.csv";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      playChime(false);
+    } catch (e) {
+      console.error("Failed to generate sample CSV:", e);
+    }
+  };
+
+  // Bulk Export Feature: Download all tracked shipment data within a selected batch (or all batches) as a structured CSV file
+  const handleExportBatchCsv = (overrideBatchId?: string) => {
+    const targetId = overrideBatchId || exportBatchTargetId || selectedBatchId || "all";
+    const listToExport = activeShipments.filter((item) => {
+      if (targetId === "all") return true;
+      if (targetId === "imported_all") return !!item.isImported;
+      if (targetId === "direct_only") return !item.isImported;
+      return item.batchId === targetId;
+    });
+
+    if (listToExport.length === 0) {
+      setBatchCsvExportMsg("No consignments found in the selected batch scope to export.");
+      setTimeout(() => setBatchCsvExportMsg(null), 5000);
+      return;
+    }
+
+    const headers = [
+      "Tracking_Number",
+      "Courier_Code",
+      "Courier_Name",
+      "Status",
+      "Status_Text",
+      "Origin",
+      "Destination",
+      "Recipient_Name",
+      "Article_Type",
+      "Weight",
+      "Last_Updated",
+      "Last_Location",
+      "Return_Reason",
+      "Batch_ID",
+      "Batch_Name",
+      "Imported_At",
+      "Exported_At",
+    ];
+
+    const exportedAtIso = new Date().toISOString();
+    const escapeCsvVal = (val: string | undefined) => {
+      const str = String(val ?? "");
+      if (str.includes(",") || str.includes('"') || str.includes("\n")) {
+        return `"${str.replace(/"/g, '""')}"`;
+      }
+      return str;
+    };
+
+    const csvLines = [
+      headers.join(","),
+      ...listToExport.map((s) =>
+        [
+          s.trackingNumber,
+          s.courierId,
+          s.courierName,
+          s.status,
+          s.statusText,
+          s.origin,
+          s.destination,
+          s.recipientName || "",
+          s.articleType,
+          s.weight,
+          s.lastUpdated,
+          s.lastLocation,
+          s.returnReason || "",
+          s.batchId || "direct",
+          s.batchName || "Direct Dashboard Entry",
+          s.importedAt || "Direct",
+          exportedAtIso,
+        ]
+          .map(escapeCsvVal)
+          .join(",")
+      ),
+    ];
+
+    const csvContent = csvLines.join("\n");
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const dateStr = new Date().toISOString().split("T")[0];
+
+    const batchObj = uniqueBatches.find((b) => b.id === targetId);
+    const safeBatchSlug = batchObj
+      ? batchObj.name.replace(/[^a-zA-Z0-9_-]+/g, "_").slice(0, 32)
+      : targetId === "imported_all"
+      ? "All_Imported_Batches"
+      : targetId === "direct_only"
+      ? "Direct_Entries"
+      : "All_Shipments";
+
+    a.href = url;
+    a.download = `TrackFlow_Bulk_Export_${safeBatchSlug}_${dateStr}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+
+    playChime(true);
+    setBatchCsvExportMsg(
+      `Exported ${listToExport.length} consignment${listToExport.length > 1 ? "s" : ""} (${
+        batchObj ? batchObj.name : safeBatchSlug.replace(/_/g, " ")
+      }) as CSV.`
+    );
+    setTimeout(() => setBatchCsvExportMsg(null), 6000);
   };
 
   // Toggle selection for all visible filtered shipments
@@ -1638,8 +2121,15 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
   // Active dataset: either live shipments or backup review dataset when reviewing in separate mode
   const activeShipments = isReviewingSeparately && backupReviewData ? backupReviewData.shipments : shipments;
 
-  // Filtered shipments
-  const filteredShipments = activeShipments.filter((item) => {
+  // Step 1: Apply Batch Scope ("all" = all shipments, "imported_all" = all imported batches, or a specific batchId)
+  const batchScopedShipments = activeShipments.filter((item) => {
+    if (selectedBatchId === "all") return true;
+    if (selectedBatchId === "imported_all") return !!item.isImported;
+    return item.batchId === selectedBatchId;
+  });
+
+  // Step 2: Apply Search + Delivery Status Filter on top of the selected Batch Scope
+  const filteredShipments = batchScopedShipments.filter((item) => {
     const matchesSearch =
       item.trackingNumber.toLowerCase().includes(searchFilter.toLowerCase()) ||
       item.courierName.toLowerCase().includes(searchFilter.toLowerCase()) ||
@@ -1649,26 +2139,89 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
 
     if (!matchesSearch) return false;
 
-    // Batch-wise filter
-    if (selectedBatchId !== "all") {
-      if (item.batchId !== selectedBatchId) return false;
-    }
-
     if (statusFilter === "delivered") return item.status === "delivered";
     if (statusFilter === "out_for_delivery") return item.status === "out_for_delivery";
     if (statusFilter === "in_transit") return item.status === "in_transit";
     if (statusFilter === "returned") return item.status === "returned";
-    if (statusFilter === "imported") return !!item.isImported;
+    if (statusFilter === "booked") return item.status === "booked";
     return true;
   });
 
-  // Calculate statistics from activeShipments
+  // Overall dashboard statistics (for top KPI cards)
   const totalCount = activeShipments.length;
   const deliveredCount = activeShipments.filter((s) => s.status === "delivered").length;
   const outCount = activeShipments.filter((s) => s.status === "out_for_delivery").length;
   const inTransitCount = activeShipments.filter((s) => s.status === "in_transit").length;
   const returnedCount = activeShipments.filter((s) => s.status === "returned").length;
+  const bookedCount = activeShipments.filter((s) => s.status === "booked").length;
   const importedCount = activeShipments.filter((s) => s.isImported).length;
+
+  // Scope-aware statistics (reflects either All Shipments or the currently selected Batch)
+  const scopedTotalCount = batchScopedShipments.length;
+  const scopedDeliveredCount = batchScopedShipments.filter((s) => s.status === "delivered").length;
+  const scopedOutCount = batchScopedShipments.filter((s) => s.status === "out_for_delivery").length;
+  const scopedInTransitCount = batchScopedShipments.filter((s) => s.status === "in_transit").length;
+  const scopedReturnedCount = batchScopedShipments.filter((s) => s.status === "returned").length;
+  const scopedBookedCount = batchScopedShipments.filter((s) => s.status === "booked").length;
+
+  // Comprehensive Data Size & Volume Analytics
+  const dataAnalytics = useMemo(() => {
+    const serialized = JSON.stringify(activeShipments);
+    let usedBytes = serialized.length;
+    try {
+      if (typeof Blob !== "undefined") {
+        usedBytes = new Blob([serialized]).size;
+      }
+    } catch {}
+
+    const maxQuotaBytes = 5 * 1024 * 1024; // 5 MB LocalStorage standard quota
+    const avgBytesPerRecord =
+      activeShipments.length > 0 ? Math.max(180, Math.round(usedBytes / activeShipments.length)) : 320;
+    const quotaPercent = Math.min(100, Number(((usedBytes / maxQuotaBytes) * 100).toFixed(2)));
+    const estimatedRemainingRecords = Math.max(
+      0,
+      Math.floor((maxQuotaBytes - usedBytes) / avgBytesPerRecord)
+    );
+
+    const formattedSize =
+      usedBytes < 1024
+        ? `${usedBytes} B`
+        : usedBytes < 1024 * 1024
+        ? `${(usedBytes / 1024).toFixed(2)} KB`
+        : `${(usedBytes / (1024 * 1024)).toFixed(2)} MB`;
+
+    const carrierCounts = new Map<string, { name: string; count: number }>();
+    activeShipments.forEach((s) => {
+      const prev = carrierCounts.get(s.courierId);
+      if (prev) {
+        prev.count += 1;
+      } else {
+        carrierCounts.set(s.courierId, { name: s.courierName, count: 1 });
+      }
+    });
+
+    const carrierBreakdown = Array.from(carrierCounts.entries())
+      .map(([id, info]) => ({
+        id,
+        name: info.name,
+        count: info.count,
+        percent: activeShipments.length > 0 ? Math.round((info.count / activeShipments.length) * 100) : 0,
+      }))
+      .sort((a, b) => b.count - a.count);
+
+    return {
+      totalRecords: activeShipments.length,
+      importedRecords: importedCount,
+      directRecords: Math.max(0, activeShipments.length - importedCount),
+      batchesCount: uniqueBatches.length,
+      usedBytes,
+      formattedSize,
+      avgBytesPerRecord,
+      quotaPercent,
+      estimatedRemainingRecords,
+      carrierBreakdown,
+    };
+  }, [activeShipments, importedCount, uniqueBatches.length]);
 
   return (
     /* Dashboard Page Container with comfortable side margin gaps */
@@ -1726,6 +2279,63 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
       )}
 
       {/* ============================================================== */}
+      {/* TOP-RIGHT STACKED AUTO-HIDING DELIVERED NOTIFICATION CARDS     */}
+      {/* ============================================================== */}
+      {deliveredNotifications.length > 0 && (
+        <div className="fixed top-20 right-4 z-[60] flex flex-col gap-2.5 w-[calc(100vw-2rem)] sm:w-96 pointer-events-none">
+          {deliveredNotifications.map((notif) => (
+            <div
+              key={notif.id}
+              className="pointer-events-auto rounded-2xl border border-emerald-300/90 bg-white/95 dark:border-emerald-800 dark:bg-slate-900/95 p-3.5 shadow-xl backdrop-blur-md flex items-start justify-between gap-3 animate-in fade-in slide-in-from-right-5 duration-200"
+            >
+              <div className="flex items-start gap-3 min-w-0">
+                <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-emerald-600 text-white shadow-xs shrink-0 mt-0.5">
+                  <CheckCircle2 className="h-4 w-4 stroke-[2.5]" />
+                </div>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[10px] font-black uppercase tracking-wider text-emerald-700 dark:text-emerald-400">
+                      Shipment Delivered
+                    </span>
+                    <span className="text-[10px] font-mono text-slate-400">
+                      • {notif.timestamp}
+                    </span>
+                  </div>
+                  <div className="text-xs font-black font-mono text-slate-900 dark:text-white truncate mt-0.5">
+                    {notif.trackingNumber}
+                  </div>
+                  <p className="text-[11px] font-medium text-slate-600 dark:text-slate-300 truncate">
+                    {notif.courierName} → {notif.destination}
+                  </p>
+                  <div className="mt-2 flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setStatusFilter("delivered");
+                        dismissDeliveredNotification(notif.id);
+                      }}
+                      className="rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white px-2.5 py-1 text-[10px] font-bold shadow-2xs cursor-pointer transition-colors"
+                    >
+                      View Delivered
+                    </button>
+                    <span className="text-[10px] text-slate-400">Auto-hides in 6s</span>
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => dismissDeliveredNotification(notif.id)}
+                className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800 cursor-pointer shrink-0"
+                title="Dismiss notification"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* ============================================================== */}
       {/* 1. TOP HEADER CONTROLS                                         */}
       {/* ============================================================== */}
       <div className="rounded-3xl border border-slate-200/90 bg-white/95 p-5 sm:p-6 shadow-xs dark:border-slate-800 dark:bg-slate-900/90 backdrop-blur-md">
@@ -1742,19 +2352,64 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
               Bulk Tracking & Shipment Operations
             </h1>
             <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-              Multi-carrier fleet monitoring, automatic SLA sync, hardware barcode scanning, and Excel ingestion.
+              Multi-carrier fleet monitoring, automatic SLA sync, hardware barcode scanning, and CSV/Excel ingestion.
             </p>
           </div>
 
-          {/* Action Buttons: Unified Add Consignments & Bulk Import */}
+          {/* Action Buttons: Sync Timer + Unified Add Consignments + Bulk Import */}
           <div className="flex flex-wrap items-center gap-2.5">
-            {/* Unified All-in-One Add Consignments (Manual, Hardware Barcode, Camera QR/Barcode) */}
+            {/* Compact Next Check Timer Pill */}
+            <div className="flex items-center gap-2 bg-slate-50 dark:bg-slate-800/80 px-3 py-2 rounded-xl border border-slate-200/80 dark:border-slate-700 shadow-2xs">
+              <div className="relative flex h-2.5 w-2.5 shrink-0">
+                {isAutoCheckEnabled ? (
+                  <>
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                    <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500" />
+                  </>
+                ) : (
+                  <span className="inline-flex rounded-full h-2.5 w-2.5 bg-slate-400" />
+                )}
+              </div>
+              <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">
+                {isAutoCheckEnabled ? "Sync:" : "Paused"}
+              </span>
+              {isAutoCheckEnabled && (
+                <span className="font-mono text-xs font-black text-slate-900 dark:text-white tabular-nums">
+                  {formatTimer(secondsRemaining)}
+                </span>
+              )}
+              <button
+                type="button"
+                onClick={handleRunAutoCheck}
+                disabled={isRefreshing}
+                className="ml-1 flex items-center gap-1 rounded-lg bg-white px-2 py-1 text-[10px] font-bold text-slate-700 hover:text-indigo-600 dark:bg-slate-700 dark:text-slate-200 shadow-2xs transition-colors cursor-pointer disabled:opacity-50"
+                title="Trigger immediate sync check"
+              >
+                <RefreshCw className={`h-3 w-3 ${isRefreshing ? "animate-spin text-indigo-600" : ""}`} />
+                <span className="hidden sm:inline">Check Now</span>
+              </button>
+            </div>
+
+            {/* Dedicated Separate Camera Scan Page */}
+            <button
+              type="button"
+              onClick={handleOpenSeparateCameraPage}
+              className="inline-flex items-center gap-1.5 rounded-xl border border-indigo-200 bg-indigo-50/80 px-3.5 py-2.5 text-xs font-bold text-indigo-700 hover:border-indigo-400 hover:bg-indigo-100/80 dark:border-indigo-800/80 dark:bg-indigo-950/60 dark:text-indigo-300 shadow-2xs transition-all cursor-pointer"
+              title="Open standalone full-screen camera scanner page (/scan)"
+            >
+              <Camera className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
+              <span>Camera Scan Page</span>
+            </button>
+
+            {/* Unified All-in-One Add Consignments */}
             <button
               type="button"
               onClick={() => {
                 setIntakeError("");
                 setIntakeAwb("");
                 setRecentStagedCode(null);
+                setIsCancelIntakeConfirmOpen(false);
+                setIsCameraActive(false);
                 setIsAddConsignmentsModalOpen(true);
               }}
               className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-xs font-bold text-slate-700 hover:border-indigo-400 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 shadow-2xs transition-all cursor-pointer"
@@ -1782,130 +2437,16 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
             </button>
           </div>
         </div>
-
-        {/* Delivered Notification Banner */}
-        {deliveredNotification && (
-          <div className="mt-4 rounded-2xl border border-emerald-300 bg-emerald-50/90 dark:border-emerald-800 dark:bg-emerald-950/80 p-4 shadow-sm flex items-center justify-between gap-3 animate-in fade-in slide-in-from-top-1">
-            <div className="flex items-center gap-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-emerald-600 text-white shadow-xs shrink-0">
-                <CheckCircle2 className="h-5 w-5 stroke-[2.4]" />
-              </div>
-              <div>
-                <div className="flex items-center gap-2">
-                  <span className="text-xs font-black uppercase tracking-wider text-emerald-800 dark:text-emerald-300">
-                    Shipment Delivered Notification
-                  </span>
-                  <span className="text-[10px] font-mono text-emerald-600 dark:text-emerald-400">
-                    • {deliveredNotification.timestamp}
-                  </span>
-                </div>
-                <p className="text-xs font-bold text-slate-800 dark:text-slate-100 mt-0.5">
-                  {deliveredNotification.count === 1
-                    ? `Consignment #${deliveredNotification.items[0].trackingNumber} (${deliveredNotification.items[0].courierName}) was successfully delivered at ${deliveredNotification.items[0].destination}!`
-                    : `${deliveredNotification.count} Consignments were successfully delivered to addressees!`}
-                </p>
-              </div>
-            </div>
-            <div className="flex items-center gap-2 shrink-0">
-              <button
-                type="button"
-                onClick={() => {
-                  setStatusFilter("delivered");
-                  setDeliveredNotification(null);
-                }}
-                className="rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 text-xs font-bold shadow-xs cursor-pointer transition-colors"
-              >
-                View in Delivered
-              </button>
-              <button
-                type="button"
-                onClick={() => setDeliveredNotification(null)}
-                className="rounded-lg p-1.5 text-emerald-700 hover:bg-emerald-100 dark:text-emerald-300 dark:hover:bg-emerald-900 cursor-pointer"
-                title="Dismiss notification"
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* ============================================================== */}
-        {/* FRONT STATUS BAR: ONLY SHOW NEXT CHECK TIMER & SETTINGS GEAR   */}
-        {/* ============================================================== */}
-        <div className="mt-5 pt-4 border-t border-slate-100 dark:border-slate-800 flex flex-wrap items-center justify-between gap-4">
-          {/* Front Next Check Timer Card */}
-          <div className="flex items-center gap-3">
-            <div className="flex items-center gap-2.5 bg-slate-50 dark:bg-slate-800/80 px-3.5 py-2 rounded-2xl border border-slate-200/80 dark:border-slate-700 shadow-2xs">
-              <div className="relative flex h-3 w-3 shrink-0">
-                {isAutoCheckEnabled ? (
-                  <>
-                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
-                    <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500" />
-                  </>
-                ) : (
-                  <span className="inline-flex rounded-full h-3 w-3 bg-slate-400" />
-                )}
-              </div>
-
-              <div className="flex items-center gap-2">
-                <span className="text-xs font-semibold text-slate-500 dark:text-slate-400">
-                  {isAutoCheckEnabled ? "Next check in:" : "Auto-check:"}
-                </span>
-                <span className="font-mono text-sm font-black text-slate-900 dark:text-white tabular-nums">
-                  {isAutoCheckEnabled ? formatTimer(secondsRemaining) : "Paused"}
-                </span>
-              </div>
-
-              {/* Instant Manual Check Now Button */}
-              <button
-                type="button"
-                onClick={handleRunAutoCheck}
-                disabled={isRefreshing}
-                className="ml-2 flex items-center gap-1 rounded-lg bg-white px-2 py-1 text-[11px] font-bold text-slate-700 hover:text-indigo-600 dark:bg-slate-700 dark:text-slate-200 dark:hover:text-indigo-300 shadow-2xs transition-colors cursor-pointer disabled:opacity-50"
-                title="Trigger immediate sync check"
-              >
-                <RefreshCw className={`h-3 w-3 ${isRefreshing ? "animate-spin text-indigo-600" : ""}`} />
-                <span className="hidden sm:inline">Check Now</span>
-              </button>
-            </div>
-
-            {/* Quick Resume button if paused */}
-            {!isAutoCheckEnabled && (
-              <button
-                type="button"
-                onClick={handleToggleAutoCheck}
-                className="inline-flex items-center gap-1 rounded-xl bg-emerald-50 px-3 py-1.5 text-xs font-bold text-emerald-700 hover:bg-emerald-100 dark:bg-emerald-950/60 dark:text-emerald-300 transition-colors cursor-pointer"
-              >
-                <Play className="h-3 w-3 fill-current" />
-                <span>Resume</span>
-              </button>
-            )}
-          </div>
-
-          {/* Settings Trigger: opens settings modal where frequency (5m, 10m, 15m, 30m, 1hr, custom) lives */}
-          <button
-            type="button"
-            onClick={() => setIsSettingsOpen(true)}
-            className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-bold text-slate-700 hover:border-indigo-400 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 shadow-2xs transition-all cursor-pointer"
-            title="Configure auto-check frequency and intervals"
-          >
-            <Settings className="h-4 w-4 text-slate-500 dark:text-slate-400" />
-            <span>Settings</span>
-            <span className="text-[11px] font-mono font-medium text-slate-400">
-              ({Math.round(checkIntervalSec / 60)}m freq)
-            </span>
-          </button>
-        </div>
       </div>
 
       {/* ============================================================== */}
-      {/* 2. SUMMARY METRICS CARDS (INCLUDING RETURNED / RTO)           */}
+      {/* 2. SUMMARY METRICS CARDS (INCLUDING BOOKED & RETURNED / RTO)   */}
       {/* ============================================================== */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3.5">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
         {/* Total Shipments */}
         <div
           onClick={() => setStatusFilter("all")}
-          className={`rounded-2xl border p-4 transition-all cursor-pointer ${
+          className={`rounded-2xl border p-3.5 transition-all cursor-pointer ${
             statusFilter === "all"
               ? "border-indigo-500 bg-indigo-50/60 shadow-xs dark:border-indigo-600 dark:bg-indigo-950/40"
               : "border-slate-200 bg-white hover:border-slate-300 dark:border-slate-800 dark:bg-slate-900"
@@ -1915,56 +2456,35 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
             <span className="font-bold">Total Tracked</span>
             <Package className="h-4 w-4 text-indigo-600" />
           </div>
-          <div className="mt-2 text-2xl font-black text-slate-900 dark:text-white tabular-nums">
+          <div className="mt-1.5 text-2xl font-black text-slate-900 dark:text-white tabular-nums">
             {totalCount}
           </div>
-          <div className="mt-1 text-[11px] text-slate-500">All consignments</div>
+          <div className="mt-0.5 text-[11px] text-slate-500">All consignments</div>
         </div>
 
-        {/* Delivered */}
+        {/* Booked */}
         <div
-          onClick={() => setStatusFilter("delivered")}
-          className={`rounded-2xl border p-4 transition-all cursor-pointer ${
-            statusFilter === "delivered"
-              ? "border-emerald-500 bg-emerald-50/60 shadow-xs dark:border-emerald-600 dark:bg-emerald-950/40"
+          onClick={() => setStatusFilter("booked")}
+          className={`rounded-2xl border p-3.5 transition-all cursor-pointer ${
+            statusFilter === "booked"
+              ? "border-violet-500 bg-violet-50/60 shadow-xs dark:border-violet-600 dark:bg-violet-950/40"
               : "border-slate-200 bg-white hover:border-slate-300 dark:border-slate-800 dark:bg-slate-900"
           }`}
         >
-          <div className="flex items-center justify-between text-xs text-emerald-600 dark:text-emerald-400 font-bold">
-            <span>Delivered</span>
-            <CheckCircle2 className="h-4 w-4" />
+          <div className="flex items-center justify-between text-xs text-violet-600 dark:text-violet-400 font-bold">
+            <span>Booked</span>
+            <Package className="h-4 w-4" />
           </div>
-          <div className="mt-2 text-2xl font-black text-emerald-600 dark:text-emerald-400 tabular-nums">
-            {deliveredCount}
+          <div className="mt-1.5 text-2xl font-black text-violet-600 dark:text-violet-400 tabular-nums">
+            {bookedCount}
           </div>
-          <div className="mt-1 text-[11px] text-slate-500">
-            {totalCount > 0 ? `${Math.round((deliveredCount / totalCount) * 100)}% completed` : "0%"}
-          </div>
-        </div>
-
-        {/* Out for Delivery */}
-        <div
-          onClick={() => setStatusFilter("out_for_delivery")}
-          className={`rounded-2xl border p-4 transition-all cursor-pointer ${
-            statusFilter === "out_for_delivery"
-              ? "border-amber-500 bg-amber-50/60 shadow-xs dark:border-amber-600 dark:bg-amber-950/40"
-              : "border-slate-200 bg-white hover:border-slate-300 dark:border-slate-800 dark:bg-slate-900"
-          }`}
-        >
-          <div className="flex items-center justify-between text-xs text-amber-600 dark:text-amber-400 font-bold">
-            <span>Out for Delivery</span>
-            <Truck className="h-4 w-4" />
-          </div>
-          <div className="mt-2 text-2xl font-black text-amber-600 dark:text-amber-400 tabular-nums">
-            {outCount}
-          </div>
-          <div className="mt-1 text-[11px] text-slate-500">Courier rider dispatched</div>
+          <div className="mt-0.5 text-[11px] text-slate-500">Booked at origin</div>
         </div>
 
         {/* In Transit */}
         <div
           onClick={() => setStatusFilter("in_transit")}
-          className={`rounded-2xl border p-4 transition-all cursor-pointer ${
+          className={`rounded-2xl border p-3.5 transition-all cursor-pointer ${
             statusFilter === "in_transit"
               ? "border-sky-500 bg-sky-50/60 shadow-xs dark:border-sky-600 dark:bg-sky-950/40"
               : "border-slate-200 bg-white hover:border-slate-300 dark:border-slate-800 dark:bg-slate-900"
@@ -1974,16 +2494,56 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
             <span>In Transit</span>
             <Clock className="h-4 w-4" />
           </div>
-          <div className="mt-2 text-2xl font-black text-sky-600 dark:text-sky-400 tabular-nums">
+          <div className="mt-1.5 text-2xl font-black text-sky-600 dark:text-sky-400 tabular-nums">
             {inTransitCount}
           </div>
-          <div className="mt-1 text-[11px] text-slate-500">Between sort hubs</div>
+          <div className="mt-0.5 text-[11px] text-slate-500">Between sort hubs</div>
         </div>
 
-        {/* RETURNED / RTO SUPPORT: How to see if returned */}
+        {/* Out for Delivery */}
+        <div
+          onClick={() => setStatusFilter("out_for_delivery")}
+          className={`rounded-2xl border p-3.5 transition-all cursor-pointer ${
+            statusFilter === "out_for_delivery"
+              ? "border-amber-500 bg-amber-50/60 shadow-xs dark:border-amber-600 dark:bg-amber-950/40"
+              : "border-slate-200 bg-white hover:border-slate-300 dark:border-slate-800 dark:bg-slate-900"
+          }`}
+        >
+          <div className="flex items-center justify-between text-xs text-amber-600 dark:text-amber-400 font-bold">
+            <span>Out for Delivery</span>
+            <Truck className="h-4 w-4" />
+          </div>
+          <div className="mt-1.5 text-2xl font-black text-amber-600 dark:text-amber-400 tabular-nums">
+            {outCount}
+          </div>
+          <div className="mt-0.5 text-[11px] text-slate-500">Rider dispatched</div>
+        </div>
+
+        {/* Delivered */}
+        <div
+          onClick={() => setStatusFilter("delivered")}
+          className={`rounded-2xl border p-3.5 transition-all cursor-pointer ${
+            statusFilter === "delivered"
+              ? "border-emerald-500 bg-emerald-50/60 shadow-xs dark:border-emerald-600 dark:bg-emerald-950/40"
+              : "border-slate-200 bg-white hover:border-slate-300 dark:border-slate-800 dark:bg-slate-900"
+          }`}
+        >
+          <div className="flex items-center justify-between text-xs text-emerald-600 dark:text-emerald-400 font-bold">
+            <span>Delivered</span>
+            <CheckCircle2 className="h-4 w-4" />
+          </div>
+          <div className="mt-1.5 text-2xl font-black text-emerald-600 dark:text-emerald-400 tabular-nums">
+            {deliveredCount}
+          </div>
+          <div className="mt-0.5 text-[11px] text-slate-500">
+            {totalCount > 0 ? `${Math.round((deliveredCount / totalCount) * 100)}% completed` : "0%"}
+          </div>
+        </div>
+
+        {/* RETURNED / RTO SUPPORT */}
         <div
           onClick={() => setStatusFilter("returned")}
-          className={`rounded-2xl border p-4 transition-all cursor-pointer ${
+          className={`rounded-2xl border p-3.5 transition-all cursor-pointer ${
             statusFilter === "returned"
               ? "border-rose-500 bg-rose-50/60 shadow-xs dark:border-rose-600 dark:bg-rose-950/40"
               : "border-slate-200 bg-white hover:border-slate-300 dark:border-slate-800 dark:bg-slate-900"
@@ -1993,628 +2553,914 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
             <span>Returned (RTO)</span>
             <RotateCcw className="h-4 w-4" />
           </div>
-          <div className="mt-2 text-2xl font-black text-rose-600 dark:text-rose-400 tabular-nums">
+          <div className="mt-1.5 text-2xl font-black text-rose-600 dark:text-rose-400 tabular-nums">
             {returnedCount}
           </div>
-          <div className="mt-1 text-[11px] text-slate-500">Returned to origin shipper</div>
+          <div className="mt-0.5 text-[11px] text-slate-500">Returned to origin</div>
         </div>
       </div>
 
       {/* ============================================================== */}
-      {/* 3. REFINED NON-SCROLLABLE FILTER HUB & MULTI-BATCH MANAGER     */}
+      {/* 3. MODERN SIDE SECTION + MAIN SHIPMENTS WORKSPACE              */}
       {/* ============================================================== */}
-      <div className="rounded-3xl border border-slate-200/90 bg-white p-4 sm:p-5 shadow-xs dark:border-slate-800 dark:bg-slate-900 space-y-4">
-        {/* Top Row: Search Bar + Quick Batch Selector Dropdown + Manage Batches Toggle */}
-        <div className="flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-3">
-          {/* Search Input */}
-          <div className="relative flex-1">
-            <Search className="absolute left-3.5 top-3 h-4 w-4 text-slate-400" />
-            <input
-              type="text"
-              value={searchFilter}
-              onChange={(e) => setSearchFilter(e.target.value)}
-              placeholder="Search AWB, Courier, Recipient, Batch, or City..."
-              className="w-full rounded-2xl border border-slate-200 bg-slate-50/70 pl-10 pr-9 py-2.5 text-xs font-semibold text-slate-900 placeholder:text-slate-400 focus:border-indigo-500 focus:bg-white focus:outline-none dark:border-slate-800 dark:bg-slate-800/60 dark:text-white dark:focus:bg-slate-900 transition-colors"
-            />
-            {searchFilter && (
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+        {/* LEFT / SIDE SECTION: Modern Tabbed Control Panel (Filters, Data Analytics, Settings & Bulk Export) */}
+        <aside className="lg:col-span-4 xl:col-span-4 lg:sticky lg:top-20 rounded-3xl border border-slate-200/90 bg-white shadow-xs dark:border-slate-800 dark:bg-slate-900 overflow-hidden">
+          {/* Segmented Modern Side Navigation */}
+          <div className="border-b border-slate-100 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/50 p-2">
+            <div className="grid grid-cols-3 gap-1 rounded-2xl bg-slate-200/70 dark:bg-slate-900 p-1">
               <button
                 type="button"
-                onClick={() => setSearchFilter("")}
-                className="absolute right-3 top-2.5 rounded-lg p-0.5 text-slate-400 hover:bg-slate-200/70 hover:text-slate-600 dark:hover:bg-slate-700"
-                title="Clear search"
-              >
-                <X className="h-3.5 w-3.5" />
-              </button>
-            )}
-          </div>
-
-          {/* Batch Filter Controls (Dropdown + Manage Batches Drawer Trigger) */}
-          {uniqueBatches.length > 0 && (
-            <div className="flex flex-wrap sm:flex-nowrap items-center gap-2">
-              <div className="relative flex-1 sm:flex-initial min-w-[200px]">
-                <select
-                  value={selectedBatchId}
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    setSelectedBatchId(val);
-                    if (val !== "all" && statusFilter !== "imported") {
-                      // Keep status filter flexible so user can view all or specific status within batch
-                    }
-                  }}
-                  aria-label="Filter by Batch"
-                  className="w-full appearance-none rounded-2xl border border-slate-200 bg-slate-50/90 pl-3.5 pr-9 py-2.5 text-xs font-bold text-slate-800 focus:border-indigo-500 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 cursor-pointer"
-                >
-                  <option value="all">All Batches ({importedCount} imported)</option>
-                  {uniqueBatches.map((b) => (
-                    <option key={b.id} value={b.id}>
-                      {b.name} ({b.count})
-                    </option>
-                  ))}
-                </select>
-                <ChevronDown className="pointer-events-none absolute right-3 top-3 h-4 w-4 text-slate-400" />
-              </div>
-
-              <button
-                type="button"
-                onClick={() => setIsBatchManagerOpen((prev) => !prev)}
-                className={`inline-flex items-center justify-center gap-1.5 rounded-2xl border px-3.5 py-2.5 text-xs font-bold transition-all cursor-pointer shrink-0 ${
-                  isBatchManagerOpen || selectedBatchId !== "all" || statusFilter === "imported"
-                    ? "border-emerald-500 bg-emerald-50 text-emerald-800 dark:border-emerald-700 dark:bg-emerald-950/70 dark:text-emerald-300 shadow-2xs"
-                    : "border-slate-200 bg-white text-slate-700 hover:border-emerald-300 hover:bg-emerald-50/40 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+                onClick={() => setActiveSideTab("filters")}
+                className={`flex items-center justify-center gap-1.5 rounded-xl py-2 px-2 text-xs font-extrabold transition-all cursor-pointer ${
+                  activeSideTab === "filters"
+                    ? "bg-white text-indigo-600 shadow-xs dark:bg-slate-800 dark:text-indigo-400"
+                    : "text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200"
                 }`}
-                title="View, rename, or delete imported batches"
               >
-                <FileSpreadsheet className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
-                <span>Manage Batches ({uniqueBatches.length})</span>
-                <ChevronDown
-                  className={`h-3.5 w-3.5 transition-transform ${
-                    isBatchManagerOpen || selectedBatchId !== "all" || statusFilter === "imported" ? "rotate-180" : ""
-                  }`}
-                />
+                <SlidersHorizontal className="h-3.5 w-3.5 shrink-0" />
+                <span>Filters</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setActiveSideTab("analytics")}
+                className={`flex items-center justify-center gap-1.5 rounded-xl py-2 px-2 text-xs font-extrabold transition-all cursor-pointer ${
+                  activeSideTab === "analytics"
+                    ? "bg-white text-indigo-600 shadow-xs dark:bg-slate-800 dark:text-indigo-400"
+                    : "text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200"
+                }`}
+              >
+                <BarChart3 className="h-3.5 w-3.5 shrink-0" />
+                <span>Analytics</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setActiveSideTab("settings")}
+                className={`flex items-center justify-center gap-1.5 rounded-xl py-2 px-2 text-xs font-extrabold transition-all cursor-pointer ${
+                  activeSideTab === "settings"
+                    ? "bg-white text-indigo-600 shadow-xs dark:bg-slate-800 dark:text-indigo-400"
+                    : "text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200"
+                }`}
+              >
+                <Settings className="h-3.5 w-3.5 shrink-0" />
+                <span>Settings</span>
               </button>
             </div>
-          )}
-        </div>
+          </div>
 
-        {/* Non-Scrollable Responsive Status Filter Grid (Order: All, Delivered, Out for Delivery, In Transit, Returned (RTO), Imported) */}
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
-          <button
-            type="button"
-            onClick={() => {
-              setStatusFilter("all");
-              setSelectedBatchId("all");
-            }}
-            className={`flex items-center justify-between rounded-2xl border px-3.5 py-2.5 text-xs font-bold transition-all cursor-pointer ${
-              statusFilter === "all"
-                ? "border-indigo-600 bg-indigo-600 text-white shadow-xs dark:border-indigo-500 dark:bg-indigo-600"
-                : "border-slate-200/90 bg-slate-50/70 text-slate-700 hover:bg-slate-100 dark:border-slate-800 dark:bg-slate-800/50 dark:text-slate-300 dark:hover:bg-slate-800"
-            }`}
-          >
-            <span className="truncate">All</span>
-            <span
-              className={`ml-1.5 rounded-lg px-2 py-0.5 font-mono text-[11px] font-black tabular-nums ${
-                statusFilter === "all"
-                  ? "bg-white/20 text-white"
-                  : "bg-slate-200/80 text-slate-700 dark:bg-slate-700 dark:text-slate-300"
-              }`}
-            >
-              {totalCount}
-            </span>
-          </button>
+          {/* SIDE SECTION BODY */}
+          <div className="p-4 sm:p-5 space-y-4">
+            {/* TAB 1: FILTERS & BATCH MANAGEMENT */}
+            {activeSideTab === "filters" && (
+              <div className="space-y-4 animate-in fade-in duration-150">
+                {/* Search Input */}
+                <div>
+                  <label className="text-[11px] font-extrabold uppercase tracking-wider text-slate-400 dark:text-slate-500 block mb-1.5">
+                    Quick Search
+                  </label>
+                  <div className="relative">
+                    <Search className="absolute left-3.5 top-3 h-4 w-4 text-slate-400" />
+                    <input
+                      type="text"
+                      value={searchFilter}
+                      onChange={(e) => setSearchFilter(e.target.value)}
+                      placeholder="Search AWB, Courier, City..."
+                      className="w-full rounded-2xl border border-slate-200 bg-slate-50/70 pl-10 pr-9 py-2.5 text-xs font-semibold text-slate-900 placeholder:text-slate-400 focus:border-indigo-500 focus:bg-white focus:outline-none dark:border-slate-800 dark:bg-slate-800/60 dark:text-white dark:focus:bg-slate-900 transition-colors"
+                    />
+                    {searchFilter && (
+                      <button
+                        type="button"
+                        onClick={() => setSearchFilter("")}
+                        className="absolute right-3 top-2.5 rounded-lg p-0.5 text-slate-400 hover:bg-slate-200/70 hover:text-slate-600 dark:hover:bg-slate-700"
+                        title="Clear search"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                  </div>
+                </div>
 
-          <button
-            type="button"
-            onClick={() => setStatusFilter("delivered")}
-            className={`flex items-center justify-between rounded-2xl border px-3.5 py-2.5 text-xs font-bold transition-all cursor-pointer ${
-              statusFilter === "delivered"
-                ? "border-emerald-600 bg-emerald-600 text-white shadow-xs dark:border-emerald-500 dark:bg-emerald-600"
-                : "border-slate-200/90 bg-slate-50/70 text-slate-700 hover:bg-emerald-50/60 dark:border-slate-800 dark:bg-slate-800/50 dark:text-slate-300 dark:hover:bg-slate-800"
-            }`}
-          >
-            <span className="truncate">Delivered</span>
-            <span
-              className={`ml-1.5 rounded-lg px-2 py-0.5 font-mono text-[11px] font-black tabular-nums ${
-                statusFilter === "delivered"
-                  ? "bg-white/20 text-white"
-                  : "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/80 dark:text-emerald-300"
-              }`}
-            >
-              {deliveredCount}
-            </span>
-          </button>
+                {/* Delivery Status Filter Stack */}
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="text-[11px] font-extrabold uppercase tracking-wider text-slate-400 dark:text-slate-500">
+                      Shipment Status
+                    </label>
+                    {statusFilter !== "all" && (
+                      <button
+                        type="button"
+                        onClick={() => setStatusFilter("all")}
+                        className="text-[11px] font-bold text-indigo-600 hover:underline dark:text-indigo-400 cursor-pointer"
+                      >
+                        Reset
+                      </button>
+                    )}
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setStatusFilter("all")}
+                      className={`flex items-center justify-between rounded-xl border px-3 py-2 text-xs font-bold transition-all cursor-pointer ${
+                        statusFilter === "all"
+                          ? "border-indigo-600 bg-indigo-600 text-white shadow-2xs"
+                          : "border-slate-200/90 bg-slate-50/70 text-slate-700 hover:bg-slate-100 dark:border-slate-800 dark:bg-slate-800/50 dark:text-slate-300"
+                      }`}
+                    >
+                      <span className="truncate">All</span>
+                      <span className={`ml-1 rounded-md px-1.5 py-0.5 font-mono text-[10px] font-black tabular-nums ${
+                        statusFilter === "all" ? "bg-white/20 text-white" : "bg-slate-200/80 text-slate-700 dark:bg-slate-700 dark:text-slate-300"
+                      }`}>
+                        {scopedTotalCount}
+                      </span>
+                    </button>
 
-          <button
-            type="button"
-            onClick={() => setStatusFilter("out_for_delivery")}
-            className={`flex items-center justify-between rounded-2xl border px-3.5 py-2.5 text-xs font-bold transition-all cursor-pointer ${
-              statusFilter === "out_for_delivery"
-                ? "border-amber-500 bg-amber-500 text-white shadow-xs dark:border-amber-500 dark:bg-amber-500"
-                : "border-slate-200/90 bg-slate-50/70 text-slate-700 hover:bg-amber-50/60 dark:border-slate-800 dark:bg-slate-800/50 dark:text-slate-300 dark:hover:bg-slate-800"
-            }`}
-          >
-            <span className="truncate">Out for Delivery</span>
-            <span
-              className={`ml-1.5 rounded-lg px-2 py-0.5 font-mono text-[11px] font-black tabular-nums ${
-                statusFilter === "out_for_delivery"
-                  ? "bg-white/20 text-white"
-                  : "bg-amber-100 text-amber-800 dark:bg-amber-950/80 dark:text-amber-300"
-              }`}
-            >
-              {outCount}
-            </span>
-          </button>
+                    <button
+                      type="button"
+                      onClick={() => setStatusFilter("booked")}
+                      className={`flex items-center justify-between rounded-xl border px-3 py-2 text-xs font-bold transition-all cursor-pointer ${
+                        statusFilter === "booked"
+                          ? "border-violet-600 bg-violet-600 text-white shadow-2xs"
+                          : "border-slate-200/90 bg-slate-50/70 text-slate-700 hover:bg-violet-50/60 dark:border-slate-800 dark:bg-slate-800/50 dark:text-slate-300"
+                      }`}
+                    >
+                      <span className="truncate">Booked</span>
+                      <span className={`ml-1 rounded-md px-1.5 py-0.5 font-mono text-[10px] font-black tabular-nums ${
+                        statusFilter === "booked" ? "bg-white/20 text-white" : "bg-violet-100 text-violet-800 dark:bg-violet-950/80 dark:text-violet-300"
+                      }`}>
+                        {scopedBookedCount}
+                      </span>
+                    </button>
 
-          <button
-            type="button"
-            onClick={() => setStatusFilter("in_transit")}
-            className={`flex items-center justify-between rounded-2xl border px-3.5 py-2.5 text-xs font-bold transition-all cursor-pointer ${
-              statusFilter === "in_transit"
-                ? "border-sky-600 bg-sky-600 text-white shadow-xs dark:border-sky-500 dark:bg-sky-600"
-                : "border-slate-200/90 bg-slate-50/70 text-slate-700 hover:bg-sky-50/60 dark:border-slate-800 dark:bg-slate-800/50 dark:text-slate-300 dark:hover:bg-slate-800"
-            }`}
-          >
-            <span className="truncate">In Transit</span>
-            <span
-              className={`ml-1.5 rounded-lg px-2 py-0.5 font-mono text-[11px] font-black tabular-nums ${
-                statusFilter === "in_transit"
-                  ? "bg-white/20 text-white"
-                  : "bg-sky-100 text-sky-800 dark:bg-sky-950/80 dark:text-sky-300"
-              }`}
-            >
-              {inTransitCount}
-            </span>
-          </button>
+                    <button
+                      type="button"
+                      onClick={() => setStatusFilter("in_transit")}
+                      className={`flex items-center justify-between rounded-xl border px-3 py-2 text-xs font-bold transition-all cursor-pointer ${
+                        statusFilter === "in_transit"
+                          ? "border-sky-600 bg-sky-600 text-white shadow-2xs"
+                          : "border-slate-200/90 bg-slate-50/70 text-slate-700 hover:bg-sky-50/60 dark:border-slate-800 dark:bg-slate-800/50 dark:text-slate-300"
+                      }`}
+                    >
+                      <span className="truncate">In Transit</span>
+                      <span className={`ml-1 rounded-md px-1.5 py-0.5 font-mono text-[10px] font-black tabular-nums ${
+                        statusFilter === "in_transit" ? "bg-white/20 text-white" : "bg-sky-100 text-sky-800 dark:bg-sky-950/80 dark:text-sky-300"
+                      }`}>
+                        {scopedInTransitCount}
+                      </span>
+                    </button>
 
-          <button
-            type="button"
-            onClick={() => setStatusFilter("returned")}
-            className={`flex items-center justify-between rounded-2xl border px-3.5 py-2.5 text-xs font-bold transition-all cursor-pointer ${
-              statusFilter === "returned"
-                ? "border-rose-600 bg-rose-600 text-white shadow-xs dark:border-rose-500 dark:bg-rose-600"
-                : "border-slate-200/90 bg-slate-50/70 text-slate-700 hover:bg-rose-50/60 dark:border-slate-800 dark:bg-slate-800/50 dark:text-slate-300 dark:hover:bg-slate-800"
-            }`}
-          >
-            <span className="truncate">Returned (RTO)</span>
-            <span
-              className={`ml-1.5 rounded-lg px-2 py-0.5 font-mono text-[11px] font-black tabular-nums ${
-                statusFilter === "returned"
-                  ? "bg-white/20 text-white"
-                  : "bg-rose-100 text-rose-800 dark:bg-rose-950/80 dark:text-rose-300"
-              }`}
-            >
-              {returnedCount}
-            </span>
-          </button>
+                    <button
+                      type="button"
+                      onClick={() => setStatusFilter("out_for_delivery")}
+                      className={`flex items-center justify-between rounded-xl border px-3 py-2 text-xs font-bold transition-all cursor-pointer ${
+                        statusFilter === "out_for_delivery"
+                          ? "border-amber-500 bg-amber-500 text-white shadow-2xs"
+                          : "border-slate-200/90 bg-slate-50/70 text-slate-700 hover:bg-amber-50/60 dark:border-slate-800 dark:bg-slate-800/50 dark:text-slate-300"
+                      }`}
+                    >
+                      <span className="truncate">Out for Deliv.</span>
+                      <span className={`ml-1 rounded-md px-1.5 py-0.5 font-mono text-[10px] font-black tabular-nums ${
+                        statusFilter === "out_for_delivery" ? "bg-white/20 text-white" : "bg-amber-100 text-amber-800 dark:bg-amber-950/80 dark:text-amber-300"
+                      }`}>
+                        {scopedOutCount}
+                      </span>
+                    </button>
 
-          <button
-            type="button"
-            onClick={() => setStatusFilter("imported")}
-            className={`flex items-center justify-between rounded-2xl border px-3.5 py-2.5 text-xs font-bold transition-all cursor-pointer ${
-              statusFilter === "imported"
-                ? "border-emerald-700 bg-emerald-700 text-white shadow-xs dark:border-emerald-600 dark:bg-emerald-700"
-                : "border-slate-200/90 bg-slate-50/70 text-slate-700 hover:bg-emerald-50/60 dark:border-slate-800 dark:bg-slate-800/50 dark:text-slate-300 dark:hover:bg-slate-800"
-            }`}
-          >
-            <span className="inline-flex items-center gap-1.5 truncate">
-              <FileSpreadsheet className="h-3.5 w-3.5 shrink-0" />
-              <span className="truncate">Imported</span>
-            </span>
-            <span
-              className={`ml-1.5 rounded-lg px-2 py-0.5 font-mono text-[11px] font-black tabular-nums ${
-                statusFilter === "imported"
-                  ? "bg-white/20 text-white"
-                  : "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/80 dark:text-emerald-300"
-              }`}
-            >
-              {importedCount}
-            </span>
-          </button>
-        </div>
+                    <button
+                      type="button"
+                      onClick={() => setStatusFilter("delivered")}
+                      className={`flex items-center justify-between rounded-xl border px-3 py-2 text-xs font-bold transition-all cursor-pointer ${
+                        statusFilter === "delivered"
+                          ? "border-emerald-600 bg-emerald-600 text-white shadow-2xs"
+                          : "border-slate-200/90 bg-slate-50/70 text-slate-700 hover:bg-emerald-50/60 dark:border-slate-800 dark:bg-slate-800/50 dark:text-slate-300"
+                      }`}
+                    >
+                      <span className="truncate">Delivered</span>
+                      <span className={`ml-1 rounded-md px-1.5 py-0.5 font-mono text-[10px] font-black tabular-nums ${
+                        statusFilter === "delivered" ? "bg-white/20 text-white" : "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/80 dark:text-emerald-300"
+                      }`}>
+                        {scopedDeliveredCount}
+                      </span>
+                    </button>
 
-        {/* ============================================================== */}
-        {/* 3B. MULTI-BATCH DIRECTORY & INLINE MANAGER (EDIT & DELETE)     */}
-        {/* ============================================================== */}
-        {(isBatchManagerOpen || statusFilter === "imported" || selectedBatchId !== "all") && uniqueBatches.length > 0 && (
-          <div className="pt-3 border-t border-slate-200/80 dark:border-slate-800 space-y-3 animate-in fade-in">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
-                <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-emerald-600 text-white">
-                  <FileSpreadsheet className="h-3.5 w-3.5" />
-                </span>
-                <span className="text-xs font-extrabold text-slate-900 dark:text-white">
-                  Batch Directory & Management ({uniqueBatches.length})
-                </span>
-                <span className="text-[11px] text-slate-500 dark:text-slate-400 hidden sm:inline">
-                  — Click any batch to filter, or use the edit and delete icons on each card
-                </span>
+                    <button
+                      type="button"
+                      onClick={() => setStatusFilter("returned")}
+                      className={`flex items-center justify-between rounded-xl border px-3 py-2 text-xs font-bold transition-all cursor-pointer ${
+                        statusFilter === "returned"
+                          ? "border-rose-600 bg-rose-600 text-white shadow-2xs"
+                          : "border-slate-200/90 bg-slate-50/70 text-slate-700 hover:bg-rose-50/60 dark:border-slate-800 dark:bg-slate-800/50 dark:text-slate-300"
+                      }`}
+                    >
+                      <span className="truncate">Returned</span>
+                      <span className={`ml-1 rounded-md px-1.5 py-0.5 font-mono text-[10px] font-black tabular-nums ${
+                        statusFilter === "returned" ? "bg-white/20 text-white" : "bg-rose-100 text-rose-800 dark:bg-rose-950/80 dark:text-rose-300"
+                      }`}>
+                        {scopedReturnedCount}
+                      </span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Batch Scope & Manager inside Side Section */}
+                <div className="pt-3 border-t border-slate-100 dark:border-slate-800 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <label className="text-[11px] font-extrabold uppercase tracking-wider text-slate-400 dark:text-slate-500">
+                      Batch Scope ({uniqueBatches.length})
+                    </label>
+                    {selectedBatchId !== "all" && (
+                      <button
+                        type="button"
+                        onClick={() => setSelectedBatchId("all")}
+                        className="text-[11px] font-bold text-emerald-600 hover:underline dark:text-emerald-400 cursor-pointer"
+                      >
+                        Show All ({totalCount})
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setSelectedBatchId("all")}
+                      className={`rounded-xl px-2.5 py-2 text-[11px] font-bold transition-all cursor-pointer ${
+                        selectedBatchId === "all"
+                          ? "bg-indigo-600 text-white shadow-2xs"
+                          : "bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300"
+                      }`}
+                    >
+                      All Shipments ({totalCount})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedBatchId("imported_all")}
+                      className={`rounded-xl px-2.5 py-2 text-[11px] font-bold transition-all cursor-pointer ${
+                        selectedBatchId === "imported_all"
+                          ? "bg-emerald-600 text-white shadow-2xs"
+                          : "bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300"
+                      }`}
+                    >
+                      All Imported ({importedCount})
+                    </button>
+                  </div>
+
+                  {uniqueBatches.length > 0 && (
+                    <div className="space-y-2 max-h-72 overflow-y-auto pr-1 pt-1">
+                      {uniqueBatches.map((batch) => {
+                        const isSelected = selectedBatchId === batch.id;
+                        const isEditing = editingBatchId === batch.id;
+                        const isPendingDelete = batchPendingDeleteId === batch.id;
+
+                        return (
+                          <div
+                            key={batch.id}
+                            onClick={() => {
+                              if (!isEditing && !isPendingDelete) {
+                                setSelectedBatchId(isSelected ? "all" : batch.id);
+                              }
+                            }}
+                            className={`rounded-2xl border p-3 transition-all flex flex-col gap-2 cursor-pointer ${
+                              isSelected
+                                ? "border-emerald-500 bg-emerald-50/70 dark:border-emerald-500/80 dark:bg-emerald-950/40 shadow-2xs"
+                                : "border-slate-200/90 bg-slate-50/60 hover:border-emerald-300 dark:border-slate-800 dark:bg-slate-800/40"
+                            }`}
+                          >
+                            <div className="flex items-start justify-between gap-2">
+                              {isEditing ? (
+                                <div
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="flex items-center gap-1 flex-1 bg-white dark:bg-slate-900 px-2 py-1 rounded-xl border border-emerald-500"
+                                >
+                                  <input
+                                    type="text"
+                                    value={editingBatchName}
+                                    onChange={(e) => setEditingBatchName(e.target.value)}
+                                    onKeyDown={(e) => {
+                                      if (e.key === "Enter") handleSaveBatchName(batch.id);
+                                      if (e.key === "Escape") handleCancelEditBatch();
+                                    }}
+                                    autoFocus
+                                    className="text-xs font-bold text-slate-900 dark:text-white bg-transparent outline-none flex-1 min-w-0"
+                                  />
+                                  <button
+                                    type="button"
+                                    onClick={() => handleSaveBatchName(batch.id)}
+                                    className="p-1 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 cursor-pointer shrink-0"
+                                  >
+                                    <Check className="h-3 w-3" />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={handleCancelEditBatch}
+                                    className="p-1 rounded-lg bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-300 cursor-pointer shrink-0"
+                                  >
+                                    <X className="h-3 w-3" />
+                                  </button>
+                                </div>
+                              ) : (
+                                <div className="flex-1 min-w-0">
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="text-xs font-extrabold text-slate-900 dark:text-white truncate">
+                                      {batch.name}
+                                    </span>
+                                  </div>
+                                  <div className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5">
+                                    {batch.count} item{batch.count > 1 ? "s" : ""} • {batch.delivered} delivered
+                                  </div>
+                                </div>
+                              )}
+
+                              {!isEditing && (
+                                <div
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="flex items-center gap-1 shrink-0"
+                                >
+                                  {isPendingDelete ? (
+                                    <div className="flex items-center gap-1 bg-rose-50 dark:bg-rose-950/90 border border-rose-200 dark:border-rose-800 rounded-lg px-1.5 py-0.5">
+                                      <button
+                                        type="button"
+                                        onClick={() => handleDeleteBatch(batch.id)}
+                                        className="rounded bg-rose-600 text-white px-1.5 py-0.5 text-[10px] font-bold cursor-pointer"
+                                      >
+                                        Del
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setBatchPendingDeleteId(null)}
+                                        className="rounded bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 px-1.5 py-0.5 text-[10px] font-bold cursor-pointer"
+                                      >
+                                        No
+                                      </button>
+                                    </div>
+                                  ) : (
+                                    <>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleExportBatchCsv(batch.id)}
+                                        className="p-1.5 rounded-lg border border-slate-200 bg-white hover:bg-indigo-50 text-indigo-600 dark:border-slate-700 dark:bg-slate-800 dark:text-indigo-400 cursor-pointer"
+                                        title="Export this batch as CSV"
+                                      >
+                                        <Download className="h-3 w-3" />
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleStartEditBatch(batch.id, batch.name)}
+                                        className="p-1.5 rounded-lg border border-slate-200 bg-white hover:bg-emerald-50 text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300 cursor-pointer"
+                                        title="Rename batch"
+                                      >
+                                        <Pencil className="h-3 w-3" />
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setBatchPendingDeleteId(batch.id)}
+                                        className="p-1.5 rounded-lg border border-rose-200 bg-rose-50/70 hover:bg-rose-100 text-rose-600 dark:border-rose-900/60 dark:bg-rose-950/60 dark:text-rose-300 cursor-pointer"
+                                        title="Delete batch"
+                                      >
+                                        <Trash2 className="h-3 w-3" />
+                                      </button>
+                                    </>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
               </div>
+            )}
 
-              <div className="flex items-center gap-2">
-                {selectedBatchId !== "all" && (
+            {/* TAB 2: DATA SIZE & VOLUME ANALYTICS */}
+            {activeSideTab === "analytics" && (
+              <div className="space-y-3.5 animate-in fade-in duration-150">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="text-xs font-extrabold text-slate-900 dark:text-white">
+                      Data Size & Volume Analytics
+                    </h3>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                      Real-time storage footprint & added data metrics
+                    </p>
+                  </div>
+                  <span className="rounded-lg bg-indigo-100 dark:bg-indigo-950 px-2 py-0.5 font-mono text-[10px] font-black text-indigo-700 dark:text-indigo-300">
+                    {dataAnalytics.formattedSize}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2.5">
+                  <div className="rounded-2xl border border-slate-200/90 bg-slate-50/70 p-3 dark:border-slate-800 dark:bg-slate-800/50">
+                    <div className="text-[10px] font-bold uppercase text-slate-400">Total Datas Added</div>
+                    <div className="mt-1 text-xl font-black text-slate-900 dark:text-white tabular-nums">
+                      {dataAnalytics.totalRecords}
+                    </div>
+                    <div className="mt-0.5 text-[10px] text-slate-500">
+                      {dataAnalytics.importedRecords} batch • {dataAnalytics.directRecords} direct
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border border-slate-200/90 bg-slate-50/70 p-3 dark:border-slate-800 dark:bg-slate-800/50">
+                    <div className="text-[10px] font-bold uppercase text-slate-400">Active Batches</div>
+                    <div className="mt-1 text-xl font-black text-emerald-600 dark:text-emerald-400 tabular-nums">
+                      {dataAnalytics.batchesCount}
+                    </div>
+                    <div className="mt-0.5 text-[10px] text-slate-500">
+                      Avg{" "}
+                      {dataAnalytics.batchesCount > 0
+                        ? Math.round(dataAnalytics.importedRecords / dataAnalytics.batchesCount)
+                        : 0}{" "}
+                      / batch
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border border-slate-200/90 bg-slate-50/70 p-3 dark:border-slate-800 dark:bg-slate-800/50">
+                    <div className="text-[10px] font-bold uppercase text-slate-400">Storage Footprint</div>
+                    <div className="mt-1 text-lg font-black font-mono text-sky-600 dark:text-sky-400 tabular-nums">
+                      {dataAnalytics.formattedSize}
+                    </div>
+                    <div className="mt-0.5 text-[10px] text-slate-500 font-mono">
+                      ~{dataAnalytics.avgBytesPerRecord} B / record
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border border-slate-200/90 bg-slate-50/70 p-3 dark:border-slate-800 dark:bg-slate-800/50">
+                    <div className="text-[10px] font-bold uppercase text-slate-400">Capacity Left</div>
+                    <div className="mt-1 text-lg font-black font-mono text-indigo-600 dark:text-indigo-400 tabular-nums">
+                      +{dataAnalytics.estimatedRemainingRecords.toLocaleString()}
+                    </div>
+                    <div className="mt-0.5 text-[10px] text-slate-500">
+                      {dataAnalytics.quotaPercent}% of 5 MB used
+                    </div>
+                  </div>
+                </div>
+
+                {/* Quota Bar */}
+                <div className="rounded-2xl border border-slate-200/80 bg-slate-50/60 p-3 dark:border-slate-800 dark:bg-slate-800/40">
+                  <div className="flex items-center justify-between text-[10px] font-mono text-slate-500 mb-1">
+                    <span>Storage Utilization ({dataAnalytics.usedBytes.toLocaleString()} Bytes)</span>
+                    <span>{dataAnalytics.quotaPercent}%</span>
+                  </div>
+                  <div className="h-2 w-full rounded-full bg-slate-200 dark:bg-slate-700 overflow-hidden">
+                    <div
+                      className="h-full bg-indigo-600 rounded-full transition-all"
+                      style={{ width: `${Math.max(2, dataAnalytics.quotaPercent)}%` }}
+                    />
+                  </div>
+                </div>
+
+                {/* Carrier Distribution */}
+                {dataAnalytics.carrierBreakdown.length > 0 && (
+                  <div className="rounded-2xl border border-slate-200/80 bg-slate-50/60 p-3 dark:border-slate-800 dark:bg-slate-800/40 space-y-2">
+                    <div className="text-[11px] font-bold text-slate-700 dark:text-slate-300">
+                      Carrier Volume Distribution
+                    </div>
+                    <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
+                      {dataAnalytics.carrierBreakdown.map((c) => (
+                        <div
+                          key={c.id}
+                          className="flex items-center justify-between text-xs bg-white dark:bg-slate-900 px-2.5 py-1.5 rounded-xl border border-slate-200/70 dark:border-slate-800"
+                        >
+                          <span className="font-semibold text-slate-700 dark:text-slate-200 truncate">
+                            {c.name}
+                          </span>
+                          <span className="font-mono text-[11px] font-black text-indigo-600 dark:text-indigo-400 shrink-0 ml-2">
+                            {c.count} ({c.percent}%)
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* TAB 3: SETTINGS, BULK CSV EXPORT PER BATCH & CLEAN-UP */}
+            {activeSideTab === "settings" && (
+              <div className="space-y-4 animate-in fade-in duration-150">
+                {/* 1. BULK EXPORT FEATURE (CSV BY SELECTED BATCH) */}
+                <div className="rounded-2xl border border-indigo-200/90 bg-indigo-50/50 p-3.5 dark:border-indigo-900/60 dark:bg-indigo-950/30 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <FileSpreadsheet className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
+                      <span className="text-xs font-extrabold text-slate-900 dark:text-white">
+                        Bulk Export (CSV by Batch)
+                      </span>
+                    </div>
+                    <span className="rounded-md bg-indigo-100 dark:bg-indigo-950 px-2 py-0.5 text-[10px] font-mono font-bold text-indigo-700 dark:text-indigo-300">
+                      Structured CSV
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-600 dark:text-slate-400">
+                    Download all tracked shipment data within a selected batch as a structured CSV file.
+                  </p>
+
+                  <div>
+                    <label className="text-[10px] font-bold uppercase text-slate-500 dark:text-slate-400 block mb-1">
+                      Select Batch to Export:
+                    </label>
+                    <select
+                      value={exportBatchTargetId}
+                      onChange={(e) => setExportBatchTargetId(e.target.value)}
+                      className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-800 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 cursor-pointer"
+                    >
+                      <option value="all">All Tracked Shipments ({totalCount})</option>
+                      <option value="imported_all">All Imported Batches ({importedCount})</option>
+                      <option value="direct_only">Direct Added Consignments ({Math.max(0, totalCount - importedCount)})</option>
+                      {uniqueBatches.map((b) => (
+                        <option key={b.id} value={b.id}>
+                          {b.name} ({b.count} items)
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {batchCsvExportMsg && (
+                    <div className="rounded-xl border border-emerald-300 bg-white dark:border-emerald-800 dark:bg-slate-900 px-3 py-1.5 text-[11px] font-bold text-emerald-700 dark:text-emerald-300 flex items-center gap-1.5">
+                      <Check className="h-3.5 w-3.5 text-emerald-600 shrink-0" />
+                      <span>{batchCsvExportMsg}</span>
+                    </div>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={() => handleExportBatchCsv()}
+                    disabled={totalCount === 0}
+                    className="w-full inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 px-3.5 py-2.5 text-xs font-extrabold text-white shadow-xs transition-colors cursor-pointer"
+                  >
+                    <Download className="h-3.5 w-3.5" />
+                    <span>Download Batch CSV</span>
+                  </button>
+                </div>
+
+                {/* 2. AUTO BACKGROUND CHECK & SYNC FREQUENCY */}
+                <div className="rounded-2xl border border-slate-200 bg-slate-50/70 p-3.5 dark:border-slate-800 dark:bg-slate-800/50 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="text-xs font-bold text-slate-900 dark:text-white">
+                        Auto Background Sync
+                      </div>
+                      <div className="text-[10px] text-slate-500">
+                        Interval: {Math.round(checkIntervalSec / 60)}m
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleToggleAutoCheck}
+                      className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out ${
+                        isAutoCheckEnabled ? "bg-emerald-600" : "bg-slate-300 dark:bg-slate-600"
+                      }`}
+                    >
+                      <span
+                        className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm transition duration-200 ease-in-out ${
+                          isAutoCheckEnabled ? "translate-x-5" : "translate-x-0"
+                        }`}
+                      />
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-1.5">
+                    {[
+                      { label: "5m", sec: 300 },
+                      { label: "15m", sec: 900 },
+                      { label: "30m", sec: 1800 },
+                    ].map((opt) => (
+                      <button
+                        key={opt.sec}
+                        type="button"
+                        onClick={() => handleChangeInterval(opt.sec)}
+                        className={`rounded-xl border py-1.5 px-2 text-xs font-bold transition-all cursor-pointer ${
+                          checkIntervalSec === opt.sec
+                            ? "border-indigo-600 bg-indigo-600 text-white"
+                            : "border-slate-200 bg-white text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300"
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* 3. DELIVERED EXPORT & CLEAN-UP */}
+                <div className="rounded-2xl border border-emerald-200/80 bg-emerald-50/50 p-3.5 dark:border-emerald-900/60 dark:bg-emerald-950/30 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-slate-900 dark:text-white">
+                      Delivered Export (.xlsx)
+                    </span>
+                    <span className="text-[10px] font-mono font-bold text-emerald-700 dark:text-emerald-300">
+                      {deliveredCount} delivered
+                    </span>
+                  </div>
+
+                  {exportDeliveredSuccessMsg && (
+                    <div className="rounded-xl border border-emerald-300 bg-white dark:bg-slate-900 px-2.5 py-1.5 text-[11px] font-bold text-emerald-700 dark:text-emerald-300">
+                      {exportDeliveredSuccessMsg}
+                    </div>
+                  )}
+
+                  <div className="flex flex-col gap-1.5">
+                    <button
+                      type="button"
+                      onClick={handleExportDeliveredOnly}
+                      disabled={deliveredCount === 0}
+                      className="w-full inline-flex items-center justify-center gap-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 px-3 py-2 text-xs font-bold text-white cursor-pointer"
+                    >
+                      <Download className="h-3.5 w-3.5" />
+                      <span>Export Delivered ({deliveredCount})</span>
+                    </button>
+
+                    {lastExportedDeliveredIds.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setIsDeleteExportedModalOpen(true)}
+                        className="w-full inline-flex items-center justify-center gap-1.5 rounded-xl border border-rose-300 bg-rose-50 hover:bg-rose-100 text-rose-700 dark:border-rose-800 dark:bg-rose-950/70 dark:text-rose-300 px-3 py-2 text-xs font-bold cursor-pointer"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                        <span>Delete Exported ({lastExportedDeliveredIds.length})</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* 4. JSON BACKUP & FULL SETTINGS MODAL */}
+                <div className="flex flex-col gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setBackupError(null);
+                      setBackupSuccessMsg(null);
+                      setIsBackupModalOpen(true);
+                    }}
+                    className="w-full inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 px-3 py-2 text-xs font-bold text-slate-700 dark:text-slate-200 cursor-pointer"
+                  >
+                    <Database className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" />
+                    <span>Data Backup & Restore Center</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setIsSettingsOpen(true)}
+                    className="w-full inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 dark:border-slate-800 dark:bg-slate-800/60 px-3 py-2 text-[11px] font-bold text-slate-600 dark:text-slate-300 cursor-pointer"
+                  >
+                    <Settings className="h-3.5 w-3.5" />
+                    <span>Open Fullscreen Settings</span>
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </aside>
+
+        {/* RIGHT / MAIN WORKSPACE: SHIPMENTS DATA TABLE */}
+        <div className="lg:col-span-8 xl:col-span-8 space-y-4">
+          {/* Active Scope Header Bar */}
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-slate-200/80 bg-white px-4 py-3 shadow-2xs dark:border-slate-800 dark:bg-slate-900">
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <span className="font-extrabold text-slate-900 dark:text-white">
+                Showing {filteredShipments.length} of {scopedTotalCount} Consignments
+              </span>
+              {selectedBatchId !== "all" && (
+                <span className="inline-flex items-center gap-1 rounded-lg bg-emerald-50 dark:bg-emerald-950 px-2 py-0.5 text-[11px] font-bold text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
+                  <span>
+                    {selectedBatchId === "imported_all"
+                      ? "All Imported Batches"
+                      : uniqueBatches.find((b) => b.id === selectedBatchId)?.name || "Filtered Batch"}
+                  </span>
                   <button
                     type="button"
                     onClick={() => setSelectedBatchId("all")}
-                    className="rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 px-3 py-1 text-[11px] font-bold text-slate-700 dark:text-slate-300 transition-colors cursor-pointer"
+                    className="ml-1 hover:text-rose-600 cursor-pointer"
                   >
-                    Show All Batches ({importedCount})
+                    <X className="h-3 w-3" />
                   </button>
-                )}
-                {isBatchManagerOpen && statusFilter !== "imported" && selectedBatchId === "all" && (
-                  <button
-                    type="button"
-                    onClick={() => setIsBatchManagerOpen(false)}
-                    className="rounded-xl p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800 cursor-pointer"
-                    title="Collapse batch manager"
-                  >
-                    <X className="h-4 w-4" />
-                  </button>
-                )}
-              </div>
+                </span>
+              )}
             </div>
 
-            {/* Responsive Multi-Batch Cards Grid (No horizontal scrolling) */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 max-h-80 overflow-y-auto pr-1">
-              {uniqueBatches.map((batch) => {
-                const isSelected = selectedBatchId === batch.id;
-                const isEditing = editingBatchId === batch.id;
-                const isPendingDelete = batchPendingDeleteId === batch.id;
+            {/* Quick Bulk CSV Export Button for Active Scope */}
+            <button
+              type="button"
+              onClick={() => handleExportBatchCsv(selectedBatchId)}
+              disabled={filteredShipments.length === 0}
+              className="inline-flex items-center gap-1.5 rounded-xl border border-indigo-200 bg-indigo-50/80 hover:bg-indigo-100 text-indigo-700 dark:border-indigo-800 dark:bg-indigo-950/60 dark:text-indigo-300 px-3 py-1.5 text-xs font-bold transition-colors cursor-pointer disabled:opacity-50"
+              title="Download currently selected batch / scope as a structured CSV file"
+            >
+              <Download className="h-3.5 w-3.5" />
+              <span>Bulk Export CSV</span>
+            </button>
+          </div>
 
-                return (
-                  <div
-                    key={batch.id}
-                    className={`rounded-2xl border p-3.5 transition-all flex flex-col justify-between gap-2.5 ${
-                      isSelected
-                        ? "border-emerald-500 bg-emerald-50/70 dark:border-emerald-500/80 dark:bg-emerald-950/40 shadow-xs"
-                        : "border-slate-200/90 bg-slate-50/60 hover:border-slate-300 dark:border-slate-800 dark:bg-slate-800/40"
-                    }`}
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      {isEditing ? (
-                        <div className="flex items-center gap-1.5 flex-1 bg-white dark:bg-slate-900 px-2.5 py-1.5 rounded-xl border border-emerald-500 shadow-2xs">
+          {/* 4. SHIPMENTS DATA TABLE */}
+          <div className="overflow-hidden rounded-3xl border border-slate-200/90 bg-white shadow-xs dark:border-slate-800 dark:bg-slate-900">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs min-w-[640px]">
+                <thead className="bg-slate-50/80 text-[11px] font-extrabold uppercase tracking-wider text-slate-500 dark:bg-slate-800/60 dark:text-slate-400 border-b border-slate-200/80 dark:border-slate-800">
+                  <tr>
+                    <th className="py-3.5 pl-4 sm:pl-6 pr-2 w-10">
+                      <input
+                        type="checkbox"
+                        checked={filteredShipments.length > 0 && selectedShipmentIds.length === filteredShipments.length}
+                        onChange={handleToggleSelectAll}
+                        aria-label="Select all consignments"
+                        className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer accent-indigo-600"
+                      />
+                    </th>
+                    <th className="py-3.5 px-3">Consignment / AWB</th>
+                    <th className="py-3.5 px-4">Courier Network</th>
+                    <th className="py-3.5 px-4">Current Status</th>
+                    <th className="py-3.5 px-4">Last Event</th>
+                    <th className="py-3.5 px-4 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                  {filteredShipments.length === 0 ? (
+                    <tr>
+                      <td colSpan={6} className="py-12 text-center text-slate-400">
+                        <Package className="mx-auto h-8 w-8 text-slate-300 dark:text-slate-600 mb-2" />
+                        <p className="text-sm font-semibold text-slate-600 dark:text-slate-300">
+                          No shipments matching your filter
+                        </p>
+                        <p className="text-xs text-slate-400 mt-1">
+                          Try adjusting the side filters or import tracking IDs above.
+                        </p>
+                      </td>
+                    </tr>
+                  ) : (
+                    filteredShipments.map((item) => (
+                      <tr
+                        key={item.id}
+                        className={`transition-colors group ${
+                          selectedShipmentIds.includes(item.id)
+                            ? "bg-indigo-50/60 dark:bg-indigo-950/40"
+                            : "hover:bg-slate-50/80 dark:hover:bg-slate-800/40"
+                        }`}
+                      >
+                        {/* Row Checkbox */}
+                        <td className="py-3.5 pl-4 sm:pl-6 pr-2 w-10">
                           <input
-                            type="text"
-                            value={editingBatchName}
-                            onChange={(e) => setEditingBatchName(e.target.value)}
-                            onKeyDown={(e) => {
-                              if (e.key === "Enter") handleSaveBatchName(batch.id);
-                              if (e.key === "Escape") handleCancelEditBatch();
-                            }}
-                            autoFocus
-                            className="text-xs font-bold text-slate-900 dark:text-white bg-transparent outline-none flex-1 min-w-0"
-                            placeholder="Enter batch name..."
+                            type="checkbox"
+                            checked={selectedShipmentIds.includes(item.id)}
+                            onChange={() => handleToggleSelectRow(item.id)}
+                            aria-label={`Select consignment ${item.trackingNumber}`}
+                            className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer accent-indigo-600"
                           />
-                          <button
-                            type="button"
-                            onClick={() => handleSaveBatchName(batch.id)}
-                            className="p-1 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 transition-colors cursor-pointer shrink-0"
-                            title="Save batch name"
-                          >
-                            <Check className="h-3.5 w-3.5" />
-                          </button>
-                          <button
-                            type="button"
-                            onClick={handleCancelEditBatch}
-                            className="p-1 rounded-lg bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-300 hover:bg-slate-300 transition-colors cursor-pointer shrink-0"
-                            title="Cancel rename"
-                          >
-                            <X className="h-3.5 w-3.5" />
-                          </button>
-                        </div>
-                      ) : (
-                        <div
-                          onClick={() => setSelectedBatchId(isSelected ? "all" : batch.id)}
-                          className="flex-1 min-w-0 cursor-pointer group"
-                        >
+                        </td>
+
+                        {/* AWB & Copy */}
+                        <td className="py-3.5 px-3">
                           <div className="flex items-center gap-2">
-                            <span className="text-xs font-extrabold text-slate-900 dark:text-white truncate group-hover:text-emerald-700 dark:group-hover:text-emerald-400 transition-colors">
-                              {batch.name}
-                            </span>
-                            {isSelected && (
-                              <span className="rounded-md bg-emerald-600 px-1.5 py-0.5 text-[9px] font-black uppercase text-white shrink-0">
-                                Active Filter
+                            <button
+                              type="button"
+                              onClick={() => onOpenTrackingResult(item.trackingNumber, item.courierId)}
+                              className="font-mono font-bold text-indigo-600 hover:text-indigo-800 dark:text-indigo-400 dark:hover:text-indigo-300 transition-colors text-xs"
+                              title="Click to view detailed tracking popup"
+                            >
+                              {item.trackingNumber}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleCopy(item.id, item.trackingNumber)}
+                              className="opacity-0 group-hover:opacity-100 p-1 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-opacity"
+                              title="Copy AWB"
+                            >
+                              {copiedId === item.id ? (
+                                <Check className="h-3 w-3 text-emerald-600" />
+                              ) : (
+                                <Copy className="h-3 w-3" />
+                              )}
+                            </button>
+                            {item.isImported && (
+                              <span
+                                className="inline-flex items-center gap-1 rounded-md bg-emerald-50 dark:bg-emerald-950/80 px-1.5 py-0.5 text-[9px] font-bold text-emerald-700 dark:text-emerald-300 border border-emerald-200/60 dark:border-emerald-800/60 select-none cursor-default"
+                                title={item.batchName || "Imported batch"}
+                              >
+                                <FileSpreadsheet className="h-2.5 w-2.5 text-emerald-600" />
+                                <span>{item.batchName ? item.batchName.split(" • ")[0] : "Imported"}</span>
                               </span>
                             )}
                           </div>
-                          <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
-                            Imported: {batch.importedAt} • {batch.count} consignment{batch.count > 1 ? "s" : ""}
+                          <div className="text-[10px] text-slate-400 font-mono mt-0.5">
+                            {item.articleType}
                           </div>
-                        </div>
-                      )}
+                        </td>
 
-                      {/* Batch Rename & Delete Actions */}
-                      {!isEditing && (
-                        <div className="flex items-center gap-1 shrink-0">
-                          {isPendingDelete ? (
-                            <div className="flex items-center gap-1 bg-rose-50 dark:bg-rose-950/90 border border-rose-200 dark:border-rose-800 rounded-xl px-2 py-1">
-                              <span className="text-[10px] font-extrabold text-rose-700 dark:text-rose-300 mr-1">
-                                Delete ({batch.count})?
-                              </span>
-                              <button
-                                type="button"
-                                onClick={() => handleDeleteBatch(batch.id)}
-                                className="rounded-lg bg-rose-600 hover:bg-rose-700 text-white px-2 py-0.5 text-[10px] font-bold cursor-pointer"
-                              >
-                                Confirm
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => setBatchPendingDeleteId(null)}
-                                className="rounded-lg bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 px-1.5 py-0.5 text-[10px] font-bold border border-slate-200 dark:border-slate-700 cursor-pointer"
-                              >
-                                Cancel
-                              </button>
-                            </div>
-                          ) : (
-                            <>
-                              <button
-                                type="button"
-                                onClick={() => handleStartEditBatch(batch.id, batch.name)}
-                                className="inline-flex items-center gap-1 rounded-xl border border-slate-200/90 bg-white hover:bg-emerald-50 hover:border-emerald-300 text-slate-600 hover:text-emerald-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300 dark:hover:text-emerald-300 px-2 py-1 text-[11px] font-bold transition-colors cursor-pointer"
-                                title="Edit batch name"
-                              >
-                                <Pencil className="h-3 w-3" />
-                                <span>Rename</span>
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => setBatchPendingDeleteId(batch.id)}
-                                className="inline-flex items-center gap-1 rounded-xl border border-rose-200/80 bg-rose-50/70 hover:bg-rose-100 text-rose-600 dark:border-rose-900/60 dark:bg-rose-950/60 dark:text-rose-300 px-2 py-1 text-[11px] font-bold transition-colors cursor-pointer"
-                                title="Delete entire batch"
-                              >
-                                <Trash2 className="h-3 w-3" />
-                                <span>Delete</span>
-                              </button>
-                            </>
-                          )}
-                        </div>
-                      )}
-                    </div>
+                        {/* Courier Network */}
+                        <td className="py-3.5 px-4">
+                          <div className="flex items-center gap-2">
+                            <span className="flex h-2 w-2 rounded-full bg-indigo-500" />
+                            <span className="font-semibold text-slate-800 dark:text-slate-200 truncate max-w-[140px]">
+                              {item.courierName}
+                            </span>
+                          </div>
+                        </td>
 
-                    {/* Batch Status Breakdown Footer */}
-                    <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-200/60 dark:border-slate-800/80 text-[11px]">
-                      <div className="flex flex-wrap items-center gap-2.5">
-                        <span className="inline-flex items-center gap-1 font-bold text-emerald-700 dark:text-emerald-400">
-                          <CheckCircle2 className="h-3 w-3" />
-                          {batch.delivered} Delivered
-                        </span>
-                        <span className="inline-flex items-center gap-1 font-bold text-sky-700 dark:text-sky-400">
-                          <Truck className="h-3 w-3" />
-                          {batch.inTransit} Active
-                        </span>
-                        {batch.returned > 0 && (
-                          <span className="inline-flex items-center gap-1 font-bold text-rose-600 dark:text-rose-400">
-                            <RotateCcw className="h-3 w-3" />
-                            {batch.returned} RTO
-                          </span>
-                        )}
-                      </div>
-
-                      <button
-                        type="button"
-                        onClick={() => setSelectedBatchId(isSelected ? "all" : batch.id)}
-                        className={`text-[11px] font-bold underline cursor-pointer ${
-                          isSelected
-                            ? "text-emerald-700 dark:text-emerald-300"
-                            : "text-indigo-600 hover:text-indigo-800 dark:text-indigo-400"
-                        }`}
-                      >
-                        {isSelected ? "Clear Batch Filter" : "Filter Batch"}
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Multiple Selection Action Toolbar */}
-      {selectedShipmentIds.length > 0 && (
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-indigo-50/90 dark:bg-indigo-950/80 border border-indigo-200 dark:border-indigo-800 p-3 sm:px-4 shadow-xs animate-in fade-in">
-          <div className="flex items-center gap-2.5">
-            <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-indigo-600 text-white text-xs font-bold tabular-nums">
-              {selectedShipmentIds.length}
-            </span>
-            <span className="text-xs font-bold text-indigo-900 dark:text-indigo-200">
-              {selectedShipmentIds.length} consignment{selectedShipmentIds.length > 1 ? "s" : ""} selected
-            </span>
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setSelectedShipmentIds([])}
-              className="rounded-xl px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-white dark:text-slate-300 dark:hover:bg-slate-800 transition-colors cursor-pointer"
-            >
-              Clear Selection
-            </button>
-            <button
-              type="button"
-              onClick={() => setIsBulkDeleteModalOpen(true)}
-              className="inline-flex items-center gap-1.5 rounded-xl bg-rose-600 hover:bg-rose-700 px-3.5 py-1.5 text-xs font-bold text-white shadow-xs transition-colors cursor-pointer"
-            >
-              <Trash2 className="h-3.5 w-3.5" />
-              <span>Delete Selected ({selectedShipmentIds.length})</span>
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* ============================================================== */}
-      {/* 4. SHIPMENTS DATA TABLE                                        */}
-      {/* ============================================================== */}
-      <div className="overflow-hidden rounded-3xl border border-slate-200/90 bg-white shadow-xs dark:border-slate-800 dark:bg-slate-900">
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs min-w-[640px]">
-            <thead className="bg-slate-50/80 text-[11px] font-extrabold uppercase tracking-wider text-slate-500 dark:bg-slate-800/60 dark:text-slate-400 border-b border-slate-200/80 dark:border-slate-800">
-              <tr>
-                <th className="py-3.5 pl-4 sm:pl-6 pr-2 w-10">
-                  <input
-                    type="checkbox"
-                    checked={filteredShipments.length > 0 && selectedShipmentIds.length === filteredShipments.length}
-                    onChange={handleToggleSelectAll}
-                    aria-label="Select all consignments"
-                    className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer accent-indigo-600"
-                  />
-                </th>
-                <th className="py-3.5 px-3">Consignment / AWB</th>
-                <th className="py-3.5 px-4">Courier Network</th>
-                <th className="py-3.5 px-4">Current Status</th>
-                <th className="py-3.5 px-4">Last Event</th>
-                <th className="py-3.5 px-4 text-right">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-              {filteredShipments.length === 0 ? (
-                <tr>
-                  <td colSpan={6} className="py-12 text-center text-slate-400">
-                    <Package className="mx-auto h-8 w-8 text-slate-300 dark:text-slate-600 mb-2" />
-                    <p className="text-sm font-semibold text-slate-600 dark:text-slate-300">
-                      No shipments matching your filter
-                    </p>
-                    <p className="text-xs text-slate-400 mt-1">
-                      Try adjusting the search query or upload tracking IDs above.
-                    </p>
-                  </td>
-                </tr>
-              ) : (
-                filteredShipments.map((item) => (
-                  <tr
-                    key={item.id}
-                    className={`transition-colors group ${
-                      selectedShipmentIds.includes(item.id)
-                        ? "bg-indigo-50/60 dark:bg-indigo-950/40"
-                        : "hover:bg-slate-50/80 dark:hover:bg-slate-800/40"
-                    }`}
-                  >
-                    {/* Row Checkbox */}
-                    <td className="py-3.5 pl-4 sm:pl-6 pr-2 w-10">
-                      <input
-                        type="checkbox"
-                        checked={selectedShipmentIds.includes(item.id)}
-                        onChange={() => handleToggleSelectRow(item.id)}
-                        aria-label={`Select consignment ${item.trackingNumber}`}
-                        className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer accent-indigo-600"
-                      />
-                    </td>
-
-                    {/* AWB & Copy */}
-                    <td className="py-3.5 px-3">
-                      <div className="flex items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => onOpenTrackingResult(item.trackingNumber, item.courierId)}
-                          className="font-mono font-bold text-indigo-600 hover:text-indigo-800 dark:text-indigo-400 dark:hover:text-indigo-300 transition-colors text-xs"
-                          title="Click to view detailed tracking popup"
-                        >
-                          {item.trackingNumber}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleCopy(item.id, item.trackingNumber)}
-                          className="opacity-0 group-hover:opacity-100 p-1 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-opacity"
-                          title="Copy AWB"
-                        >
-                          {copiedId === item.id ? (
-                            <Check className="h-3 w-3 text-emerald-600" />
-                          ) : (
-                            <Copy className="h-3 w-3" />
-                          )}
-                        </button>
-                        {item.isImported && (
-                          <span
-                            className="inline-flex items-center gap-1 rounded-md bg-emerald-50 dark:bg-emerald-950/80 px-1.5 py-0.5 text-[9px] font-bold text-emerald-700 dark:text-emerald-300 border border-emerald-200/60 dark:border-emerald-800/60 select-none cursor-default"
-                            title={item.batchName || "Imported batch"}
-                          >
-                            <FileSpreadsheet className="h-2.5 w-2.5 text-emerald-600" />
-                            <span>{item.batchName ? item.batchName.split(" • ")[0] : "Imported"}</span>
-                          </span>
-                        )}
-                      </div>
-                      <div className="text-[10px] text-slate-400 font-mono mt-0.5">
-                        {item.articleType}
-                      </div>
-                    </td>
-
-                    {/* Courier Network */}
-                    <td className="py-3.5 px-4">
-                      <div className="flex items-center gap-2">
-                        <span className="flex h-2 w-2 rounded-full bg-indigo-500" />
-                        <span className="font-semibold text-slate-800 dark:text-slate-200 truncate max-w-[140px]">
-                          {item.courierName}
-                        </span>
-                      </div>
-                    </td>
-
-                    {/* Status Pill (with Return / RTO distinction) */}
-                    <td className="py-3.5 px-4">
-                      {item.status === "delivered" && (
-                        <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-0.5 text-[11px] font-bold text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300 border border-emerald-200/80 dark:border-emerald-800/60">
-                          <CheckCircle2 className="h-3 w-3" />
-                          Delivered
-                        </span>
-                      )}
-                      {item.status === "out_for_delivery" && (
-                        <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-0.5 text-[11px] font-bold text-amber-700 dark:bg-amber-950/60 dark:text-amber-300 border border-amber-200/80 dark:border-amber-800/60">
-                          <Truck className="h-3 w-3" />
-                          Out for Delivery
-                        </span>
-                      )}
-                      {item.status === "in_transit" && (
-                        <span className="inline-flex items-center gap-1.5 rounded-full bg-sky-50 px-2.5 py-0.5 text-[11px] font-bold text-sky-700 dark:bg-sky-950/60 dark:text-sky-300 border border-sky-200/80 dark:border-sky-800/60">
-                          <Clock className="h-3 w-3" />
-                          In Transit
-                        </span>
-                      )}
-                      {item.status === "returned" && (
-                        <div className="inline-flex flex-col items-start gap-0.5">
-                          <span className="inline-flex items-center gap-1.5 rounded-full bg-rose-50 px-2.5 py-0.5 text-[11px] font-bold text-rose-700 dark:bg-rose-950/60 dark:text-rose-300 border border-rose-200/80 dark:border-rose-800/60">
-                            <RotateCcw className="h-3 w-3 stroke-[2.4]" />
-                            Returned (RTO)
-                          </span>
-                          {item.returnReason && (
-                            <span className="text-[10px] text-rose-600 dark:text-rose-400 font-medium truncate max-w-[150px]">
-                              {item.returnReason}
+                        {/* Status Pill */}
+                        <td className="py-3.5 px-4">
+                          {item.status === "delivered" && (
+                            <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-0.5 text-[11px] font-bold text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300 border border-emerald-200/80 dark:border-emerald-800/60">
+                              <CheckCircle2 className="h-3 w-3" />
+                              Delivered
                             </span>
                           )}
-                        </div>
-                      )}
-                      {item.status === "booked" && (
-                        <span className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-2.5 py-0.5 text-[11px] font-bold text-slate-700 dark:bg-slate-800 dark:text-slate-300">
-                          Booked
-                        </span>
-                      )}
-                    </td>
+                          {item.status === "out_for_delivery" && (
+                            <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-0.5 text-[11px] font-bold text-amber-700 dark:bg-amber-950/60 dark:text-amber-300 border border-amber-200/80 dark:border-amber-800/60">
+                              <Truck className="h-3 w-3" />
+                              Out for Delivery
+                            </span>
+                          )}
+                          {item.status === "in_transit" && (
+                            <span className="inline-flex items-center gap-1.5 rounded-full bg-sky-50 px-2.5 py-0.5 text-[11px] font-bold text-sky-700 dark:bg-sky-950/60 dark:text-sky-300 border border-sky-200/80 dark:border-sky-800/60">
+                              <Clock className="h-3 w-3" />
+                              In Transit
+                            </span>
+                          )}
+                          {item.status === "returned" && (
+                            <div className="inline-flex flex-col items-start gap-0.5">
+                              <span className="inline-flex items-center gap-1.5 rounded-full bg-rose-50 px-2.5 py-0.5 text-[11px] font-bold text-rose-700 dark:bg-rose-950/60 dark:text-rose-300 border border-rose-200/80 dark:border-rose-800/60">
+                                <RotateCcw className="h-3 w-3 stroke-[2.4]" />
+                                Returned (RTO)
+                              </span>
+                              {item.returnReason && (
+                                <span className="text-[10px] text-rose-600 dark:text-rose-400 font-medium truncate max-w-[150px]">
+                                  {item.returnReason}
+                                </span>
+                              )}
+                            </div>
+                          )}
+                          {item.status === "booked" && (
+                            <span className="inline-flex items-center gap-1.5 rounded-full bg-violet-50 px-2.5 py-0.5 text-[11px] font-bold text-violet-700 dark:bg-violet-950/60 dark:text-violet-300 border border-violet-200/80 dark:border-violet-800/60">
+                              <Package className="h-3 w-3" />
+                              Booked
+                            </span>
+                          )}
+                        </td>
 
-                    {/* Last Event */}
-                    <td className="py-3.5 px-4">
-                      <div className="font-medium text-slate-800 dark:text-slate-200 truncate max-w-[200px]">
-                        {item.statusText}
-                      </div>
-                      <div className="text-[10px] text-slate-400 mt-0.5">
-                        {item.lastUpdated} · {item.lastLocation}
-                      </div>
-                    </td>
+                        {/* Last Event */}
+                        <td className="py-3.5 px-4">
+                          <div className="font-medium text-slate-800 dark:text-slate-200 truncate max-w-[200px]">
+                            {item.statusText}
+                          </div>
+                          <div className="text-[10px] text-slate-400 mt-0.5">
+                            {item.lastUpdated} · {item.lastLocation}
+                          </div>
+                        </td>
 
-                    {/* Action buttons (Quick delete removed from row end; use checkboxes for safe deletion) */}
-                    <td className="py-3.5 px-4 text-right">
-                      <div className="flex items-center justify-end">
-                        <button
-                          type="button"
-                          onClick={() => onOpenTrackingResult(item.trackingNumber, item.courierId)}
-                          className="rounded-xl bg-indigo-50 hover:bg-indigo-600 hover:text-white px-3 py-1.5 text-xs font-bold text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300 dark:hover:bg-indigo-600 dark:hover:text-white transition-all cursor-pointer"
-                        >
-                          Track
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
+                        {/* Action buttons */}
+                        <td className="py-3.5 px-4 text-right">
+                          <div className="flex items-center justify-end">
+                            <button
+                              type="button"
+                              onClick={() => onOpenTrackingResult(item.trackingNumber, item.courierId)}
+                              className="rounded-xl bg-indigo-50 hover:bg-indigo-600 hover:text-white px-3 py-1.5 text-xs font-bold text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300 dark:hover:bg-indigo-600 dark:hover:text-white transition-all cursor-pointer"
+                            >
+                              Track
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
         </div>
       </div>
+
+      {/* ============================================================== */}
+      {/* CENTER-BOTTOM FLOATING CLEAR / DELETE ACTION BUTTON BAR        */}
+      {/* ============================================================== */}
+      {selectedShipmentIds.length > 0 && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 flex items-center gap-3 rounded-full border border-slate-700/80 bg-slate-900/95 dark:bg-slate-950/95 px-4 sm:px-5 py-2.5 text-white shadow-2xl backdrop-blur-md animate-in fade-in slide-in-from-bottom-4">
+          <div className="flex items-center gap-2 pr-1">
+            <span className="flex h-6 w-6 items-center justify-center rounded-full bg-indigo-600 text-white text-xs font-black tabular-nums">
+              {selectedShipmentIds.length}
+            </span>
+            <span className="text-xs font-bold text-slate-100 whitespace-nowrap">
+              selected
+            </span>
+          </div>
+
+          <div className="h-4 w-px bg-slate-700" />
+
+          <button
+            type="button"
+            onClick={() => setSelectedShipmentIds([])}
+            className="rounded-full px-3 py-1.5 text-xs font-bold text-slate-300 hover:bg-slate-800 hover:text-white transition-colors cursor-pointer whitespace-nowrap"
+          >
+            Clear
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setIsBulkDeleteModalOpen(true)}
+            className="inline-flex items-center gap-1.5 rounded-full bg-rose-600 hover:bg-rose-500 px-4 py-1.5 text-xs font-extrabold text-white shadow-sm transition-colors cursor-pointer whitespace-nowrap"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+            <span>Delete ({selectedShipmentIds.length})</span>
+          </button>
+        </div>
+      )}
 
       {/* ============================================================== */}
       {/* 5. AUTO-CHECK, EXPORT & DATA SETTINGS MODAL (FULLSCREEN MOBILE) */}
@@ -2634,10 +3480,10 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                 </span>
                 <div>
                   <h3 className="text-base font-extrabold text-slate-900 dark:text-white">
-                    Operations, Export & Sync Settings
+                    Operations, Bulk Export & Sync Settings
                   </h3>
                   <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                    Configure auto-sync intervals, delivered exports, clean-up, and backups
+                    Configure auto-sync intervals, batch CSV exports, delivered clean-up, and backups
                   </p>
                 </div>
               </div>
@@ -2652,6 +3498,54 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
 
             {/* Scrollable Modal Body */}
             <div className="flex-1 overflow-y-auto p-5 sm:p-6 space-y-5">
+              {/* Bulk CSV Export by Batch inside Settings Modal */}
+              <div className="rounded-2xl border border-indigo-200/80 bg-indigo-50/50 p-4 dark:border-indigo-900/60 dark:bg-indigo-950/30 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <FileSpreadsheet className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
+                    <span className="text-xs font-bold text-slate-900 dark:text-white">
+                      Bulk Export Shipments by Batch (.CSV)
+                    </span>
+                  </div>
+                  <span className="rounded-lg bg-indigo-100 dark:bg-indigo-950 px-2 py-0.5 text-[10px] font-mono font-bold text-indigo-800 dark:text-indigo-300">
+                    Platform CSV
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-600 dark:text-slate-400">
+                  Download all tracked shipment data within a selected batch as a structured CSV file ready for analytics or re-import.
+                </p>
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <select
+                    value={exportBatchTargetId}
+                    onChange={(e) => setExportBatchTargetId(e.target.value)}
+                    className="flex-1 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-800 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 cursor-pointer"
+                  >
+                    <option value="all">All Tracked Shipments ({totalCount})</option>
+                    <option value="imported_all">All Imported Batches ({importedCount})</option>
+                    <option value="direct_only">Direct Added Consignments ({Math.max(0, totalCount - importedCount)})</option>
+                    {uniqueBatches.map((b) => (
+                      <option key={b.id} value={b.id}>
+                        {b.name} ({b.count} items)
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    onClick={() => handleExportBatchCsv()}
+                    disabled={totalCount === 0}
+                    className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 px-4 py-2.5 text-xs font-extrabold text-white shadow-2xs transition-colors cursor-pointer"
+                  >
+                    <Download className="h-3.5 w-3.5" />
+                    <span>Bulk Export CSV</span>
+                  </button>
+                </div>
+                {batchCsvExportMsg && (
+                  <div className="rounded-xl border border-emerald-300 bg-white/90 dark:border-emerald-800 dark:bg-slate-900 px-3 py-2 text-xs font-bold text-emerald-700 dark:text-emerald-300">
+                    {batchCsvExportMsg}
+                  </div>
+                )}
+              </div>
+
               {/* Auto check toggle */}
               <div className="flex items-center justify-between rounded-2xl bg-slate-50 dark:bg-slate-800/80 p-4 border border-slate-200/80 dark:border-slate-700">
                 <div className="pr-3">
@@ -2677,7 +3571,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                 </button>
               </div>
 
-              {/* Frequency Chooser Options: 5 mins, 10, 15, 30, 1hr, custom */}
+              {/* Frequency Chooser Options */}
               <div>
                 <label className="text-xs font-bold text-slate-700 dark:text-slate-300 mb-2 block">
                   Select Sync Frequency:
@@ -2742,7 +3636,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                 </p>
               </div>
 
-              {/* Delivered Consignments Export & Clean-Up (Moved from Front Page into Settings) */}
+              {/* Delivered Consignments Export & Clean-Up */}
               <div className="rounded-2xl border border-emerald-200/80 bg-emerald-50/50 p-4 dark:border-emerald-900/60 dark:bg-emerald-950/30 space-y-3">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
@@ -2865,393 +3759,195 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
       {/* ============================================================== */}
       {isAddConsignmentsModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-0 sm:p-4 bg-slate-950/80 backdrop-blur-md animate-in fade-in">
-          <div className="fixed inset-0" onClick={handleCloseAddConsignmentsModal} />
+          <div className="fixed inset-0" onClick={handleRequestCancelIntake} />
           <div
             className="relative z-10 w-full h-full sm:h-auto sm:max-h-[92vh] sm:max-w-4xl flex flex-col rounded-none sm:rounded-3xl border-0 sm:border border-slate-200 bg-white shadow-2xl dark:border-slate-800 dark:bg-slate-900 text-left overflow-hidden"
             onClick={(e) => e.stopPropagation()}
           >
-            {/* Modal Header */}
-            <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 px-4 sm:px-6 py-3.5 sm:py-4 shrink-0">
-              <div className="flex items-center gap-2.5 sm:gap-3">
-                <span className="flex h-9 w-9 sm:h-10 sm:w-10 items-center justify-center rounded-2xl bg-indigo-50 text-indigo-600 dark:bg-indigo-950/70 dark:text-indigo-400 shadow-2xs shrink-0">
-                  <ScanLine className="h-5 w-5 stroke-[2.4]" />
-                </span>
-                <div>
-                  <h3 className="text-base sm:text-lg font-black tracking-tight text-slate-900 dark:text-white">
-                    Add & Scan Consignments
-                  </h3>
-                  <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                    Type numbers manually, scan with barcode reader devices in the input field, or use camera scanning.
-                  </p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={handleCloseAddConsignmentsModal}
-                className="rounded-xl p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-slate-800 dark:hover:text-slate-200 transition-colors cursor-pointer"
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-
-            {/* Modal Body (Scrollable) */}
-            <div className="overflow-y-auto p-4 sm:p-6 space-y-4 sm:space-y-5 flex-1">
-              {/* Intake Toolbar: Auto-Next Toggle & Camera Mode Switch */}
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-2xl bg-slate-50 dark:bg-slate-800/60 p-3.5 border border-slate-200 dark:border-slate-700">
-                {/* Auto-Next Switch */}
-                <div className="flex items-center gap-2.5">
-                  <div
-                    className={`flex h-3 w-3 shrink-0 rounded-full ${
-                      isAutoNextEnabled
-                        ? "bg-emerald-500 ring-4 ring-emerald-500/20 animate-pulse"
-                        : "bg-amber-500 ring-4 ring-amber-500/20"
-                    }`}
-                  />
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs font-bold text-slate-900 dark:text-white">
-                        Auto-Next Scan:
-                      </span>
-                      <span
-                        className={`rounded-md px-1.5 py-0.5 text-[10px] font-black uppercase tracking-wider ${
-                          isAutoNextEnabled
-                            ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300"
-                            : "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300"
-                        }`}
-                      >
-                        {isAutoNextEnabled ? "ON" : "OFF"}
-                      </span>
+            {/* ========================================================== */}
+            {/* ASK BEFORE CANCEL CONFIRMATION OVERLAY (MANUAL & CAMERA)   */}
+            {/* ========================================================== */}
+            {isCancelIntakeConfirmOpen && (
+              <div className="absolute inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/75 backdrop-blur-xs animate-in fade-in">
+                <div
+                  className="w-full max-w-md rounded-3xl border border-slate-200 bg-white p-6 shadow-2xl dark:border-slate-800 dark:bg-slate-900 text-left space-y-4"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <div className="flex items-start gap-3">
+                    <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-rose-50 text-rose-600 dark:bg-rose-950/80 dark:text-rose-400">
+                      <AlertCircle className="h-6 w-6 stroke-[2.2]" />
+                    </span>
+                    <div>
+                      <h4 className="text-base font-extrabold text-slate-900 dark:text-white">
+                        Discard Unsaved Consignments?
+                      </h4>
+                      <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                        You have unsaved data in {isCameraActive ? "Camera Scanner" : "Add Consignments"}.
+                      </p>
                     </div>
-                    <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                      {isAutoNextEnabled
-                        ? "Auto-Next ON: Automatically stages each scanned barcode and clears input for next scan."
-                        : "Auto-Next OFF: Holds scanned ID in view to verify details before advancing."}
+                  </div>
+
+                  <div className="rounded-2xl border border-amber-200 bg-amber-50/70 p-3.5 text-xs text-amber-950 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-200 space-y-1">
+                    {stagedConsignments.length > 0 && (
+                      <p className="font-bold">
+                        • {stagedConsignments.length} staged consignment{stagedConsignments.length > 1 ? "s" : ""} waiting for confirmation
+                      </p>
+                    )}
+                    {intakeAwb.trim().length > 0 && (
+                      <p className="font-bold">
+                        • Unstaged AWB entry: <span className="font-mono">{intakeAwb.trim()}</span>
+                      </p>
+                    )}
+                    <p className="text-[11px] opacity-90 pt-1">
+                      If you cancel now, all scanned and entered consignment data will be lost.
                     </p>
                   </div>
-                </div>
 
-                {/* Right controls: Camera toggle & Auto-Next Toggle switch */}
-                <div className="flex items-center gap-2.5 self-end sm:self-auto">
-                  {/* Camera Scanner Trigger Button with Modern Icon */}
-                  <button
-                    type="button"
-                    onClick={handleToggleCamera}
-                    className={`inline-flex items-center gap-2 rounded-xl px-3.5 py-1.5 text-xs font-bold transition-all cursor-pointer ${
-                      isCameraActive
-                        ? "bg-indigo-600 text-white shadow-xs"
-                        : "bg-white text-slate-700 hover:bg-slate-100 dark:bg-slate-800 dark:text-slate-200 border border-slate-200 dark:border-slate-700 shadow-2xs"
-                    }`}
-                  >
-                    <div className="flex h-5 w-5 items-center justify-center rounded-md bg-indigo-100/80 dark:bg-indigo-900/60 text-indigo-600 dark:text-indigo-300">
-                      {isCameraActive ? <CameraOff className="h-3.5 w-3.5" /> : <ScanLine className="h-3.5 w-3.5 stroke-[2.5]" />}
-                    </div>
-                    <span>{isCameraActive ? "Hide Camera" : "Camera Scanner"}</span>
-                  </button>
-
-                  {/* Auto-Next Switch */}
-                  <button
-                    type="button"
-                    onClick={() => setIsAutoNextEnabled((prev) => !prev)}
-                    className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                      isAutoNextEnabled ? "bg-emerald-600" : "bg-slate-300 dark:bg-slate-600"
-                    }`}
-                    title={`Click to switch Auto-Next ${isAutoNextEnabled ? "OFF" : "ON"}`}
-                  >
-                    <span
-                      className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm ring-0 transition duration-200 ease-in-out ${
-                        isAutoNextEnabled ? "translate-x-5" : "translate-x-0"
-                      }`}
-                    />
-                  </button>
-                </div>
-              </div>
-
-              {/* Unified Typing & Hardware Barcode Reader Field */}
-              <div className="rounded-2xl border-2 border-indigo-500/60 bg-white p-4 sm:p-5 dark:border-indigo-500/50 dark:bg-slate-800/70 shadow-xs space-y-3.5">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1.5">
-                  <label className="text-xs font-black uppercase tracking-wider text-slate-700 dark:text-slate-200">
-                    Consignment / AWB Number (Type manually or scan barcode device):
-                  </label>
-                  {intakeAwb && (
-                    <div className="flex items-center gap-1.5 text-xs">
-                      <span className="text-[11px] text-slate-400">Detected Courier:</span>
-                      <span className="font-bold text-indigo-600 dark:text-indigo-400">
-                        {autoDetectCourier(intakeAwb)?.name || "Auto-Detecting"}
-                      </span>
-                    </div>
-                  )}
-                </div>
-
-                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5 w-full">
-                  <div className="relative w-full flex-1 min-w-0">
-                    <input
-                      ref={intakeInputRef}
-                      type="text"
-                      value={intakeAwb}
-                      onChange={(e) => {
-                        const val = e.target.value.toUpperCase();
-                        setIntakeAwb(val);
-                        setIntakeError("");
-                        const detected = autoDetectCourier(val);
-                        if (detected) setIntakeCourier(detected.id);
-                      }}
-                      onKeyDown={handleIntakeKeyDown}
-                      placeholder="Enter Consignment / AWB..."
-                      className="w-full rounded-xl border border-slate-300 bg-white px-4 py-2.5 font-mono text-sm font-black uppercase tracking-wider text-slate-900 focus:border-indigo-600 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
-                      autoFocus
-                    />
-                  </div>
-
-                  {/* Stage / Add Button */}
-                  <div className="flex items-center gap-2 w-full sm:w-auto shrink-0">
+                  <div className="flex flex-wrap items-center justify-end gap-2 pt-2">
                     <button
                       type="button"
-                      onClick={() => handleStageConsignment(intakeAwb)}
-                      className="flex-1 sm:flex-initial inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-4 py-2.5 text-xs font-extrabold text-white shadow-xs transition-colors cursor-pointer"
+                      onClick={() => setIsCancelIntakeConfirmOpen(false)}
+                      className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 cursor-pointer"
                     >
-                      <Plus className="h-4 w-4 stroke-[2.5]" />
-                      <span>Stage Consignment</span>
+                      Keep Data / Continue
                     </button>
 
-                    {!isAutoNextEnabled && recentStagedCode && (
+                    {isCameraActive && stagedConsignments.length > 0 && (
                       <button
                         type="button"
                         onClick={() => {
-                          setIntakeAwb("");
-                          setRecentStagedCode(null);
-                          intakeInputRef.current?.focus();
+                          setIsCancelIntakeConfirmOpen(false);
+                          stopCameraStreamOnly();
                         }}
-                        className="inline-flex items-center justify-center gap-1 rounded-xl bg-emerald-600 hover:bg-emerald-700 px-3.5 py-2.5 text-xs font-bold text-white shadow-xs shrink-0 cursor-pointer animate-in fade-in"
+                        className="rounded-xl bg-indigo-600 hover:bg-indigo-700 px-4 py-2 text-xs font-bold text-white shadow-xs cursor-pointer"
                       >
-                        <span>Next ID →</span>
+                        Review Scanned ({stagedConsignments.length})
                       </button>
                     )}
+
+                    <button
+                      type="button"
+                      onClick={handleForceDiscardAndCloseIntake}
+                      className="inline-flex items-center gap-1.5 rounded-xl bg-rose-600 hover:bg-rose-700 px-4 py-2 text-xs font-extrabold text-white shadow-xs cursor-pointer"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                      <span>Discard & Cancel</span>
+                    </button>
                   </div>
                 </div>
+              </div>
+            )}
 
-                {/* Inline Options Strip: Carrier, Recipient, Destination, Status */}
-                <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5 pt-1 text-xs">
-                  {/* Courier Partner Selection */}
-                  <div className="relative">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setIsIntakeCourierDropdownOpen(!isIntakeCourierDropdownOpen);
-                        setIsIntakeStatusDropdownOpen(false);
-                      }}
-                      className="w-full flex items-center justify-between rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-800 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 cursor-pointer"
-                    >
-                      <span className="truncate">
-                        {COURIER_MAP[intakeCourier]?.shortName || "Carrier Partner"}
-                      </span>
-                      <ChevronDown className="h-3.5 w-3.5 text-slate-400 shrink-0 ml-1" />
-                    </button>
-
-                    {isIntakeCourierDropdownOpen && (
-                      <>
-                        <div
-                          className="fixed inset-0 z-40"
-                          onClick={() => setIsIntakeCourierDropdownOpen(false)}
-                        />
-                        <div className="absolute left-0 top-full mt-1 z-50 max-h-48 w-56 overflow-y-auto rounded-xl border border-slate-200 bg-white p-1 shadow-xl dark:border-slate-700 dark:bg-slate-800">
-                          {COURIER_LIST.map((c) => (
-                            <button
-                              key={c.id}
-                              type="button"
-                              onClick={() => {
-                                setIntakeCourier(c.id);
-                                setIsIntakeCourierDropdownOpen(false);
-                              }}
-                              className="w-full text-left rounded-lg px-2.5 py-1.5 text-xs font-medium hover:bg-slate-100 dark:hover:bg-slate-700 flex items-center justify-between cursor-pointer"
-                            >
-                              <span>{c.name}</span>
-                              <span className="text-[10px] text-slate-400 font-mono">({c.shortName})</span>
-                            </button>
-                          ))}
-                        </div>
-                      </>
-                    )}
-                  </div>
-
-                  {/* Recipient Name */}
-                  <input
-                    type="text"
-                    placeholder="Recipient Name (Optional)"
-                    value={intakeRecipient}
-                    onChange={(e) => setIntakeRecipient(e.target.value)}
-                    className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 focus:outline-none"
-                  />
-
-                  {/* Destination City */}
-                  <input
-                    type="text"
-                    placeholder="Destination Hub / City"
-                    value={intakeDestination}
-                    onChange={(e) => setIntakeDestination(e.target.value)}
-                    className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 focus:outline-none"
-                  />
-
-                  {/* Custom Styled Status Dropdown */}
-                  <div className="relative">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setIsIntakeStatusDropdownOpen(!isIntakeStatusDropdownOpen);
-                        setIsIntakeCourierDropdownOpen(false);
-                      }}
-                      className="w-full flex items-center justify-between rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-800 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 cursor-pointer"
-                    >
-                      <div className="flex items-center gap-2 truncate">
-                        <span
-                          className={`h-2 w-2 rounded-full shrink-0 ${
-                            intakeStatus === "delivered"
-                              ? "bg-emerald-500 ring-2 ring-emerald-500/20"
-                              : intakeStatus === "out_for_delivery"
-                              ? "bg-amber-500 ring-2 ring-amber-500/20"
-                              : intakeStatus === "returned"
-                              ? "bg-rose-500 ring-2 ring-rose-500/20"
-                              : "bg-sky-500 ring-2 ring-sky-500/20"
-                          }`}
-                        />
-                        <span className="truncate">
-                          {intakeStatus === "delivered"
-                            ? "Delivered"
-                            : intakeStatus === "out_for_delivery"
-                            ? "Out for Delivery"
-                            : intakeStatus === "returned"
-                            ? "Returned (RTO)"
-                            : "In Transit"}
+            {/* ========================================================== */}
+            {/* MODE A: SEPARATE CAMERA-ONLY SCANNER VIEW (NO KEYBOARD)    */}
+            {/* ========================================================== */}
+            {isCameraActive ? (
+              <div className="flex flex-col h-full flex-1 bg-slate-950 text-white overflow-hidden">
+                {/* Separate Camera Header */}
+                <div className="flex items-center justify-between border-b border-slate-800 px-4 sm:px-6 py-3.5 shrink-0">
+                  <div className="flex items-center gap-2.5">
+                    <span className="flex h-9 w-9 items-center justify-center rounded-2xl bg-indigo-600 text-white shadow-xs shrink-0">
+                      <Camera className="h-4 w-4" />
+                    </span>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <h3 className="text-sm sm:text-base font-black tracking-tight text-white">
+                          Camera Barcode & QR Scanner
+                        </h3>
+                        <span className="rounded-full bg-emerald-500/20 border border-emerald-500/40 px-2.5 py-0.5 text-[11px] font-mono font-black text-emerald-300">
+                          {stagedConsignments.length} Scanned
                         </span>
                       </div>
-                      <ChevronDown className="h-3.5 w-3.5 text-slate-400 shrink-0 ml-1" />
-                    </button>
+                      <p className="text-[11px] text-slate-400">
+                        Dedicated camera mode — scans auto-detect carrier without opening the keyboard
+                      </p>
+                    </div>
+                  </div>
 
-                    {isIntakeStatusDropdownOpen && (
-                      <>
-                        <div
-                          className="fixed inset-0 z-40"
-                          onClick={() => setIsIntakeStatusDropdownOpen(false)}
-                        />
-                        <div className="absolute left-0 right-0 sm:right-auto top-full mt-1 z-50 sm:w-48 overflow-hidden rounded-xl border border-slate-200 bg-white p-1 shadow-xl dark:border-slate-700 dark:bg-slate-800">
-                          {[
-                            { value: "in_transit", label: "In Transit", dot: "bg-sky-500", desc: "Active dispatch" },
-                            { value: "out_for_delivery", label: "Out for Delivery", dot: "bg-amber-500", desc: "With delivery agent" },
-                            { value: "delivered", label: "Delivered", dot: "bg-emerald-500", desc: "Successfully delivered" },
-                            { value: "returned", label: "Returned (RTO)", dot: "bg-rose-500", desc: "Returned to shipper" },
-                          ].map((st) => (
-                            <button
-                              key={st.value}
-                              type="button"
-                              onClick={() => {
-                                setIntakeStatus(st.value as any);
-                                setIsIntakeStatusDropdownOpen(false);
-                              }}
-                              className={`w-full text-left rounded-lg px-2.5 py-1.5 text-xs font-medium hover:bg-slate-100 dark:hover:bg-slate-700 flex items-center justify-between cursor-pointer transition-colors ${
-                                intakeStatus === st.value
-                                  ? "bg-indigo-50/70 text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300 font-bold"
-                                  : "text-slate-700 dark:text-slate-300"
-                              }`}
-                            >
-                              <div className="flex items-center gap-2">
-                                <span className={`h-2 w-2 rounded-full ${st.dot}`} />
-                                <span>{st.label}</span>
-                              </div>
-                              {intakeStatus === st.value && (
-                                <Check className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" />
-                              )}
-                            </button>
-                          ))}
-                        </div>
-                      </>
-                    )}
+                  <button
+                    type="button"
+                    onClick={handleRequestCancelFromCamera}
+                    className="rounded-xl p-2 text-slate-400 hover:bg-slate-800 hover:text-white transition-colors cursor-pointer"
+                    title="Close camera"
+                  >
+                    <X className="h-5 w-5" />
+                  </button>
+                </div>
+
+                {/* Camera Mode Switcher & Auto-Next Bar */}
+                <div className="flex flex-wrap items-center justify-between gap-2 px-4 sm:px-6 py-3 bg-slate-900/90 border-b border-slate-800 shrink-0">
+                  <div className="inline-flex items-center gap-1 rounded-xl bg-slate-950 p-1 border border-slate-800 text-xs font-bold">
+                    <button
+                      type="button"
+                      onClick={() => setCameraGuideMode("barcode")}
+                      className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
+                        cameraGuideMode === "barcode"
+                          ? "bg-indigo-600 text-white shadow-xs"
+                          : "text-slate-400 hover:text-slate-200"
+                      }`}
+                    >
+                      Barcode
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setCameraGuideMode("qr")}
+                      className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
+                        cameraGuideMode === "qr"
+                          ? "bg-indigo-600 text-white shadow-xs"
+                          : "text-slate-400 hover:text-slate-200"
+                      }`}
+                    >
+                      QR
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setCameraGuideMode("both")}
+                      className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
+                        cameraGuideMode === "both"
+                          ? "bg-indigo-600 text-white shadow-xs"
+                          : "text-slate-400 hover:text-slate-200"
+                      }`}
+                    >
+                      Both
+                    </button>
+                  </div>
+
+                  <div className="flex items-center gap-2.5">
+                    <span className="text-xs font-bold text-slate-300">
+                      Auto-Next: <span className={isAutoNextEnabled ? "text-emerald-400" : "text-amber-400"}>{isAutoNextEnabled ? "ON" : "OFF"}</span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setIsAutoNextEnabled((prev) => !prev)}
+                      className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                        isAutoNextEnabled ? "bg-emerald-600" : "bg-slate-700"
+                      }`}
+                    >
+                      <span
+                        className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm ring-0 transition duration-200 ease-in-out ${
+                          isAutoNextEnabled ? "translate-x-5" : "translate-x-0"
+                        }`}
+                      />
+                    </button>
                   </div>
                 </div>
 
-                {/* Instant Success Feedback Strip */}
-                {recentStagedCode && (
-                  <div className="flex items-center justify-between rounded-xl bg-emerald-100/90 dark:bg-emerald-950/80 px-3 py-1.5 text-xs font-bold text-emerald-800 dark:text-emerald-300 animate-in fade-in">
-                    <div className="flex items-center gap-1.5">
-                      <CheckCheck className="h-4 w-4 text-emerald-600" />
-                      <span>
-                        ✓ Staged: {recentStagedCode} —{" "}
-                        {isAutoNextEnabled
-                          ? "Added to review list! Ready for next scan."
-                          : "Saved to review list (Auto-Next OFF)."}
-                      </span>
-                    </div>
-                    <span className="text-[11px] font-mono text-emerald-700 dark:text-emerald-400">
-                      Total Staged: {stagedConsignments.length}
-                    </span>
-                  </div>
-                )}
-
-                {/* Error Banner */}
-                {intakeError && (
-                  <div className="rounded-xl border border-rose-200 bg-rose-50 p-2.5 text-xs font-semibold text-rose-700 dark:border-rose-900/60 dark:bg-rose-950/60 dark:text-rose-300">
-                    {intakeError}
-                  </div>
-                )}
-              </div>
-
-              {/* Clean Camera Scanner Viewfinder (No cluttering text/icons on camera feed + Quick Success Mark) */}
-              {isCameraActive && (
-                <div className="rounded-2xl border border-slate-800 bg-slate-950 p-3 sm:p-4 text-white space-y-3 animate-in fade-in">
-                  {/* Minimal Mode Switcher Bar */}
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="inline-flex items-center gap-1 rounded-xl bg-slate-900 p-1 border border-slate-800 text-[11px] font-bold">
-                      <button
-                        type="button"
-                        onClick={() => setCameraGuideMode("barcode")}
-                        className={`px-2.5 py-1 rounded-lg transition-all cursor-pointer ${
-                          cameraGuideMode === "barcode"
-                            ? "bg-indigo-600 text-white shadow-xs"
-                            : "text-slate-400 hover:text-slate-200"
-                        }`}
-                      >
-                        Barcode
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setCameraGuideMode("qr")}
-                        className={`px-2.5 py-1 rounded-lg transition-all cursor-pointer ${
-                          cameraGuideMode === "qr"
-                            ? "bg-indigo-600 text-white shadow-xs"
-                            : "text-slate-400 hover:text-slate-200"
-                        }`}
-                      >
-                        QR
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setCameraGuideMode("both")}
-                        className={`px-2.5 py-1 rounded-lg transition-all cursor-pointer ${
-                          cameraGuideMode === "both"
-                            ? "bg-indigo-600 text-white shadow-xs"
-                            : "text-slate-400 hover:text-slate-200"
-                        }`}
-                      >
-                        Both
-                      </button>
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={handleToggleCamera}
-                      className="rounded-lg bg-slate-900 hover:bg-slate-800 px-2.5 py-1 text-[11px] font-bold text-slate-300 border border-slate-800 cursor-pointer"
-                    >
-                      Close Camera
-                    </button>
-                  </div>
-
+                {/* Main Dedicated Camera Viewport */}
+                <div className="flex-1 flex flex-col p-4 sm:p-6 gap-3 overflow-y-auto">
                   {cameraError && (
-                    <div className="text-[11px] text-amber-300 bg-amber-950/70 p-2.5 rounded-xl border border-amber-800/80">
+                    <div className="text-xs text-amber-300 bg-amber-950/70 p-3 rounded-xl border border-amber-800/80">
                       {cameraError}
                     </div>
                   )}
 
-                  {/* Unobstructed Camera Video Feed with Clean Guide Frame & Quick Success Mark */}
+                  {intakeError && (
+                    <div className="text-xs text-rose-300 bg-rose-950/70 p-3 rounded-xl border border-rose-800/80">
+                      {intakeError}
+                    </div>
+                  )}
+
                   <div
-                    className={`relative h-52 sm:h-64 rounded-2xl bg-black overflow-hidden flex items-center justify-center border-2 transition-colors duration-200 ${
+                    className={`relative flex-1 min-h-[260px] sm:min-h-[340px] rounded-2xl bg-black overflow-hidden flex items-center justify-center border-2 transition-colors duration-200 ${
                       cameraScanSuccess
                         ? "border-emerald-500 shadow-[0_0_25px_rgba(16,185,129,0.45)]"
                         : "border-slate-800"
@@ -3265,35 +3961,35 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                       autoPlay
                     />
 
-                    {/* Subtle Scan Line */}
+                    {/* Horizontal RED Laser Scan Line */}
                     {!cameraScanSuccess && (
-                      <div className="absolute left-8 right-8 h-0.5 bg-emerald-400/90 shadow-[0_0_12px_#10b981] animate-pulse z-10 pointer-events-none" />
+                      <div className="absolute left-8 right-8 h-0.5 bg-red-500 shadow-[0_0_14px_#ef4444] animate-pulse z-10 pointer-events-none" />
                     )}
 
-                    {/* Clean Guide Frame Only (No icons or text blocking the camera) */}
+                    {/* Clean Guide Frame Only */}
                     {cameraGuideMode === "barcode" && (
                       <div
-                        className={`relative z-10 w-4/5 max-w-sm h-24 rounded-xl border-2 pointer-events-none transition-colors ${
-                          cameraScanSuccess ? "border-emerald-400 bg-emerald-500/15" : "border-indigo-400/80"
+                        className={`relative z-10 w-4/5 max-w-sm h-28 rounded-xl border-2 pointer-events-none transition-colors ${
+                          cameraScanSuccess ? "border-emerald-400 bg-emerald-500/15" : "border-white/70"
                         }`}
                       />
                     )}
 
                     {cameraGuideMode === "qr" && (
                       <div
-                        className={`relative z-10 w-40 h-40 sm:w-44 sm:h-44 rounded-2xl border-2 pointer-events-none transition-colors ${
-                          cameraScanSuccess ? "border-emerald-400 bg-emerald-500/15" : "border-emerald-400/80"
+                        className={`relative z-10 w-48 h-48 sm:w-52 sm:h-52 rounded-2xl border-2 pointer-events-none transition-colors ${
+                          cameraScanSuccess ? "border-emerald-400 bg-emerald-500/15" : "border-white/70"
                         }`}
                       />
                     )}
 
                     {cameraGuideMode === "both" && (
                       <div
-                        className={`relative z-10 w-4/5 max-w-md h-36 rounded-2xl border-2 pointer-events-none flex items-center justify-center transition-colors ${
-                          cameraScanSuccess ? "border-emerald-400 bg-emerald-500/15" : "border-white/50"
+                        className={`relative z-10 w-4/5 max-w-md h-44 rounded-2xl border-2 pointer-events-none flex items-center justify-center transition-colors ${
+                          cameraScanSuccess ? "border-emerald-400 bg-emerald-500/15" : "border-white/60"
                         }`}
                       >
-                        <div className="w-28 h-28 rounded-xl border border-emerald-400/60" />
+                        <div className="w-32 h-32 rounded-xl border border-white/50" />
                       </div>
                     )}
 
@@ -3309,154 +4005,605 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                       </div>
                     )}
                   </div>
-                </div>
-              )}
 
-              {/* Full Review Before Add: Staged Consignments List */}
-              <div className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-5 dark:border-slate-800 dark:bg-slate-900 space-y-3">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 dark:border-slate-800 pb-3">
-                  <div className="flex items-center gap-2">
-                    <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300 font-bold text-xs">
-                      {stagedConsignments.length}
+                  {/* Latest Scanned Item Strip (No input fields so keyboard never opens) */}
+                  <div className="rounded-2xl border border-slate-800 bg-slate-900/90 px-4 py-3 flex items-center justify-between gap-3">
+                    {stagedConsignments.length > 0 ? (
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-emerald-500/20 text-emerald-400">
+                          <Check className="h-3.5 w-3.5 stroke-[3]" />
+                        </span>
+                        <div className="truncate text-xs">
+                          <span className="text-slate-400">Last scanned: </span>
+                          <span className="font-mono font-black text-white">
+                            {stagedConsignments[0].trackingNumber}
+                          </span>
+                          <span className="text-indigo-400 font-semibold ml-2">
+                            ({stagedConsignments[0].courierName})
+                          </span>
+                        </div>
+                      </div>
+                    ) : (
+                      <span className="text-xs text-slate-400">
+                        Align barcode or QR code with the red laser line to scan automatically.
+                      </span>
+                    )}
+                    <span className="text-xs font-mono font-bold text-slate-300 shrink-0">
+                      Total: {stagedConsignments.length}
                     </span>
-                    <h4 className="text-xs sm:text-sm font-bold text-slate-900 dark:text-white">
-                      Full Review Before Add: Staged Consignments
-                    </h4>
-                  </div>
-                  <div className="text-[11px] text-slate-500 dark:text-slate-400">
-                    Inspect all items below. Nothing is added to dashboard until you click Confirm.
                   </div>
                 </div>
 
-                {/* Staged Table / Empty State */}
-                {stagedConsignments.length === 0 ? (
-                  <div className="py-8 text-center text-slate-400">
-                    <Package className="mx-auto h-8 w-8 text-slate-300 dark:text-slate-600 mb-2" />
-                    <p className="text-xs font-semibold text-slate-600 dark:text-slate-300">
-                      No consignments staged for review yet
-                    </p>
-                    <p className="text-[11px] text-slate-400 mt-0.5">
-                      Type numbers in the field above, scan with a barcode reader device, or open the camera scanner.
-                    </p>
-                  </div>
-                ) : (
-                  <div className="overflow-x-auto max-h-56 overflow-y-auto rounded-xl border border-slate-200 dark:border-slate-800">
-                    <table className="w-full text-left text-xs min-w-[550px]">
-                      <thead className="bg-slate-50 dark:bg-slate-800 text-[10px] uppercase font-bold text-slate-500 border-b border-slate-200 dark:border-slate-800 sticky top-0 z-10">
-                        <tr>
-                          <th className="py-2.5 px-3">AWB / Consignment</th>
-                          <th className="py-2.5 px-3">Carrier Partner</th>
-                          <th className="py-2.5 px-3">Destination / Addressee</th>
-                          <th className="py-2.5 px-3">Status</th>
-                          <th className="py-2.5 px-3 text-right">Remove</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-100 dark:divide-slate-800 font-mono text-[11px]">
-                        {stagedConsignments.map((item) => (
-                          <tr key={item.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
-                            {/* AWB */}
-                            <td className="py-2.5 px-3 font-bold text-indigo-600 dark:text-indigo-400">
-                              {item.trackingNumber}
-                            </td>
-
-                            {/* Carrier Selector */}
-                            <td className="py-2.5 px-3 font-sans">
-                              <select
-                                value={item.courierId}
-                                onChange={(e) => handleUpdateStagedCourier(item.id, e.target.value)}
-                                className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-semibold text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 cursor-pointer"
-                              >
-                                {COURIER_LIST.map((c) => (
-                                  <option key={c.id} value={c.id}>
-                                    {c.name}
-                                  </option>
-                                ))}
-                              </select>
-                            </td>
-
-                            {/* Destination */}
-                            <td className="py-2.5 px-3 font-sans text-slate-600 dark:text-slate-400 truncate max-w-[150px]">
-                              {item.destination}
-                            </td>
-
-                            {/* Status */}
-                            <td className="py-2.5 px-3">
-                              <span
-                                className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-sans font-bold ${
-                                  item.status === "delivered"
-                                    ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
-                                    : item.status === "returned"
-                                    ? "bg-rose-50 text-rose-700 dark:bg-rose-950 dark:text-rose-300"
-                                    : item.status === "out_for_delivery"
-                                    ? "bg-amber-50 text-amber-700 dark:bg-amber-950 dark:text-amber-300"
-                                    : "bg-sky-50 text-sky-700 dark:bg-sky-950 dark:text-sky-300"
-                                }`}
-                              >
-                                {item.status === "delivered"
-                                  ? "Delivered"
-                                  : item.status === "returned"
-                                  ? "Returned"
-                                  : item.status === "out_for_delivery"
-                                  ? "Out for Delivery"
-                                  : "In Transit"}
-                              </span>
-                            </td>
-
-                            {/* Remove button */}
-                            <td className="py-2.5 px-3 text-right">
-                              <button
-                                type="button"
-                                onClick={() => handleRemoveStagedItem(item.id)}
-                                className="p-1 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/70 transition-colors cursor-pointer"
-                                title="Remove this item from staging list"
-                              >
-                                <Trash2 className="h-3.5 w-3.5" />
-                              </button>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Modal Footer with Full Review Confirmation */}
-            <div className="border-t border-slate-100 dark:border-slate-800 px-5 sm:px-6 py-3.5 flex flex-wrap items-center justify-between gap-3 shrink-0">
-              <div>
-                {stagedConsignments.length > 0 && (
+                {/* Separate Camera Footer */}
+                <div className="border-t border-slate-800 px-4 sm:px-6 py-3.5 bg-slate-900 flex flex-wrap items-center justify-between gap-2.5 shrink-0">
                   <button
                     type="button"
-                    onClick={() => setStagedConsignments([])}
-                    className="text-xs font-bold text-slate-500 hover:text-rose-600 dark:text-slate-400 dark:hover:text-rose-400 underline cursor-pointer"
+                    onClick={handleRequestCancelFromCamera}
+                    className="rounded-xl border border-slate-700 bg-slate-800 hover:bg-slate-700 px-4 py-2 text-xs font-bold text-slate-200 cursor-pointer"
                   >
-                    Clear All Staged ({stagedConsignments.length})
+                    Cancel
                   </button>
-                )}
-              </div>
 
-              <div className="flex items-center gap-2.5">
-                <button
-                  type="button"
-                  onClick={handleCloseAddConsignmentsModal}
-                  className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800 cursor-pointer"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  onClick={handleConfirmIngestStaged}
-                  disabled={stagedConsignments.length === 0}
-                  className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 px-5 py-2 text-xs font-extrabold text-white shadow-xs transition-colors cursor-pointer disabled:cursor-not-allowed"
-                >
-                  <Check className="h-4 w-4 stroke-[3]" />
-                  <span>
-                    Confirm & Ingest ({stagedConsignments.length} Consignments)
-                  </span>
-                </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={stopCameraStreamOnly}
+                      className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-4 py-2 text-xs font-extrabold text-white shadow-xs cursor-pointer"
+                    >
+                      <span>
+                        {stagedConsignments.length > 0
+                          ? `Done Scanning • Review (${stagedConsignments.length})`
+                          : "Back to Manual Entry"}
+                      </span>
+                    </button>
+                  </div>
+                </div>
               </div>
-            </div>
+            ) : (
+              /* ========================================================== */
+              /* MODE B: MANUAL / HARDWARE SCANNER & FULL REVIEW VIEW       */
+              /* ========================================================== */
+              <>
+                {/* Modal Header */}
+                <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 px-4 sm:px-6 py-3.5 sm:py-4 shrink-0">
+                  <div className="flex items-center gap-2.5 sm:gap-3">
+                    <span className="flex h-9 w-9 sm:h-10 sm:w-10 items-center justify-center rounded-2xl bg-indigo-50 text-indigo-600 dark:bg-indigo-950/70 dark:text-indigo-400 shadow-2xs shrink-0">
+                      <ScanLine className="h-5 w-5 stroke-[2.4]" />
+                    </span>
+                    <div>
+                      <h3 className="text-base sm:text-lg font-black tracking-tight text-slate-900 dark:text-white">
+                        Add & Scan Consignments
+                      </h3>
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                        Type numbers manually, scan with barcode reader devices, or open the dedicated camera scanner.
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleRequestCancelIntake}
+                    className="rounded-xl p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-slate-800 dark:hover:text-slate-200 transition-colors cursor-pointer"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
+
+                {/* Modal Body (Scrollable) */}
+                <div className="overflow-y-auto p-4 sm:p-6 space-y-4 sm:space-y-5 flex-1">
+                  {/* Intake Toolbar: Auto-Next Toggle & Dedicated Camera Scanner Trigger */}
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-2xl bg-slate-50 dark:bg-slate-800/60 p-3.5 border border-slate-200 dark:border-slate-700">
+                    {/* Auto-Next Switch */}
+                    <div className="flex items-center gap-2.5">
+                      <div
+                        className={`flex h-3 w-3 shrink-0 rounded-full ${
+                          isAutoNextEnabled
+                            ? "bg-emerald-500 ring-4 ring-emerald-500/20 animate-pulse"
+                            : "bg-amber-500 ring-4 ring-amber-500/20"
+                        }`}
+                      />
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-bold text-slate-900 dark:text-white">
+                            Auto-Next Scan:
+                          </span>
+                          <span
+                            className={`rounded-md px-1.5 py-0.5 text-[10px] font-black uppercase tracking-wider ${
+                              isAutoNextEnabled
+                                ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300"
+                                : "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300"
+                            }`}
+                          >
+                            {isAutoNextEnabled ? "ON" : "OFF"}
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                          {isAutoNextEnabled
+                            ? "Auto-Next ON: Automatically stages each scanned barcode and clears input for next scan."
+                            : "Auto-Next OFF: Holds scanned ID in view to verify details before advancing."}
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Right controls: Dedicated Camera Scanner Button & Auto-Next Toggle switch */}
+                    <div className="flex flex-wrap items-center gap-2 self-end sm:self-auto">
+                      <button
+                        type="button"
+                        onClick={handleOpenSeparateCameraPage}
+                        className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white px-3.5 py-2 text-xs font-bold shadow-xs transition-all cursor-pointer"
+                        title="Open standalone full-screen camera scanner page (/scan)"
+                      >
+                        <Camera className="h-3.5 w-3.5" />
+                        <span>Separate Camera Page</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={handleToggleCamera}
+                        className="inline-flex items-center gap-1.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 px-3 py-2 text-xs font-bold transition-all cursor-pointer"
+                        title="Open inline camera view inside modal"
+                      >
+                        <QrCode className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" />
+                        <span>Inline Camera</span>
+                      </button>
+
+                      {/* Auto-Next Switch */}
+                      <button
+                        type="button"
+                        onClick={() => setIsAutoNextEnabled((prev) => !prev)}
+                        className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                          isAutoNextEnabled ? "bg-emerald-600" : "bg-slate-300 dark:bg-slate-600"
+                        }`}
+                        title={`Click to switch Auto-Next ${isAutoNextEnabled ? "OFF" : "ON"}`}
+                      >
+                        <span
+                          className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm ring-0 transition duration-200 ease-in-out ${
+                            isAutoNextEnabled ? "translate-x-5" : "translate-x-0"
+                          }`}
+                        />
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Unified Typing & Hardware Barcode Reader Field */}
+                  <div className="rounded-2xl border-2 border-indigo-500/60 bg-white p-4 sm:p-5 dark:border-indigo-500/50 dark:bg-slate-800/70 shadow-xs space-y-3.5">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1.5">
+                      <label className="text-xs font-black uppercase tracking-wider text-slate-700 dark:text-slate-200">
+                        Consignment / AWB Number (Type manually or scan barcode device):
+                      </label>
+                      {intakeAwb && (
+                        <div className="flex items-center gap-1.5 text-xs">
+                          <span className="text-[11px] text-slate-400">Detected Courier:</span>
+                          <span className="font-bold text-indigo-600 dark:text-indigo-400">
+                            {autoDetectCourier(intakeAwb)?.name || "Auto-Detecting"}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5 w-full">
+                      <div className="relative w-full flex-1 min-w-0">
+                        <input
+                          ref={intakeInputRef}
+                          type="text"
+                          value={intakeAwb}
+                          onChange={(e) => {
+                            const val = e.target.value.toUpperCase();
+                            setIntakeAwb(val);
+                            setIntakeError("");
+                            const detected = autoDetectCourier(val);
+                            if (detected) setIntakeCourier(detected.id);
+                          }}
+                          onKeyDown={handleIntakeKeyDown}
+                          placeholder="Enter Consignment / AWB..."
+                          className="w-full rounded-xl border border-slate-300 bg-white px-4 py-2.5 font-mono text-sm font-black uppercase tracking-wider text-slate-900 focus:border-indigo-600 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+                        />
+                      </div>
+
+                      {/* Stage / Add Button */}
+                      <div className="flex items-center gap-2 w-full sm:w-auto shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => handleStageConsignment(intakeAwb)}
+                          className="flex-1 sm:flex-initial inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-4 py-2.5 text-xs font-extrabold text-white shadow-xs transition-colors cursor-pointer"
+                        >
+                          <Plus className="h-4 w-4 stroke-[2.5]" />
+                          <span>Stage Consignment</span>
+                        </button>
+
+                        {!isAutoNextEnabled && recentStagedCode && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setIntakeAwb("");
+                              setRecentStagedCode(null);
+                              intakeInputRef.current?.focus();
+                            }}
+                            className="inline-flex items-center justify-center gap-1 rounded-xl bg-emerald-600 hover:bg-emerald-700 px-3.5 py-2.5 text-xs font-bold text-white shadow-xs shrink-0 cursor-pointer animate-in fade-in"
+                          >
+                            <span>Next ID →</span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Inline Options Strip: Carrier, Recipient, Destination, Status */}
+                    <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5 pt-1 text-xs">
+                      {/* Courier Partner Selection with Search + Letter Key Auto-Filter */}
+                      <div className="relative">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const nextOpen = !isIntakeCourierDropdownOpen;
+                            setIsIntakeCourierDropdownOpen(nextOpen);
+                            setIsIntakeStatusDropdownOpen(false);
+                            if (nextOpen) {
+                              setIntakeCourierSearch("");
+                            }
+                          }}
+                          className="w-full flex items-center justify-between rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-800 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 cursor-pointer"
+                        >
+                          <span className="truncate">
+                            {COURIER_MAP[intakeCourier]?.shortName || "Carrier Partner"}
+                          </span>
+                          <ChevronDown className="h-3.5 w-3.5 text-slate-400 shrink-0 ml-1" />
+                        </button>
+
+                        {isIntakeCourierDropdownOpen && (
+                          <>
+                            <div
+                              className="fixed inset-0 z-40"
+                              onClick={() => {
+                                setIsIntakeCourierDropdownOpen(false);
+                                setIntakeCourierSearch("");
+                              }}
+                            />
+                            <div className="absolute left-0 top-full mt-1 z-50 w-64 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xl dark:border-slate-700 dark:bg-slate-800">
+                              {/* Instant Search Input (auto-filters when typing any letter) */}
+                              <div className="p-2 border-b border-slate-100 dark:border-slate-700/80 bg-slate-50/70 dark:bg-slate-900/50">
+                                <div className="relative flex items-center">
+                                  <Search className="absolute left-2.5 h-3.5 w-3.5 text-slate-400 pointer-events-none" />
+                                  <input
+                                    ref={intakeCourierSearchRef}
+                                    type="text"
+                                    value={intakeCourierSearch}
+                                    onChange={(e) => setIntakeCourierSearch(e.target.value)}
+                                    onKeyDown={(e) => {
+                                      if (e.key === "Escape") {
+                                        setIsIntakeCourierDropdownOpen(false);
+                                        setIntakeCourierSearch("");
+                                      } else if (e.key === "Enter" && filteredIntakeCouriers.length > 0) {
+                                        e.preventDefault();
+                                        setIntakeCourier(filteredIntakeCouriers[0].id);
+                                        setIsIntakeCourierDropdownOpen(false);
+                                        setIntakeCourierSearch("");
+                                      }
+                                    }}
+                                    placeholder="Search or type letters..."
+                                    className="w-full rounded-lg border border-slate-200 bg-white pl-8 pr-6 py-1.5 text-xs font-medium text-slate-800 placeholder:text-slate-400 focus:border-indigo-500 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+                                  />
+                                  {intakeCourierSearch && (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setIntakeCourierSearch("");
+                                        intakeCourierSearchRef.current?.focus();
+                                      }}
+                                      className="absolute right-2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 cursor-pointer"
+                                    >
+                                      <X className="h-3 w-3" />
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+
+                              <div className="max-h-48 overflow-y-auto p-1">
+                                {filteredIntakeCouriers.length === 0 ? (
+                                  <div className="px-3 py-4 text-center text-[11px] text-slate-400">
+                                    No shipping partner matches &ldquo;{intakeCourierSearch}&rdquo;
+                                  </div>
+                                ) : (
+                                  filteredIntakeCouriers.map((c) => (
+                                    <button
+                                      key={c.id}
+                                      type="button"
+                                      onClick={() => {
+                                        setIntakeCourier(c.id);
+                                        setIsIntakeCourierDropdownOpen(false);
+                                        setIntakeCourierSearch("");
+                                      }}
+                                      className={`w-full text-left rounded-lg px-2.5 py-1.5 text-xs font-medium hover:bg-slate-100 dark:hover:bg-slate-700 flex items-center justify-between cursor-pointer ${
+                                        intakeCourier === c.id
+                                          ? "bg-indigo-50/80 text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300 font-bold"
+                                          : "text-slate-700 dark:text-slate-200"
+                                      }`}
+                                    >
+                                      <span className="truncate">{c.name}</span>
+                                      <span className="text-[10px] text-slate-400 font-mono shrink-0 ml-1">
+                                        ({c.shortName})
+                                      </span>
+                                    </button>
+                                  ))
+                                )}
+                              </div>
+                            </div>
+                          </>
+                        )}
+                      </div>
+
+                      {/* Recipient Name */}
+                      <input
+                        type="text"
+                        placeholder="Recipient Name (Optional)"
+                        value={intakeRecipient}
+                        onChange={(e) => setIntakeRecipient(e.target.value)}
+                        className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 focus:outline-none"
+                      />
+
+                      {/* Destination City */}
+                      <input
+                        type="text"
+                        placeholder="Destination Hub / City"
+                        value={intakeDestination}
+                        onChange={(e) => setIntakeDestination(e.target.value)}
+                        className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 focus:outline-none"
+                      />
+
+                      {/* Custom Styled Status Dropdown (with Booked + Logical Stage Metadata) */}
+                      <div className="relative">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setIsIntakeStatusDropdownOpen(!isIntakeStatusDropdownOpen);
+                            setIsIntakeCourierDropdownOpen(false);
+                          }}
+                          className="w-full flex items-center justify-between rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-800 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 cursor-pointer"
+                        >
+                          <div className="flex items-center gap-2 truncate">
+                            <span
+                              className={`h-2 w-2 rounded-full shrink-0 ${
+                                intakeStatus === "delivered"
+                                  ? "bg-emerald-500 ring-2 ring-emerald-500/20"
+                                  : intakeStatus === "out_for_delivery"
+                                  ? "bg-amber-500 ring-2 ring-amber-500/20"
+                                  : intakeStatus === "returned"
+                                  ? "bg-rose-500 ring-2 ring-rose-500/20"
+                                  : intakeStatus === "booked"
+                                  ? "bg-violet-500 ring-2 ring-violet-500/20"
+                                  : "bg-sky-500 ring-2 ring-sky-500/20"
+                              }`}
+                            />
+                            <span className="truncate">
+                              {intakeStatus === "delivered"
+                                ? "Delivered"
+                                : intakeStatus === "out_for_delivery"
+                                ? "Out for Delivery"
+                                : intakeStatus === "returned"
+                                ? "Returned (RTO)"
+                                : intakeStatus === "booked"
+                                ? "Booked"
+                                : "In Transit"}
+                            </span>
+                          </div>
+                          <ChevronDown className="h-3.5 w-3.5 text-slate-400 shrink-0 ml-1" />
+                        </button>
+
+                        {isIntakeStatusDropdownOpen && (
+                          <>
+                            <div
+                              className="fixed inset-0 z-40"
+                              onClick={() => setIsIntakeStatusDropdownOpen(false)}
+                            />
+                            <div className="absolute left-0 right-0 sm:right-auto top-full mt-1 z-50 sm:w-56 overflow-hidden rounded-xl border border-slate-200 bg-white p-1 shadow-xl dark:border-slate-700 dark:bg-slate-800">
+                              {[
+                                { value: "booked", label: "Booked", dot: "bg-violet-500", desc: "Consignment booked at origin" },
+                                { value: "in_transit", label: "In Transit", dot: "bg-sky-500", desc: "Active linehaul dispatch" },
+                                { value: "out_for_delivery", label: "Out for Delivery", dot: "bg-amber-500", desc: "With delivery executive" },
+                                { value: "delivered", label: "Delivered", dot: "bg-emerald-500", desc: "Successfully delivered" },
+                                { value: "returned", label: "Returned (RTO)", dot: "bg-rose-500", desc: "Returned to origin" },
+                              ].map((st) => (
+                                <button
+                                  key={st.value}
+                                  type="button"
+                                  onClick={() => {
+                                    setIntakeStatus(st.value as "booked" | "in_transit" | "out_for_delivery" | "delivered" | "returned");
+                                    setIsIntakeStatusDropdownOpen(false);
+                                  }}
+                                  className={`w-full text-left rounded-lg px-2.5 py-1.5 text-xs font-medium hover:bg-slate-100 dark:hover:bg-slate-700 flex items-center justify-between cursor-pointer transition-colors ${
+                                    intakeStatus === st.value
+                                      ? "bg-indigo-50/70 text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300 font-bold"
+                                      : "text-slate-700 dark:text-slate-300"
+                                  }`}
+                                >
+                                  <div>
+                                    <div className="flex items-center gap-2">
+                                      <span className={`h-2 w-2 rounded-full ${st.dot}`} />
+                                      <span>{st.label}</span>
+                                    </div>
+                                    <div className="pl-4 text-[10px] text-slate-400 font-normal">
+                                      {st.desc}
+                                    </div>
+                                  </div>
+                                  {intakeStatus === st.value && (
+                                    <Check className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400 shrink-0" />
+                                  )}
+                                </button>
+                              ))}
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Instant Success Feedback Strip */}
+                    {recentStagedCode && (
+                      <div className="flex items-center justify-between rounded-xl bg-emerald-100/90 dark:bg-emerald-950/80 px-3 py-1.5 text-xs font-bold text-emerald-800 dark:text-emerald-300 animate-in fade-in">
+                        <div className="flex items-center gap-1.5">
+                          <CheckCheck className="h-4 w-4 text-emerald-600" />
+                          <span>
+                            ✓ Staged: {recentStagedCode} —{" "}
+                            {isAutoNextEnabled
+                              ? "Added to review list! Ready for next scan."
+                              : "Saved to review list (Auto-Next OFF)."}
+                          </span>
+                        </div>
+                        <span className="text-[11px] font-mono text-emerald-700 dark:text-emerald-400">
+                          Total Staged: {stagedConsignments.length}
+                        </span>
+                      </div>
+                    )}
+
+                    {/* Error Banner */}
+                    {intakeError && (
+                      <div className="rounded-xl border border-rose-200 bg-rose-50 p-2.5 text-xs font-semibold text-rose-700 dark:border-rose-900/60 dark:bg-rose-950/60 dark:text-rose-300">
+                        {intakeError}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Full Review Before Add: Staged Consignments List */}
+                  <div className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-5 dark:border-slate-800 dark:bg-slate-900 space-y-3">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 dark:border-slate-800 pb-3">
+                      <div className="flex items-center gap-2">
+                        <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300 font-bold text-xs">
+                          {stagedConsignments.length}
+                        </span>
+                        <h4 className="text-xs sm:text-sm font-bold text-slate-900 dark:text-white">
+                          Full Review Before Add: Staged Consignments
+                        </h4>
+                      </div>
+                      <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                        Inspect all items below. Nothing is added to dashboard until you click Confirm.
+                      </div>
+                    </div>
+
+                    {/* Staged Table / Empty State */}
+                    {stagedConsignments.length === 0 ? (
+                      <div className="py-8 text-center text-slate-400">
+                        <Package className="mx-auto h-8 w-8 text-slate-300 dark:text-slate-600 mb-2" />
+                        <p className="text-xs font-semibold text-slate-600 dark:text-slate-300">
+                          No consignments staged for review yet
+                        </p>
+                        <p className="text-[11px] text-slate-400 mt-0.5">
+                          Type numbers in the field above, scan with a barcode reader device, or open the dedicated camera scanner.
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="overflow-x-auto max-h-56 overflow-y-auto rounded-xl border border-slate-200 dark:border-slate-800">
+                        <table className="w-full text-left text-xs min-w-[550px]">
+                          <thead className="bg-slate-50 dark:bg-slate-800 text-[10px] uppercase font-bold text-slate-500 border-b border-slate-200 dark:border-slate-800 sticky top-0 z-10">
+                            <tr>
+                              <th className="py-2.5 px-3">AWB / Consignment</th>
+                              <th className="py-2.5 px-3">Carrier Partner</th>
+                              <th className="py-2.5 px-3">Destination / Addressee</th>
+                              <th className="py-2.5 px-3">Status</th>
+                              <th className="py-2.5 px-3 text-right">Remove</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100 dark:divide-slate-800 font-mono text-[11px]">
+                            {stagedConsignments.map((item) => (
+                              <tr key={item.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
+                                {/* AWB */}
+                                <td className="py-2.5 px-3 font-bold text-indigo-600 dark:text-indigo-400">
+                                  {item.trackingNumber}
+                                </td>
+
+                                {/* Carrier Selector */}
+                                <td className="py-2.5 px-3 font-sans">
+                                  <select
+                                    value={item.courierId}
+                                    onChange={(e) => handleUpdateStagedCourier(item.id, e.target.value)}
+                                    className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-semibold text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 cursor-pointer"
+                                  >
+                                    {COURIER_LIST.map((c) => (
+                                      <option key={c.id} value={c.id}>
+                                        {c.name}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </td>
+
+                                {/* Destination */}
+                                <td className="py-2.5 px-3 font-sans text-slate-600 dark:text-slate-400 truncate max-w-[150px]">
+                                  {item.destination}
+                                </td>
+
+                                {/* Editable Logical Status Selector */}
+                                <td className="py-2.5 px-3 font-sans">
+                                  <select
+                                    value={item.status}
+                                    onChange={(e) =>
+                                      handleUpdateStagedStatus(
+                                        item.id,
+                                        e.target.value as "booked" | "in_transit" | "out_for_delivery" | "delivered" | "returned"
+                                      )
+                                    }
+                                    className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-bold text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 cursor-pointer"
+                                  >
+                                    <option value="booked">Booked</option>
+                                    <option value="in_transit">In Transit</option>
+                                    <option value="out_for_delivery">Out for Delivery</option>
+                                    <option value="delivered">Delivered</option>
+                                    <option value="returned">Returned (RTO)</option>
+                                  </select>
+                                </td>
+
+                                {/* Remove button */}
+                                <td className="py-2.5 px-3 text-right">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleRemoveStagedItem(item.id)}
+                                    className="p-1 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/70 transition-colors cursor-pointer"
+                                    title="Remove this item from staging list"
+                                  >
+                                    <Trash2 className="h-3.5 w-3.5" />
+                                  </button>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Modal Footer with Full Review Confirmation */}
+                <div className="border-t border-slate-100 dark:border-slate-800 px-5 sm:px-6 py-3.5 flex flex-wrap items-center justify-between gap-3 shrink-0">
+                  <div>
+                    {stagedConsignments.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setIsCancelIntakeConfirmOpen(true)}
+                        className="text-xs font-bold text-slate-500 hover:text-rose-600 dark:text-slate-400 dark:hover:text-rose-400 underline cursor-pointer"
+                      >
+                        Clear All Staged ({stagedConsignments.length})
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-2.5">
+                    <button
+                      type="button"
+                      onClick={handleRequestCancelIntake}
+                      className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800 cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleConfirmIngestStaged}
+                      disabled={stagedConsignments.length === 0}
+                      className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 px-5 py-2 text-xs font-extrabold text-white shadow-xs transition-colors cursor-pointer disabled:cursor-not-allowed"
+                    >
+                      <Check className="h-4 w-4 stroke-[3]" />
+                      <span>
+                        Confirm & Ingest ({stagedConsignments.length} Consignments)
+                      </span>
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}
@@ -3495,14 +4642,14 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                       ? "Successfully Imported!"
                       : previewShipments
                       ? "Review Bulk Data Before Import"
-                      : "Bulk Import & Review"}
+                      : "Bulk Import & Smart CSV/Excel Analyzer"}
                   </h3>
                   <p className="text-[11px] text-slate-500">
                     {importSuccessState
                       ? "Consignments verified and committed to dashboard"
                       : previewShipments
                       ? `Inspect, edit carrier/status, or remove rows from ${previewFileName} before importing`
-                      : "Upload Excel (.xlsx, .xls, .csv) or paste AWB numbers to review before importing"}
+                      : "Upload CSV (.csv) or Excel (.xlsx, .xls) — auto-analyzes columns & detects carriers"}
                   </p>
                 </div>
               </div>
@@ -3694,11 +4841,12 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                                         onChange={(e) =>
                                           handleUpdatePreviewStatus(
                                             p.id,
-                                            e.target.value as "in_transit" | "out_for_delivery" | "delivered" | "returned"
+                                            e.target.value as "booked" | "in_transit" | "out_for_delivery" | "delivered" | "returned"
                                           )
                                         }
                                         className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-bold text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 cursor-pointer"
                                       >
+                                        <option value="booked">Booked</option>
                                         <option value="in_transit">In Transit</option>
                                         <option value="out_for_delivery">Out for Delivery</option>
                                         <option value="delivered">Delivered</option>
@@ -3748,24 +4896,34 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
               ) : (
                 /* STEP 1: UPLOAD EXCEL/CSV OR PASTE BULK AWBs FOR REVIEW */
                 <div className="space-y-4">
-                  {/* Download Sample Template Banner */}
+                  {/* Download Sample CSV / Excel Template Banner */}
                   <div className="rounded-2xl border border-indigo-200 bg-indigo-50/70 p-4 dark:border-indigo-900/50 dark:bg-indigo-950/40 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                     <div>
                       <div className="text-xs font-bold text-indigo-900 dark:text-indigo-200">
-                        Need the formatted Excel spreadsheet?
+                        Smart CSV & Excel Platform Analyzer
                       </div>
                       <div className="text-[11px] text-indigo-700/80 dark:text-indigo-300/80">
-                        Download our verified sample spreadsheet pre-filled with columns and sample rows.
+                        Automatically maps AWB, Carrier, Status (Booked, In Transit, Out for Delivery, Delivered, Returned), Origin, Destination, Recipient & Weight—or re-imports any Bulk Exported CSV file.
                       </div>
                     </div>
-                    <button
-                      type="button"
-                      onClick={handleDownloadSampleTemplate}
-                      className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-3.5 py-2 text-xs font-extrabold text-white shadow-xs shrink-0 cursor-pointer"
-                    >
-                      <Download className="h-3.5 w-3.5" />
-                      <span>Download Sample</span>
-                    </button>
+                    <div className="flex flex-wrap items-center gap-2 shrink-0">
+                      <button
+                        type="button"
+                        onClick={handleDownloadSampleCsvTemplate}
+                        className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-3.5 py-2 text-xs font-extrabold text-white shadow-xs cursor-pointer"
+                      >
+                        <Download className="h-3.5 w-3.5" />
+                        <span>Sample CSV</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleDownloadSampleTemplate}
+                        className="inline-flex items-center gap-1.5 rounded-xl border border-indigo-300 bg-white hover:bg-indigo-50 dark:border-indigo-700 dark:bg-slate-800 dark:hover:bg-slate-700 px-3 py-2 text-xs font-bold text-indigo-700 dark:text-indigo-300 shadow-2xs cursor-pointer"
+                      >
+                        <Download className="h-3.5 w-3.5" />
+                        <span>Sample Excel</span>
+                      </button>
+                    </div>
                   </div>
 
                   {/* Upload Drop Zone */}

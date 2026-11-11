@@ -287,7 +287,7 @@ function TrackingAppContent() {
     []
   );
 
-  // Keep URL strictly clean on mount and prevent unauthorized third-party URL query usage
+  // Keep URL strictly clean on mount and handle return from dedicated /scan camera page
   useEffect(() => {
     if (typeof window !== "undefined") {
       if (window.location.search || window.location.pathname !== "/") {
@@ -297,8 +297,28 @@ function TrackingAppContent() {
           // ignore
         }
       }
+
+      try {
+        const rawReturn = sessionStorage.getItem("trackflow_scan_return");
+        if (rawReturn) {
+          const parsed = JSON.parse(rawReturn);
+          if (parsed.target === "bulk_review" || parsed.target === "bulk_ingested") {
+            setTimeout(() => setActiveView("bulk"), 0);
+            if (parsed.target === "bulk_ingested") {
+              sessionStorage.removeItem("trackflow_scan_return");
+            }
+          } else if (parsed.target === "single_track" && parsed.trackingNumber) {
+            sessionStorage.removeItem("trackflow_scan_return");
+            setTimeout(() => {
+              performSearch(parsed.trackingNumber, parsed.courierId, undefined, true);
+            }, 50);
+          }
+        }
+      } catch {
+        // ignore
+      }
     }
-  }, [searchParams]);
+  }, [searchParams, performSearch]);
 
   // Watchlist helpers
   const handleAddToWatchlist = () => {

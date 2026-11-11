@@ -1,7 +1,8 @@
 "use client";
 
 import React, { useState, useEffect } from "react";
-import { Search, X, ChevronDown, CheckCircle2, ShieldCheck, Zap } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { Search, X, ChevronDown, CheckCircle2, ShieldCheck, Zap, Camera } from "lucide-react";
 import { COURIER_LIST, COURIER_MAP, autoDetectCourier, CourierConfig } from "@/lib/couriers";
 import { AnimatedSpiralBg } from "@/components/AnimatedSpiralBg";
 
@@ -18,6 +19,7 @@ export function TrackerHero({
   initialTracking = "",
   initialCourier = "",
 }: TrackerHeroProps) {
+  const router = useRouter();
   const [trackingNumber, setTrackingNumber] = useState(initialTracking);
   const [selectedCourierId, setSelectedCourierId] = useState<string>(() => {
     if (initialCourier && COURIER_MAP[initialCourier]) return initialCourier;
@@ -31,7 +33,9 @@ export function TrackerHero({
     return initialTracking ? autoDetectCourier(initialTracking) : null;
   });
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
+  const [courierSearchQuery, setCourierSearchQuery] = useState("");
   const [errorText, setErrorText] = useState("");
+  const courierSearchInputRef = React.useRef<HTMLInputElement | null>(null);
 
   const [prevTrackingProp, setPrevTrackingProp] = useState(initialTracking);
   if (initialTracking !== prevTrackingProp) {
@@ -60,6 +64,40 @@ export function TrackerHero({
     window.addEventListener("trackflow:set-courier", handler);
     return () => window.removeEventListener("trackflow:set-courier", handler);
   }, []);
+
+  // Auto-filter when typing any letters while carrier dropdown is open
+  useEffect(() => {
+    if (!isDropdownOpen) return;
+
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setIsDropdownOpen(false);
+        return;
+      }
+      if (document.activeElement === courierSearchInputRef.current) return;
+      if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault();
+        setCourierSearchQuery((prev) => prev + e.key);
+        courierSearchInputRef.current?.focus();
+      } else if (e.key === "Backspace") {
+        setCourierSearchQuery((prev) => prev.slice(0, -1));
+        courierSearchInputRef.current?.focus();
+      }
+    };
+
+    window.addEventListener("keydown", handleGlobalKeyDown);
+    return () => window.removeEventListener("keydown", handleGlobalKeyDown);
+  }, [isDropdownOpen]);
+
+  const filteredCouriers = COURIER_LIST.filter((c) => {
+    const q = courierSearchQuery.trim().toLowerCase();
+    if (!q) return true;
+    return (
+      c.name.toLowerCase().includes(q) ||
+      c.shortName.toLowerCase().includes(q) ||
+      c.id.toLowerCase().includes(q)
+    );
+  });
 
   // Handle tracking number typing
   const handleInputChange = (val: string) => {
@@ -138,8 +176,12 @@ export function TrackerHero({
             <div className="relative shrink-0 border-b sm:border-b-0 sm:border-r border-slate-200 dark:border-slate-800 pb-2 sm:pb-0 sm:pr-2">
               <button
                 type="button"
-                onClick={() => setIsDropdownOpen(!isDropdownOpen)}
-                className="flex h-12 w-full sm:w-52 items-center justify-between rounded-xl px-3.5 text-xs font-semibold text-slate-800 hover:bg-slate-50 dark:text-slate-200 dark:hover:bg-slate-800/80 transition-colors"
+                onClick={() => {
+                  const next = !isDropdownOpen;
+                  setIsDropdownOpen(next);
+                  if (next) setCourierSearchQuery("");
+                }}
+                className="flex h-12 w-full sm:w-52 items-center justify-between rounded-xl px-3.5 text-xs font-semibold text-slate-800 hover:bg-slate-50 dark:text-slate-200 dark:hover:bg-slate-800/80 transition-colors cursor-pointer"
               >
                 <div className="flex items-center gap-2 truncate">
                   <span className="flex h-2 w-2 rounded-full bg-indigo-500"></span>
@@ -157,41 +199,88 @@ export function TrackerHero({
                     className="fixed inset-0 z-40"
                     onClick={() => setIsDropdownOpen(false)}
                   />
-                  <div className="absolute left-0 top-full mt-2 z-[60] max-h-72 w-64 overflow-y-auto rounded-xl border border-slate-200 bg-white p-1.5 shadow-2xl dark:border-slate-800 dark:bg-slate-900 text-left">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSelectedCourierId("");
-                        setIsDropdownOpen(false);
-                      }}
-                      className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-xs font-medium transition-colors ${
-                        !selectedCourierId
-                          ? "bg-indigo-50 text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300 font-semibold"
-                          : "text-slate-700 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
-                      }`}
-                    >
-                      <span>Auto-Detect (Any Carrier)</span>
-                      {!selectedCourierId && <CheckCircle2 className="h-3.5 w-3.5 text-indigo-600" />}
-                    </button>
-                    <div className="my-1 border-t border-slate-100 dark:border-slate-800" />
-                    {COURIER_LIST.map((c) => (
-                      <button
-                        key={c.id}
-                        type="button"
-                        onClick={() => {
-                          setSelectedCourierId(c.id);
-                          setIsDropdownOpen(false);
+                  <div className="absolute left-0 top-full mt-2 z-[60] w-72 rounded-2xl border border-slate-200 bg-white p-2 shadow-2xl dark:border-slate-800 dark:bg-slate-900 text-left">
+                    {/* Search Input Inside Dropdown */}
+                    <div className="relative mb-2">
+                      <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-slate-400" />
+                      <input
+                        ref={courierSearchInputRef}
+                        type="text"
+                        value={courierSearchQuery}
+                        onChange={(e) => setCourierSearchQuery(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            if (filteredCouriers.length > 0) {
+                              setSelectedCourierId(filteredCouriers[0].id);
+                              setIsDropdownOpen(false);
+                            }
+                          }
                         }}
-                        className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-xs font-medium transition-colors ${
-                          selectedCourierId === c.id
-                            ? "bg-indigo-50 text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300 font-semibold"
-                            : "text-slate-700 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
-                        }`}
-                      >
-                        <span className="truncate">{c.name}</span>
-                        {selectedCourierId === c.id && <CheckCircle2 className="h-3.5 w-3.5 text-indigo-600 shrink-0 ml-1" />}
-                      </button>
-                    ))}
+                        placeholder="Search or type courier name..."
+                        className="w-full rounded-xl border border-slate-200 bg-slate-50 pl-8 pr-7 py-1.5 text-xs font-semibold text-slate-900 placeholder:text-slate-400 focus:border-indigo-500 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
+                      />
+                      {courierSearchQuery && (
+                        <button
+                          type="button"
+                          onClick={() => setCourierSearchQuery("")}
+                          className="absolute right-2 top-2 rounded-md p-0.5 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      )}
+                    </div>
+
+                    <div className="max-h-60 overflow-y-auto space-y-0.5 pr-0.5">
+                      {!courierSearchQuery.trim() && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedCourierId("");
+                              setIsDropdownOpen(false);
+                            }}
+                            className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-xs font-medium transition-colors cursor-pointer ${
+                              !selectedCourierId
+                                ? "bg-indigo-50 text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300 font-semibold"
+                                : "text-slate-700 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
+                            }`}
+                          >
+                            <span>Auto-Detect (Any Carrier)</span>
+                            {!selectedCourierId && <CheckCircle2 className="h-3.5 w-3.5 text-indigo-600" />}
+                          </button>
+                          <div className="my-1 border-t border-slate-100 dark:border-slate-800" />
+                        </>
+                      )}
+
+                      {filteredCouriers.length === 0 ? (
+                        <div className="py-4 text-center text-xs text-slate-400">
+                          No shipping partner matching &ldquo;{courierSearchQuery}&rdquo;
+                        </div>
+                      ) : (
+                        filteredCouriers.map((c) => (
+                          <button
+                            key={c.id}
+                            type="button"
+                            onClick={() => {
+                              setSelectedCourierId(c.id);
+                              setIsDropdownOpen(false);
+                            }}
+                            className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-xs font-medium transition-colors cursor-pointer ${
+                              selectedCourierId === c.id
+                                ? "bg-indigo-50 text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300 font-semibold"
+                                : "text-slate-700 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
+                            }`}
+                          >
+                            <span className="truncate">{c.name}</span>
+                            <span className="flex items-center gap-1.5 shrink-0 ml-1">
+                              <span className="text-[10px] font-mono text-slate-400">({c.shortName})</span>
+                              {selectedCourierId === c.id && <CheckCircle2 className="h-3.5 w-3.5 text-indigo-600" />}
+                            </span>
+                          </button>
+                        ))
+                      )}
+                    </div>
                   </div>
                 </>
               )}
@@ -219,6 +308,25 @@ export function TrackerHero({
                   <X className="h-4 w-4" />
                 </button>
               )}
+              <button
+                type="button"
+                onClick={() => {
+                  try {
+                    sessionStorage.setItem(
+                      "trackflow_scan_context",
+                      JSON.stringify({
+                        mode: "single",
+                        defaultCourierId: selectedCourierId || "auto",
+                      })
+                    );
+                  } catch {}
+                  router.push("/scan");
+                }}
+                className="ml-1 inline-flex items-center justify-center rounded-xl border border-slate-200 bg-slate-50 p-2 text-slate-600 hover:border-indigo-400 hover:bg-indigo-50 hover:text-indigo-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300 dark:hover:border-indigo-500 dark:hover:text-indigo-400 transition-colors cursor-pointer shrink-0"
+                title="Open Separate Camera Scan Page"
+              >
+                <Camera className="h-4 w-4" />
+              </button>
             </div>
 
             {/* Submit Button */}
