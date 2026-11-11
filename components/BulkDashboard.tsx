@@ -38,6 +38,12 @@ import {
   CameraOff,
   BarChart3,
   HardDrive,
+  Zap,
+  ZoomIn,
+  ZoomOut,
+  Focus,
+  FileText,
+  FileCode,
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import {
@@ -211,6 +217,14 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
   const [statusFilter, setStatusFilter] = useState<"all" | "delivered" | "in_transit" | "out_for_delivery" | "returned" | "booked">("all");
   const [activeSideTab, setActiveSideTab] = useState<"filters" | "analytics" | "settings">("filters");
   const [exportBatchTargetId, setExportBatchTargetId] = useState<string>("all");
+  const [exportFileExtension, setExportFileExtension] = useState<
+    "csv" | "xlsx" | "xls" | "json" | "tsv" | "txt" | "xml" | "custom"
+  >("csv");
+  const [customExportExtension, setCustomExportExtension] = useState<string>("csv");
+  const [isExportBatchDropdownOpen, setIsExportBatchDropdownOpen] = useState<boolean>(false);
+  const [isExportFormatDropdownOpen, setIsExportFormatDropdownOpen] = useState<boolean>(false);
+  const [isModalExportBatchDropdownOpen, setIsModalExportBatchDropdownOpen] = useState<boolean>(false);
+  const [isModalExportFormatDropdownOpen, setIsModalExportFormatDropdownOpen] = useState<boolean>(false);
   const [batchCsvExportMsg, setBatchCsvExportMsg] = useState<string | null>(null);
 
   // Auto-check Settings
@@ -336,6 +350,17 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
   const [cameraGuideMode, setCameraGuideMode] = useState<"barcode" | "qr" | "both">("both");
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [cameraScanSuccess, setCameraScanSuccess] = useState<{ code: string; carrier: string } | null>(null);
+  const [isAutoZoomFocusEnabled, setIsAutoZoomFocusEnabled] = useState<boolean>(true);
+  const [cameraZoomLevel, setCameraZoomLevel] = useState<number>(1.0);
+  const [isEnhancingDamagedLabel, setIsEnhancingDamagedLabel] = useState<boolean>(false);
+  const hwZoomSupportedRef = useRef<{ supported: boolean; min: number; max: number }>({
+    supported: false,
+    min: 1,
+    max: 1,
+  });
+  const lowQualityStreakRef = useRef<number>(0);
+  const emptyFrameStreakRef = useRef<number>(0);
+  const currentZoomRef = useRef<number>(1.0);
   const [isCancelIntakeConfirmOpen, setIsCancelIntakeConfirmOpen] = useState(false);
   const intakeInputRef = useRef<HTMLInputElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -983,14 +1008,49 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
     return cleaned.length >= 4 ? cleaned : trimmed.toUpperCase();
   }, []);
 
-  // Real-time Camera Stream + Multi-Engine Barcode & QR Code Decoder Loop
+  // Apply hardware camera zoom & focus sensitivity constraints when available
+  const applyInlineCameraZoomAndFocus = useCallback((nextZoom: number) => {
+    const clamped = Number(Math.min(2.4, Math.max(1.0, nextZoom)).toFixed(2));
+    currentZoomRef.current = clamped;
+    setCameraZoomLevel(clamped);
+
+    const stream = cameraStreamRef.current;
+    if (!stream) return;
+    const [track] = stream.getVideoTracks();
+    if (!track || typeof track.applyConstraints !== "function") return;
+
+    try {
+      const advancedConstraints: Record<string, unknown> = {};
+      if (hwZoomSupportedRef.current.supported) {
+        const { min, max } = hwZoomSupportedRef.current;
+        advancedConstraints.zoom = Math.min(max, Math.max(min, clamped));
+      }
+      const capabilities =
+        typeof track.getCapabilities === "function"
+          ? (track.getCapabilities() as Record<string, unknown>)
+          : {};
+      if (Array.isArray(capabilities.focusMode) && capabilities.focusMode.includes("continuous")) {
+        advancedConstraints.focusMode = "continuous";
+      }
+      if (Object.keys(advancedConstraints).length > 0) {
+        track
+          .applyConstraints({
+            advanced: [advancedConstraints as MediaTrackConstraintSet],
+          })
+          .catch(() => {});
+      }
+    } catch {
+      // fallback to optical ROI crop zoom
+    }
+  }, []);
+
+  // Real-time Camera Stream + Strictly Guide-Only ROI Cropping + Auto-Zoom/Focus Damaged Label Enhancer
   useEffect(() => {
     if (!isCameraActive) return;
 
     let isCancelled = false;
     let scanIntervalId: NodeJS.Timeout | null = null;
 
-    // Set up ZXing MultiFormatReader with both 1D Barcodes and 2D QR formats
     const zxingReader = new MultiFormatReader();
     const hints = new Map();
     const formats =
@@ -1027,11 +1087,16 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
     hints.set(DecodeHintType.TRY_HARDER, true);
     zxingReader.setHints(hints);
 
-    // Optional Native BarcodeDetector if browser supports it
-    let nativeDetector: any = null;
+    let nativeDetector: {
+      detect: (source: HTMLCanvasElement) => Promise<Array<{ rawValue?: string }>>;
+    } | null = null;
     if (typeof window !== "undefined" && "BarcodeDetector" in window) {
       try {
-        const NativeBarcodeDetector = (window as any).BarcodeDetector;
+        const NativeBarcodeDetector = (window as unknown as {
+          BarcodeDetector: new (opts: { formats: string[] }) => {
+            detect: (source: HTMLCanvasElement) => Promise<Array<{ rawValue?: string }>>;
+          };
+        }).BarcodeDetector;
         const nativeFormats =
           cameraGuideMode === "barcode"
             ? ["code_128", "code_39", "code_93", "codabar", "ean_13", "ean_8", "itf", "upc_a", "upc_e"]
@@ -1058,19 +1123,20 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
       }
     }
 
-    const handleDetectedValue = (rawVal: string) => {
+    const handleDetectedValue = (rawVal: string): boolean => {
       const code = extractCleanScannedCode(rawVal);
-      if (!code || code.length < 4) return;
+      if (!code || code.length < 4) return false;
 
       const now = Date.now();
-      // Prevent duplicate rapid scans of the exact same code within 2.2 seconds
       if (
         lastScannedRef.current.code === code &&
         now - lastScannedRef.current.timestamp < 2200
       ) {
-        return;
+        return true;
       }
       lastScannedRef.current = { code, timestamp: now };
+      lowQualityStreakRef.current = 0;
+      setIsEnhancingDamagedLabel(false);
 
       const detectedCarrier = autoDetectCourier(code);
       if (!isAutoNextEnabled) {
@@ -1078,7 +1144,6 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
       }
       handleStageConsignment(code, detectedCarrier?.id, undefined, undefined, undefined, undefined, "camera");
 
-      // Trigger Quick Visual Success Mark inside Camera Viewfinder
       setCameraScanSuccess({
         code,
         carrier: detectedCarrier?.shortName || detectedCarrier?.name || "Auto-Detected",
@@ -1087,6 +1152,44 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
       scanSuccessTimerRef.current = setTimeout(() => {
         setCameraScanSuccess(null);
       }, 1400);
+      return true;
+    };
+
+    const tryDecodeROI = async (canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D): Promise<boolean> => {
+      const w = canvas.width;
+      const h = canvas.height;
+
+      if (nativeDetector) {
+        try {
+          const detected = await nativeDetector.detect(canvas);
+          if (detected && detected.length > 0 && detected[0].rawValue) {
+            if (handleDetectedValue(detected[0].rawValue)) return true;
+          }
+        } catch {}
+      }
+
+      if (cameraGuideMode !== "barcode") {
+        try {
+          const imageData = ctx.getImageData(0, 0, w, h);
+          const qrResult = jsQR(imageData.data, w, h, {
+            inversionAttempts: "attemptBoth",
+          });
+          if (qrResult && qrResult.data) {
+            if (handleDetectedValue(qrResult.data)) return true;
+          }
+        } catch {}
+      }
+
+      try {
+        const luminanceSource = new HTMLCanvasElementLuminanceSource(canvas);
+        const binaryBitmap = new BinaryBitmap(new HybridBinarizer(luminanceSource));
+        const result = zxingReader.decodeWithState(binaryBitmap);
+        if (result && result.getText()) {
+          if (handleDetectedValue(result.getText())) return true;
+        }
+      } catch {}
+
+      return false;
     };
 
     const startCameraAndScanner = async () => {
@@ -1096,14 +1199,13 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
           return;
         }
 
-        // Reuse existing stream if already open, otherwise request environment camera
         let stream = cameraStreamRef.current;
         if (!stream || !stream.active) {
           stream = await navigator.mediaDevices.getUserMedia({
             video: {
               facingMode: { ideal: "environment" },
-              width: { ideal: 1280 },
-              height: { ideal: 720 },
+              width: { ideal: 1920 },
+              height: { ideal: 1080 },
             },
             audio: false,
           });
@@ -1115,6 +1217,29 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
         }
 
         cameraStreamRef.current = stream;
+
+        const [videoTrack] = stream.getVideoTracks();
+        if (videoTrack && typeof videoTrack.getCapabilities === "function") {
+          try {
+            const caps = videoTrack.getCapabilities() as Record<string, unknown>;
+            if (caps.zoom && typeof caps.zoom === "object") {
+              const z = caps.zoom as { min?: number; max?: number };
+              hwZoomSupportedRef.current = {
+                supported: true,
+                min: z.min ?? 1,
+                max: Math.min(z.max ?? 3, 3),
+              };
+            }
+            if (Array.isArray(caps.focusMode) && caps.focusMode.includes("continuous")) {
+              videoTrack
+                .applyConstraints({
+                  advanced: [{ focusMode: "continuous" } as unknown as MediaTrackConstraintSet],
+                })
+                .catch(() => {});
+            }
+          } catch {}
+        }
+
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           await videoRef.current.play().catch(() => {});
@@ -1124,65 +1249,145 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
           scanCanvasRef.current = document.createElement("canvas");
         }
 
-        // Continuous frame decoding every 180ms
+        // Continuous frame decoding every 180ms strictly inside the Guide Box ROI
         scanIntervalId = setInterval(async () => {
           if (isCancelled || !videoRef.current || !scanCanvasRef.current) return;
           const video = videoRef.current;
           if (video.readyState < 2 || video.videoWidth === 0 || video.videoHeight === 0) return;
 
+          const vw = video.videoWidth;
+          const vh = video.videoHeight;
+
+          // Calculate source crop strictly matching the Guide Frame
+          let roiWidthRatio = 0.76;
+          let roiHeightRatio = 0.48;
+          if (cameraGuideMode === "barcode") {
+            roiWidthRatio = 0.78;
+            roiHeightRatio = 0.28;
+          } else if (cameraGuideMode === "qr") {
+            const squareSide = Math.min(vw, vh) * 0.54;
+            roiWidthRatio = squareSide / vw;
+            roiHeightRatio = squareSide / vh;
+          }
+
+          const effectiveDigitalZoom = hwZoomSupportedRef.current.supported
+            ? 1.0
+            : currentZoomRef.current;
+
+          const cropW = Math.max(64, Math.floor((vw * roiWidthRatio) / effectiveDigitalZoom));
+          const cropH = Math.max(64, Math.floor((vh * roiHeightRatio) / effectiveDigitalZoom));
+          const cropX = Math.max(0, Math.floor((vw - cropW) / 2));
+          const cropY = Math.max(0, Math.floor((vh - cropH) / 2));
+
           const canvas = scanCanvasRef.current;
-          const maxDim = 640;
-          const scale = Math.min(1, maxDim / Math.max(video.videoWidth, video.videoHeight));
-          const w = Math.max(1, Math.floor(video.videoWidth * scale));
-          const h = Math.max(1, Math.floor(video.videoHeight * scale));
+          const maxTargetDim = 720;
+          const scale = Math.min(1.5, maxTargetDim / Math.max(cropW, cropH));
+          const w = Math.max(64, Math.floor(cropW * scale));
+          const h = Math.max(64, Math.floor(cropH * scale));
 
           if (canvas.width !== w) canvas.width = w;
           if (canvas.height !== h) canvas.height = h;
 
           const ctx = canvas.getContext("2d", { willReadFrequently: true });
           if (!ctx) return;
-          ctx.drawImage(video, 0, 0, w, h);
 
-          // 1. Try Native BarcodeDetector first if available
-          if (nativeDetector) {
-            try {
-              const detected = await nativeDetector.detect(canvas);
-              if (detected && detected.length > 0 && detected[0].rawValue) {
-                handleDetectedValue(detected[0].rawValue);
-                return;
-              }
-            } catch {
-              // Fall through to jsQR and ZXing
+          // Draw ONLY the cropped Guide Box region
+          ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, w, h);
+
+          // Pass 1: Standard decode on Guide ROI
+          if (await tryDecodeROI(canvas, ctx)) return;
+
+          // Pass 2: Analyze Guide ROI for low-quality / wrinkled / damaged label & apply enhancement
+          const imgData = ctx.getImageData(0, 0, w, h);
+          const data = imgData.data;
+          const pixelCount = w * h;
+          const lum = new Uint8Array(pixelCount);
+          let minLum = 255;
+          let maxLum = 0;
+
+          for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+            const y = (data[i] * 77 + data[i + 1] * 150 + data[i + 2] * 29) >> 8;
+            lum[p] = y;
+            if (y < minLum) minLum = y;
+            if (y > maxLum) maxLum = y;
+          }
+
+          const contrastSpan = maxLum - minLum;
+          let edgeTransitions = 0;
+          let gradientSum = 0;
+          let sampleCount = 0;
+
+          for (let y = Math.floor(h * 0.2); y < Math.floor(h * 0.8); y += 2) {
+            const rowOffset = y * w;
+            for (let x = Math.floor(w * 0.15); x < Math.floor(w * 0.85) - 1; x += 2) {
+              const idx = rowOffset + x;
+              const grad = Math.max(
+                Math.abs(lum[idx] - lum[idx + 1]),
+                y + 1 < h ? Math.abs(lum[idx] - lum[idx + w]) : 0
+              );
+              gradientSum += grad;
+              sampleCount++;
+              if (grad > 18) edgeTransitions++;
             }
           }
 
-          // 2. Try jsQR for fast 2D QR code detection (when mode is 'qr' or 'both')
-          if (cameraGuideMode !== "barcode") {
-            try {
-              const imageData = ctx.getImageData(0, 0, w, h);
-              const qrResult = jsQR(imageData.data, w, h, {
-                inversionAttempts: "attemptBoth",
-              });
-              if (qrResult && qrResult.data) {
-                handleDetectedValue(qrResult.data);
-                return;
-              }
-            } catch {
-              // Fall through to ZXing
-            }
-          }
+          const edgeDensity = sampleCount > 0 ? edgeTransitions / sampleCount : 0;
+          const avgGradient = sampleCount > 0 ? gradientSum / sampleCount : 0;
+          const hasLabelCandidate = edgeDensity > 0.065 && contrastSpan > 28;
+          const isLowQuality = hasLabelCandidate && (avgGradient < 26 || contrastSpan < 145);
 
-          // 3. Try ZXing MultiFormatReader (1D Barcodes + 2D QR Codes)
-          try {
-            const luminanceSource = new HTMLCanvasElementLuminanceSource(canvas);
-            const binaryBitmap = new BinaryBitmap(new HybridBinarizer(luminanceSource));
-            const result = zxingReader.decodeWithState(binaryBitmap);
-            if (result && result.getText()) {
-              handleDetectedValue(result.getText());
-              return;
+          if (hasLabelCandidate) {
+            emptyFrameStreakRef.current = 0;
+            const range = Math.max(1, maxLum - minLum);
+            const stretched = new Uint8ClampedArray(pixelCount);
+            for (let p = 0; p < pixelCount; p++) {
+              stretched[p] = ((lum[p] - minLum) * 255) / range;
             }
-          } catch {
-            // No code in this frame; continue scanning next frame
+            for (let y = 1; y < h - 1; y++) {
+              const row = y * w;
+              for (let x = 1; x < w - 1; x++) {
+                const p = row + x;
+                const center = stretched[p];
+                const neighbors =
+                  (stretched[p - 1] + stretched[p + 1] + stretched[p - w] + stretched[p + w]) >> 2;
+                const sharpened = Math.min(255, Math.max(0, center + (center - neighbors) * 2));
+                const finalVal =
+                  sharpened < 120 ? Math.max(0, sharpened - 22) : Math.min(255, sharpened + 22);
+                const idx = p * 4;
+                data[idx] = finalVal;
+                data[idx + 1] = finalVal;
+                data[idx + 2] = finalVal;
+              }
+            }
+            ctx.putImageData(imgData, 0, 0);
+
+            if (await tryDecodeROI(canvas, ctx)) return;
+
+            if (isAutoZoomFocusEnabled && isLowQuality) {
+              lowQualityStreakRef.current += 1;
+              setIsEnhancingDamagedLabel(true);
+              if (lowQualityStreakRef.current >= 3) {
+                lowQualityStreakRef.current = 0;
+                const currentZ = currentZoomRef.current;
+                const nextZ =
+                  currentZ < 1.3
+                    ? 1.35
+                    : currentZ < 1.65
+                    ? 1.7
+                    : currentZ < 2.0
+                    ? 2.0
+                    : 1.2;
+                applyInlineCameraZoomAndFocus(nextZ);
+              }
+            }
+          } else {
+            emptyFrameStreakRef.current += 1;
+            if (emptyFrameStreakRef.current >= 8) {
+              setIsEnhancingDamagedLabel(false);
+              if (isAutoZoomFocusEnabled && currentZoomRef.current > 1.05) {
+                applyInlineCameraZoomAndFocus(1.0);
+              }
+            }
           }
         }, 180);
       } catch {
@@ -1198,7 +1403,15 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
       isCancelled = true;
       if (scanIntervalId) clearInterval(scanIntervalId);
     };
-  }, [isCameraActive, cameraGuideMode, isAutoNextEnabled, extractCleanScannedCode, handleStageConsignment]);
+  }, [
+    isCameraActive,
+    cameraGuideMode,
+    isAutoNextEnabled,
+    isAutoZoomFocusEnabled,
+    extractCleanScannedCode,
+    handleStageConsignment,
+    applyInlineCameraZoomAndFocus,
+  ]);
 
   // Force discard all staged / typed intake data and close modal
   const handleForceDiscardAndCloseIntake = () => {
@@ -1936,8 +2149,8 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
     }
   };
 
-  // Bulk Export Feature: Download all tracked shipment data within a selected batch (or all batches) as a structured CSV file
-  const handleExportBatchCsv = (overrideBatchId?: string) => {
+  // Bulk Export Feature: Download all tracked shipment data within a selected batch in ANY chosen file extension (.csv, .xlsx, .xls, .json, .tsv, .txt, .xml, or custom)
+  const handleExportBatchCsv = (overrideBatchId?: string, overrideFormat?: string) => {
     const targetId = overrideBatchId || exportBatchTargetId || selectedBatchId || "all";
     const listToExport = activeShipments.filter((item) => {
       if (targetId === "all") return true;
@@ -1952,67 +2165,11 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
       return;
     }
 
-    const headers = [
-      "Tracking_Number",
-      "Courier_Code",
-      "Courier_Name",
-      "Status",
-      "Status_Text",
-      "Origin",
-      "Destination",
-      "Recipient_Name",
-      "Article_Type",
-      "Weight",
-      "Last_Updated",
-      "Last_Location",
-      "Return_Reason",
-      "Batch_ID",
-      "Batch_Name",
-      "Imported_At",
-      "Exported_At",
-    ];
+    const rawChosenExt = overrideFormat || (exportFileExtension === "custom" ? customExportExtension : exportFileExtension) || "csv";
+    const cleanExt = rawChosenExt.trim().replace(/^\.+/, "").toLowerCase() || "csv";
 
     const exportedAtIso = new Date().toISOString();
-    const escapeCsvVal = (val: string | undefined) => {
-      const str = String(val ?? "");
-      if (str.includes(",") || str.includes('"') || str.includes("\n")) {
-        return `"${str.replace(/"/g, '""')}"`;
-      }
-      return str;
-    };
-
-    const csvLines = [
-      headers.join(","),
-      ...listToExport.map((s) =>
-        [
-          s.trackingNumber,
-          s.courierId,
-          s.courierName,
-          s.status,
-          s.statusText,
-          s.origin,
-          s.destination,
-          s.recipientName || "",
-          s.articleType,
-          s.weight,
-          s.lastUpdated,
-          s.lastLocation,
-          s.returnReason || "",
-          s.batchId || "direct",
-          s.batchName || "Direct Dashboard Entry",
-          s.importedAt || "Direct",
-          exportedAtIso,
-        ]
-          .map(escapeCsvVal)
-          .join(",")
-      ),
-    ];
-
-    const csvContent = csvLines.join("\n");
-    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    const dateStr = new Date().toISOString().split("T")[0];
+    const dateStr = exportedAtIso.split("T")[0];
 
     const batchObj = uniqueBatches.find((b) => b.id === targetId);
     const safeBatchSlug = batchObj
@@ -2023,18 +2180,140 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
       ? "Direct_Entries"
       : "All_Shipments";
 
-    a.href = url;
-    a.download = `TrackFlow_Bulk_Export_${safeBatchSlug}_${dateStr}.csv`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    const fileBaseName = `TrackFlow_Bulk_Export_${safeBatchSlug}_${dateStr}`;
+
+    const structuredRows = listToExport.map((s) => ({
+      Tracking_Number: s.trackingNumber,
+      Courier_Code: s.courierId,
+      Courier_Name: s.courierName,
+      Status: s.status,
+      Status_Text: s.statusText,
+      Origin: s.origin,
+      Destination: s.destination,
+      Recipient_Name: s.recipientName || "",
+      Article_Type: s.articleType,
+      Weight: s.weight,
+      Last_Updated: s.lastUpdated,
+      Last_Location: s.lastLocation,
+      Return_Reason: s.returnReason || "",
+      Batch_ID: s.batchId || "direct",
+      Batch_Name: s.batchName || "Direct Dashboard Entry",
+      Imported_At: s.importedAt || "Direct",
+      Exported_At: exportedAtIso,
+    }));
+
+    // Handle Excel (.xlsx or .xls) via SheetJS
+    if (cleanExt === "xlsx" || cleanExt === "xls") {
+      const worksheet = XLSX.utils.json_to_sheet(structuredRows);
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, worksheet, "Shipments");
+      XLSX.writeFile(workbook, `${fileBaseName}.${cleanExt}`, {
+        bookType: cleanExt === "xls" ? "biff8" : "xlsx",
+      });
+    } else if (cleanExt === "json") {
+      const jsonContent = JSON.stringify(
+        {
+          exportedAt: exportedAtIso,
+          batchScope: batchObj ? batchObj.name : safeBatchSlug,
+          totalRecords: structuredRows.length,
+          shipments: structuredRows,
+        },
+        null,
+        2
+      );
+      const blob = new Blob([jsonContent], { type: "application/json;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${fileBaseName}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } else if (cleanExt === "xml") {
+      const escapeXml = (v: string) =>
+        String(v ?? "")
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;");
+      const xmlItems = structuredRows
+        .map(
+          (r) =>
+            `  <Consignment>\n` +
+            Object.entries(r)
+              .map(([k, val]) => `    <${k}>${escapeXml(String(val))}</${k}>`)
+              .join("\n") +
+            `\n  </Consignment>`
+        )
+        .join("\n");
+      const xmlContent = `<?xml version="1.0" encoding="UTF-8"?>\n<TrackFlowExport batch="${escapeXml(
+        batchObj ? batchObj.name : safeBatchSlug
+      )}" count="${structuredRows.length}">\n${xmlItems}\n</TrackFlowExport>`;
+      const blob = new Blob([xmlContent], { type: "application/xml;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${fileBaseName}.xml`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } else if (cleanExt === "txt") {
+      const headers = Object.keys(structuredRows[0]);
+      const txtLines = [
+        `TRACKFLOW ENTERPRISE BULK SHIPMENT EXPORT (${exportedAtIso})`,
+        `Batch Scope: ${batchObj ? batchObj.name : safeBatchSlug.replace(/_/g, " ")} | Total Consignments: ${structuredRows.length}`,
+        "=".repeat(110),
+        headers.join(" | "),
+        "-".repeat(110),
+        ...structuredRows.map((r) => Object.values(r).join(" | ")),
+      ];
+      const blob = new Blob([txtLines.join("\n")], { type: "text/plain;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${fileBaseName}.txt`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } else {
+      // Default delimiter format: .csv (comma), .tsv (tab), or any custom extension requested by user
+      const delimiter = cleanExt === "tsv" ? "\t" : ",";
+      const headers = Object.keys(structuredRows[0]);
+      const escapeDelimitedVal = (val: string | undefined) => {
+        const str = String(val ?? "");
+        if (str.includes(delimiter) || str.includes('"') || str.includes("\n")) {
+          return `"${str.replace(/"/g, '""')}"`;
+        }
+        return str;
+      };
+      const lines = [
+        headers.join(delimiter),
+        ...structuredRows.map((r) =>
+          Object.values(r)
+            .map((v) => escapeDelimitedVal(String(v)))
+            .join(delimiter)
+        ),
+      ];
+      const mimeType = cleanExt === "tsv" ? "text/tab-separated-values;charset=utf-8;" : "text/csv;charset=utf-8;";
+      const blob = new Blob([lines.join("\n")], { type: mimeType });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${fileBaseName}.${cleanExt}`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
 
     playChime(true);
     setBatchCsvExportMsg(
       `Exported ${listToExport.length} consignment${listToExport.length > 1 ? "s" : ""} (${
         batchObj ? batchObj.name : safeBatchSlug.replace(/_/g, " ")
-      }) as CSV.`
+      }) as .${cleanExt.toUpperCase()}`
     );
     setTimeout(() => setBatchCsvExportMsg(null), 6000);
   };
@@ -2336,30 +2615,54 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
       )}
 
       {/* ============================================================== */}
-      {/* 1. TOP HEADER CONTROLS                                         */}
+      {/* 1. UNIFIED RESPONSIVE TOP OPERATIONS CARD (MOBILE & WEBVIEW)   */}
       {/* ============================================================== */}
-      <div className="rounded-3xl border border-slate-200/90 bg-white/95 p-5 sm:p-6 shadow-xs dark:border-slate-800 dark:bg-slate-900/90 backdrop-blur-md">
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-5">
-          {/* Dashboard Title & Live Badge */}
-          <div>
-            <div className="flex items-center gap-2 mb-1">
-              <span className="flex h-2.5 w-2.5 rounded-full bg-emerald-500 animate-pulse" />
-              <span className="text-[11px] font-extrabold uppercase tracking-wider text-indigo-600 dark:text-indigo-400">
-                Enterprise Logistics Hub
-              </span>
+      <div className="rounded-3xl border border-slate-200/90 bg-white/95 p-4 sm:p-6 shadow-xs dark:border-slate-800 dark:bg-slate-900/90 backdrop-blur-md space-y-4">
+        {/* Top Row: Brand Kicker + Title on Left, Live Sync Status + Primary Actions on Right */}
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+          {/* Title & Live Sync Pill Row (Mobile puts Sync pill top-right alongside title) */}
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 mb-1">
+                <span className="flex h-2 w-2 rounded-full bg-emerald-500 animate-pulse shrink-0" />
+                <span className="text-[10px] sm:text-[11px] font-extrabold uppercase tracking-wider text-indigo-600 dark:text-indigo-400 truncate">
+                  Enterprise Logistics Hub
+                </span>
+              </div>
+              <h1 className="text-lg sm:text-2xl font-black tracking-tight text-slate-900 dark:text-white leading-tight">
+                Bulk Shipment Operations
+              </h1>
+              <p className="mt-0.5 text-[11px] sm:text-xs text-slate-500 dark:text-slate-400 line-clamp-1 sm:line-clamp-none">
+                Multi-carrier fleet monitoring, automatic SLA sync, barcode/QR scanning &amp; batch ingestion.
+              </p>
             </div>
-            <h1 className="text-xl sm:text-2xl font-black tracking-tight text-slate-900 dark:text-white">
-              Bulk Tracking & Shipment Operations
-            </h1>
-            <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-              Multi-carrier fleet monitoring, automatic SLA sync, hardware barcode scanning, and CSV/Excel ingestion.
-            </p>
+
+            {/* Mobile-First Compact Sync Timer Pill (visible on mobile/tablet right beside title) */}
+            <div className="flex lg:hidden items-center gap-1.5 bg-slate-50 dark:bg-slate-800/90 px-2.5 py-1.5 rounded-xl border border-slate-200/80 dark:border-slate-700 shrink-0">
+              <span
+                className={`h-2 w-2 rounded-full shrink-0 ${
+                  isAutoCheckEnabled ? "bg-emerald-500 animate-pulse" : "bg-slate-400"
+                }`}
+              />
+              <span className="font-mono text-[11px] font-black text-slate-900 dark:text-white tabular-nums">
+                {isAutoCheckEnabled ? formatTimer(secondsRemaining) : "Paused"}
+              </span>
+              <button
+                type="button"
+                onClick={handleRunAutoCheck}
+                disabled={isRefreshing}
+                className="p-1 rounded-lg bg-white text-slate-700 hover:text-indigo-600 dark:bg-slate-700 dark:text-slate-200 shadow-2xs cursor-pointer disabled:opacity-50"
+                title="Trigger immediate sync check"
+              >
+                <RefreshCw className={`h-3 w-3 ${isRefreshing ? "animate-spin text-indigo-600" : ""}`} />
+              </button>
+            </div>
           </div>
 
-          {/* Action Buttons: Sync Timer + Unified Add Consignments + Bulk Import */}
-          <div className="flex flex-wrap items-center gap-2.5">
-            {/* Compact Next Check Timer Pill */}
-            <div className="flex items-center gap-2 bg-slate-50 dark:bg-slate-800/80 px-3 py-2 rounded-xl border border-slate-200/80 dark:border-slate-700 shadow-2xs">
+          {/* Action Toolbar: Symmetrical 2+1 Grid on Mobile, Crisp Horizontal Bar on WebView */}
+          <div className="grid grid-cols-2 sm:flex sm:flex-wrap items-center gap-2 sm:gap-2.5">
+            {/* Desktop Live Sync Timer Pill */}
+            <div className="hidden lg:flex items-center gap-2 bg-slate-50 dark:bg-slate-800/80 px-3 py-2 rounded-xl border border-slate-200/80 dark:border-slate-700 shadow-2xs">
               <div className="relative flex h-2.5 w-2.5 shrink-0">
                 {isAutoCheckEnabled ? (
                   <>
@@ -2386,20 +2689,9 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                 title="Trigger immediate sync check"
               >
                 <RefreshCw className={`h-3 w-3 ${isRefreshing ? "animate-spin text-indigo-600" : ""}`} />
-                <span className="hidden sm:inline">Check Now</span>
+                <span>Check Now</span>
               </button>
             </div>
-
-            {/* Dedicated Separate Camera Scan Page */}
-            <button
-              type="button"
-              onClick={handleOpenSeparateCameraPage}
-              className="inline-flex items-center gap-1.5 rounded-xl border border-indigo-200 bg-indigo-50/80 px-3.5 py-2.5 text-xs font-bold text-indigo-700 hover:border-indigo-400 hover:bg-indigo-100/80 dark:border-indigo-800/80 dark:bg-indigo-950/60 dark:text-indigo-300 shadow-2xs transition-all cursor-pointer"
-              title="Open standalone full-screen camera scanner page (/scan)"
-            >
-              <Camera className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
-              <span>Camera Scan Page</span>
-            </button>
 
             {/* Unified All-in-One Add Consignments */}
             <button
@@ -2412,11 +2704,11 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                 setIsCameraActive(false);
                 setIsAddConsignmentsModalOpen(true);
               }}
-              className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-xs font-bold text-slate-700 hover:border-indigo-400 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 shadow-2xs transition-all cursor-pointer"
+              className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-xs font-bold text-slate-800 hover:border-indigo-400 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 shadow-2xs transition-all cursor-pointer"
               title="Add consignments manually, with barcode scanning devices, or via camera QR / barcode scanning"
             >
-              <Plus className="h-4 w-4 text-indigo-600 dark:text-indigo-400 stroke-[2.4]" />
-              <span>Add Consignments</span>
+              <Plus className="h-4 w-4 text-indigo-600 dark:text-indigo-400 stroke-[2.5] shrink-0" />
+              <span className="truncate">Add Consignments</span>
             </button>
 
             {/* Bulk Import */}
@@ -2430,133 +2722,158 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                 setImportSuccessState(null);
                 setIsUploadModalOpen(true);
               }}
-              className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-4 py-2.5 text-xs font-extrabold text-white shadow-xs transition-all cursor-pointer"
+              className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-4 py-2.5 text-xs font-extrabold text-white shadow-xs transition-all cursor-pointer"
             >
-              <FileSpreadsheet className="h-4 w-4 stroke-[2.4]" />
-              <span>Bulk Import</span>
+              <FileSpreadsheet className="h-4 w-4 stroke-[2.4] shrink-0" />
+              <span className="truncate">Bulk Import</span>
+            </button>
+
+            {/* Dedicated Separate Camera Scan Page (Spans full width below on mobile, inline on sm+) */}
+            <button
+              type="button"
+              onClick={handleOpenSeparateCameraPage}
+              className="col-span-2 sm:col-span-1 inline-flex items-center justify-center gap-1.5 rounded-xl border border-indigo-200 bg-indigo-50/80 px-3.5 py-2.5 text-xs font-bold text-indigo-700 hover:border-indigo-400 hover:bg-indigo-100/80 dark:border-indigo-800/80 dark:bg-indigo-950/60 dark:text-indigo-300 shadow-2xs transition-all cursor-pointer"
+              title="Open standalone full-screen camera scanner page (/scan)"
+            >
+              <Camera className="h-4 w-4 text-indigo-600 dark:text-indigo-400 shrink-0" />
+              <span>Camera Scan Page</span>
             </button>
           </div>
         </div>
-      </div>
 
-      {/* ============================================================== */}
-      {/* 2. SUMMARY METRICS CARDS (INCLUDING BOOKED & RETURNED / RTO)   */}
-      {/* ============================================================== */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-        {/* Total Shipments */}
-        <div
-          onClick={() => setStatusFilter("all")}
-          className={`rounded-2xl border p-3.5 transition-all cursor-pointer ${
-            statusFilter === "all"
-              ? "border-indigo-500 bg-indigo-50/60 shadow-xs dark:border-indigo-600 dark:bg-indigo-950/40"
-              : "border-slate-200 bg-white hover:border-slate-300 dark:border-slate-800 dark:bg-slate-900"
-          }`}
-        >
-          <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
-            <span className="font-bold">Total Tracked</span>
-            <Package className="h-4 w-4 text-indigo-600" />
-          </div>
-          <div className="mt-1.5 text-2xl font-black text-slate-900 dark:text-white tabular-nums">
-            {totalCount}
-          </div>
-          <div className="mt-0.5 text-[11px] text-slate-500">All consignments</div>
-        </div>
+        {/* Bottom Row of Top Card: Integrated Interactive KPI Status Grid (3x2 on Mobile, 6-Col on WebView) */}
+        <div className="pt-3.5 border-t border-slate-100 dark:border-slate-800/80 grid grid-cols-3 lg:grid-cols-6 gap-2 sm:gap-2.5">
+          {/* Total Tracked */}
+          <button
+            type="button"
+            onClick={() => setStatusFilter("all")}
+            className={`text-left rounded-2xl border p-2.5 sm:p-3 transition-all cursor-pointer ${
+              statusFilter === "all"
+                ? "border-indigo-500 bg-indigo-50/70 shadow-2xs dark:border-indigo-500 dark:bg-indigo-950/50"
+                : "border-slate-200/80 bg-slate-50/50 hover:border-slate-300 dark:border-slate-800 dark:bg-slate-800/40"
+            }`}
+          >
+            <div className="flex items-center justify-between gap-1 text-[10px] sm:text-xs font-bold text-slate-600 dark:text-slate-300">
+              <span className="truncate">Total</span>
+              <Package className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400 shrink-0" />
+            </div>
+            <div className="mt-1 text-lg sm:text-2xl font-black text-slate-900 dark:text-white tabular-nums leading-none">
+              {totalCount}
+            </div>
+            <div className="hidden sm:block mt-1 text-[10px] text-slate-500 truncate">
+              All consignments
+            </div>
+          </button>
 
-        {/* Booked */}
-        <div
-          onClick={() => setStatusFilter("booked")}
-          className={`rounded-2xl border p-3.5 transition-all cursor-pointer ${
-            statusFilter === "booked"
-              ? "border-violet-500 bg-violet-50/60 shadow-xs dark:border-violet-600 dark:bg-violet-950/40"
-              : "border-slate-200 bg-white hover:border-slate-300 dark:border-slate-800 dark:bg-slate-900"
-          }`}
-        >
-          <div className="flex items-center justify-between text-xs text-violet-600 dark:text-violet-400 font-bold">
-            <span>Booked</span>
-            <Package className="h-4 w-4" />
-          </div>
-          <div className="mt-1.5 text-2xl font-black text-violet-600 dark:text-violet-400 tabular-nums">
-            {bookedCount}
-          </div>
-          <div className="mt-0.5 text-[11px] text-slate-500">Booked at origin</div>
-        </div>
+          {/* Booked */}
+          <button
+            type="button"
+            onClick={() => setStatusFilter("booked")}
+            className={`text-left rounded-2xl border p-2.5 sm:p-3 transition-all cursor-pointer ${
+              statusFilter === "booked"
+                ? "border-violet-500 bg-violet-50/70 shadow-2xs dark:border-violet-500 dark:bg-violet-950/50"
+                : "border-slate-200/80 bg-slate-50/50 hover:border-slate-300 dark:border-slate-800 dark:bg-slate-800/40"
+            }`}
+          >
+            <div className="flex items-center justify-between gap-1 text-[10px] sm:text-xs font-bold text-violet-600 dark:text-violet-400">
+              <span className="truncate">Booked</span>
+              <Package className="h-3.5 w-3.5 shrink-0" />
+            </div>
+            <div className="mt-1 text-lg sm:text-2xl font-black text-violet-600 dark:text-violet-400 tabular-nums leading-none">
+              {bookedCount}
+            </div>
+            <div className="hidden sm:block mt-1 text-[10px] text-slate-500 truncate">
+              Booked at origin
+            </div>
+          </button>
 
-        {/* In Transit */}
-        <div
-          onClick={() => setStatusFilter("in_transit")}
-          className={`rounded-2xl border p-3.5 transition-all cursor-pointer ${
-            statusFilter === "in_transit"
-              ? "border-sky-500 bg-sky-50/60 shadow-xs dark:border-sky-600 dark:bg-sky-950/40"
-              : "border-slate-200 bg-white hover:border-slate-300 dark:border-slate-800 dark:bg-slate-900"
-          }`}
-        >
-          <div className="flex items-center justify-between text-xs text-sky-600 dark:text-sky-400 font-bold">
-            <span>In Transit</span>
-            <Clock className="h-4 w-4" />
-          </div>
-          <div className="mt-1.5 text-2xl font-black text-sky-600 dark:text-sky-400 tabular-nums">
-            {inTransitCount}
-          </div>
-          <div className="mt-0.5 text-[11px] text-slate-500">Between sort hubs</div>
-        </div>
+          {/* In Transit */}
+          <button
+            type="button"
+            onClick={() => setStatusFilter("in_transit")}
+            className={`text-left rounded-2xl border p-2.5 sm:p-3 transition-all cursor-pointer ${
+              statusFilter === "in_transit"
+                ? "border-sky-500 bg-sky-50/70 shadow-2xs dark:border-sky-500 dark:bg-sky-950/50"
+                : "border-slate-200/80 bg-slate-50/50 hover:border-slate-300 dark:border-slate-800 dark:bg-slate-800/40"
+            }`}
+          >
+            <div className="flex items-center justify-between gap-1 text-[10px] sm:text-xs font-bold text-sky-600 dark:text-sky-400">
+              <span className="truncate">In Transit</span>
+              <Clock className="h-3.5 w-3.5 shrink-0" />
+            </div>
+            <div className="mt-1 text-lg sm:text-2xl font-black text-sky-600 dark:text-sky-400 tabular-nums leading-none">
+              {inTransitCount}
+            </div>
+            <div className="hidden sm:block mt-1 text-[10px] text-slate-500 truncate">
+              Active dispatch
+            </div>
+          </button>
 
-        {/* Out for Delivery */}
-        <div
-          onClick={() => setStatusFilter("out_for_delivery")}
-          className={`rounded-2xl border p-3.5 transition-all cursor-pointer ${
-            statusFilter === "out_for_delivery"
-              ? "border-amber-500 bg-amber-50/60 shadow-xs dark:border-amber-600 dark:bg-amber-950/40"
-              : "border-slate-200 bg-white hover:border-slate-300 dark:border-slate-800 dark:bg-slate-900"
-          }`}
-        >
-          <div className="flex items-center justify-between text-xs text-amber-600 dark:text-amber-400 font-bold">
-            <span>Out for Delivery</span>
-            <Truck className="h-4 w-4" />
-          </div>
-          <div className="mt-1.5 text-2xl font-black text-amber-600 dark:text-amber-400 tabular-nums">
-            {outCount}
-          </div>
-          <div className="mt-0.5 text-[11px] text-slate-500">Rider dispatched</div>
-        </div>
+          {/* Out for Delivery */}
+          <button
+            type="button"
+            onClick={() => setStatusFilter("out_for_delivery")}
+            className={`text-left rounded-2xl border p-2.5 sm:p-3 transition-all cursor-pointer ${
+              statusFilter === "out_for_delivery"
+                ? "border-amber-500 bg-amber-50/70 shadow-2xs dark:border-amber-500 dark:bg-amber-950/50"
+                : "border-slate-200/80 bg-slate-50/50 hover:border-slate-300 dark:border-slate-800 dark:bg-slate-800/40"
+            }`}
+          >
+            <div className="flex items-center justify-between gap-1 text-[10px] sm:text-xs font-bold text-amber-600 dark:text-amber-400">
+              <span className="truncate">Out Deliv.</span>
+              <Truck className="h-3.5 w-3.5 shrink-0" />
+            </div>
+            <div className="mt-1 text-lg sm:text-2xl font-black text-amber-600 dark:text-amber-400 tabular-nums leading-none">
+              {outCount}
+            </div>
+            <div className="hidden sm:block mt-1 text-[10px] text-slate-500 truncate">
+              With delivery agent
+            </div>
+          </button>
 
-        {/* Delivered */}
-        <div
-          onClick={() => setStatusFilter("delivered")}
-          className={`rounded-2xl border p-3.5 transition-all cursor-pointer ${
-            statusFilter === "delivered"
-              ? "border-emerald-500 bg-emerald-50/60 shadow-xs dark:border-emerald-600 dark:bg-emerald-950/40"
-              : "border-slate-200 bg-white hover:border-slate-300 dark:border-slate-800 dark:bg-slate-900"
-          }`}
-        >
-          <div className="flex items-center justify-between text-xs text-emerald-600 dark:text-emerald-400 font-bold">
-            <span>Delivered</span>
-            <CheckCircle2 className="h-4 w-4" />
-          </div>
-          <div className="mt-1.5 text-2xl font-black text-emerald-600 dark:text-emerald-400 tabular-nums">
-            {deliveredCount}
-          </div>
-          <div className="mt-0.5 text-[11px] text-slate-500">
-            {totalCount > 0 ? `${Math.round((deliveredCount / totalCount) * 100)}% completed` : "0%"}
-          </div>
-        </div>
+          {/* Delivered */}
+          <button
+            type="button"
+            onClick={() => setStatusFilter("delivered")}
+            className={`text-left rounded-2xl border p-2.5 sm:p-3 transition-all cursor-pointer ${
+              statusFilter === "delivered"
+                ? "border-emerald-500 bg-emerald-50/70 shadow-2xs dark:border-emerald-500 dark:bg-emerald-950/50"
+                : "border-slate-200/80 bg-slate-50/50 hover:border-slate-300 dark:border-slate-800 dark:bg-slate-800/40"
+            }`}
+          >
+            <div className="flex items-center justify-between gap-1 text-[10px] sm:text-xs font-bold text-emerald-600 dark:text-emerald-400">
+              <span className="truncate">Delivered</span>
+              <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+            </div>
+            <div className="mt-1 text-lg sm:text-2xl font-black text-emerald-600 dark:text-emerald-400 tabular-nums leading-none">
+              {deliveredCount}
+            </div>
+            <div className="hidden sm:block mt-1 text-[10px] text-slate-500 truncate">
+              {totalCount > 0 ? `${Math.round((deliveredCount / totalCount) * 100)}% completed` : "0%"}
+            </div>
+          </button>
 
-        {/* RETURNED / RTO SUPPORT */}
-        <div
-          onClick={() => setStatusFilter("returned")}
-          className={`rounded-2xl border p-3.5 transition-all cursor-pointer ${
-            statusFilter === "returned"
-              ? "border-rose-500 bg-rose-50/60 shadow-xs dark:border-rose-600 dark:bg-rose-950/40"
-              : "border-slate-200 bg-white hover:border-slate-300 dark:border-slate-800 dark:bg-slate-900"
-          }`}
-        >
-          <div className="flex items-center justify-between text-xs text-rose-600 dark:text-rose-400 font-bold">
-            <span>Returned (RTO)</span>
-            <RotateCcw className="h-4 w-4" />
-          </div>
-          <div className="mt-1.5 text-2xl font-black text-rose-600 dark:text-rose-400 tabular-nums">
-            {returnedCount}
-          </div>
-          <div className="mt-0.5 text-[11px] text-slate-500">Returned to origin</div>
+          {/* Returned / RTO */}
+          <button
+            type="button"
+            onClick={() => setStatusFilter("returned")}
+            className={`text-left rounded-2xl border p-2.5 sm:p-3 transition-all cursor-pointer ${
+              statusFilter === "returned"
+                ? "border-rose-500 bg-rose-50/70 shadow-2xs dark:border-rose-500 dark:bg-rose-950/50"
+                : "border-slate-200/80 bg-slate-50/50 hover:border-slate-300 dark:border-slate-800 dark:bg-slate-800/40"
+            }`}
+          >
+            <div className="flex items-center justify-between gap-1 text-[10px] sm:text-xs font-bold text-rose-600 dark:text-rose-400">
+              <span className="truncate">Returned</span>
+              <RotateCcw className="h-3.5 w-3.5 shrink-0" />
+            </div>
+            <div className="mt-1 text-lg sm:text-2xl font-black text-rose-600 dark:text-rose-400 tabular-nums leading-none">
+              {returnedCount}
+            </div>
+            <div className="hidden sm:block mt-1 text-[10px] text-slate-500 truncate">
+              Returned to origin
+            </div>
+          </button>
         </div>
       </div>
 
@@ -3036,45 +3353,207 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
               </div>
             )}
 
-            {/* TAB 3: SETTINGS, BULK CSV EXPORT PER BATCH & CLEAN-UP */}
+            {/* TAB 3: SETTINGS, MULTI-FORMAT BULK EXPORT PER BATCH & CLEAN-UP */}
             {activeSideTab === "settings" && (
               <div className="space-y-4 animate-in fade-in duration-150">
-                {/* 1. BULK EXPORT FEATURE (CSV BY SELECTED BATCH) */}
-                <div className="rounded-2xl border border-indigo-200/90 bg-indigo-50/50 p-3.5 dark:border-indigo-900/60 dark:bg-indigo-950/30 space-y-2.5">
+                {/* 1. BULK EXPORT FEATURE (ANY FILE EXTENSION + STYLED DROPDOWN) */}
+                <div className="rounded-2xl border border-indigo-200/90 bg-indigo-50/50 p-3.5 dark:border-indigo-900/60 dark:bg-indigo-950/30 space-y-3">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
                       <FileSpreadsheet className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
                       <span className="text-xs font-extrabold text-slate-900 dark:text-white">
-                        Bulk Export (CSV by Batch)
+                        Bulk Export by Batch
                       </span>
                     </div>
-                    <span className="rounded-md bg-indigo-100 dark:bg-indigo-950 px-2 py-0.5 text-[10px] font-mono font-bold text-indigo-700 dark:text-indigo-300">
-                      Structured CSV
+                    <span className="rounded-md bg-indigo-100 dark:bg-indigo-950 px-2 py-0.5 text-[10px] font-mono font-bold text-indigo-700 dark:text-indigo-300 uppercase">
+                      .{exportFileExtension === "custom" ? customExportExtension || "csv" : exportFileExtension}
                     </span>
                   </div>
                   <p className="text-[11px] text-slate-600 dark:text-slate-400">
-                    Download all tracked shipment data within a selected batch as a structured CSV file.
+                    Choose any batch and file extension (.csv, .xlsx, .xls, .json, .tsv, .txt, .xml, or custom) to download.
                   </p>
 
-                  <div>
+                  {/* Custom Styled Select Batch to Export Dropdown */}
+                  <div className="relative">
                     <label className="text-[10px] font-bold uppercase text-slate-500 dark:text-slate-400 block mb-1">
                       Select Batch to Export:
                     </label>
-                    <select
-                      value={exportBatchTargetId}
-                      onChange={(e) => setExportBatchTargetId(e.target.value)}
-                      className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-800 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 cursor-pointer"
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsExportBatchDropdownOpen((prev) => !prev);
+                        setIsExportFormatDropdownOpen(false);
+                      }}
+                      className="w-full flex items-center justify-between rounded-xl border border-slate-200/90 bg-white px-3 py-2.5 text-xs font-bold text-slate-800 shadow-2xs hover:border-indigo-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 transition-colors cursor-pointer"
                     >
-                      <option value="all">All Tracked Shipments ({totalCount})</option>
-                      <option value="imported_all">All Imported Batches ({importedCount})</option>
-                      <option value="direct_only">Direct Added Consignments ({Math.max(0, totalCount - importedCount)})</option>
-                      {uniqueBatches.map((b) => (
-                        <option key={b.id} value={b.id}>
-                          {b.name} ({b.count} items)
-                        </option>
-                      ))}
-                    </select>
+                      <div className="flex items-center gap-2 truncate">
+                        <span className="h-2 w-2 rounded-full bg-indigo-500 shrink-0" />
+                        <span className="truncate">
+                          {exportBatchTargetId === "all"
+                            ? `All Tracked Shipments (${totalCount})`
+                            : exportBatchTargetId === "imported_all"
+                            ? `All Imported Batches (${importedCount})`
+                            : exportBatchTargetId === "direct_only"
+                            ? `Direct Added Consignments (${Math.max(0, totalCount - importedCount)})`
+                            : (() => {
+                                const b = uniqueBatches.find((x) => x.id === exportBatchTargetId);
+                                return b ? `${b.name} (${b.count})` : `All Tracked Shipments (${totalCount})`;
+                              })()}
+                        </span>
+                      </div>
+                      <ChevronDown
+                        className={`h-4 w-4 text-slate-400 shrink-0 ml-1 transition-transform ${
+                          isExportBatchDropdownOpen ? "rotate-180" : ""
+                        }`}
+                      />
+                    </button>
+
+                    {isExportBatchDropdownOpen && (
+                      <>
+                        <div
+                          className="fixed inset-0 z-40"
+                          onClick={() => setIsExportBatchDropdownOpen(false)}
+                        />
+                        <div className="absolute left-0 right-0 top-full mt-1.5 z-50 max-h-60 overflow-y-auto rounded-2xl border border-slate-200 bg-white p-1.5 shadow-2xl dark:border-slate-700 dark:bg-slate-800 space-y-0.5">
+                          {[
+                            { id: "all", label: "All Tracked Shipments", count: totalCount },
+                            { id: "imported_all", label: "All Imported Batches", count: importedCount },
+                            {
+                              id: "direct_only",
+                              label: "Direct Added Consignments",
+                              count: Math.max(0, totalCount - importedCount),
+                            },
+                            ...uniqueBatches.map((b) => ({
+                              id: b.id,
+                              label: b.name,
+                              count: b.count,
+                            })),
+                          ].map((opt) => (
+                            <button
+                              key={opt.id}
+                              type="button"
+                              onClick={() => {
+                                setExportBatchTargetId(opt.id);
+                                setIsExportBatchDropdownOpen(false);
+                              }}
+                              className={`w-full flex items-center justify-between rounded-xl px-2.5 py-2 text-xs font-semibold transition-colors cursor-pointer ${
+                                exportBatchTargetId === opt.id
+                                  ? "bg-indigo-50 text-indigo-700 dark:bg-indigo-950/70 dark:text-indigo-300 font-bold"
+                                  : "text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-700/70"
+                              }`}
+                            >
+                              <span className="truncate pr-2">{opt.label}</span>
+                              <div className="flex items-center gap-1.5 shrink-0">
+                                <span className="rounded-md bg-slate-100 dark:bg-slate-900 px-1.5 py-0.5 font-mono text-[10px] font-bold text-slate-600 dark:text-slate-300">
+                                  {opt.count}
+                                </span>
+                                {exportBatchTargetId === opt.id && (
+                                  <Check className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" />
+                                )}
+                              </div>
+                            </button>
+                          ))}
+                        </div>
+                      </>
+                    )}
                   </div>
+
+                  {/* Custom Styled File Extension / Format Selector */}
+                  <div className="relative">
+                    <label className="text-[10px] font-bold uppercase text-slate-500 dark:text-slate-400 block mb-1">
+                      Choose File Extension:
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsExportFormatDropdownOpen((prev) => !prev);
+                        setIsExportBatchDropdownOpen(false);
+                      }}
+                      className="w-full flex items-center justify-between rounded-xl border border-slate-200/90 bg-white px-3 py-2 text-xs font-bold text-slate-800 shadow-2xs hover:border-indigo-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 transition-colors cursor-pointer"
+                    >
+                      <span className="truncate">
+                        {exportFileExtension === "csv"
+                          ? "CSV Spreadsheet (.csv)"
+                          : exportFileExtension === "xlsx"
+                          ? "Excel Workbook (.xlsx)"
+                          : exportFileExtension === "xls"
+                          ? "Excel 97-2004 (.xls)"
+                          : exportFileExtension === "json"
+                          ? "Structured JSON (.json)"
+                          : exportFileExtension === "tsv"
+                          ? "Tab-Separated (.tsv)"
+                          : exportFileExtension === "txt"
+                          ? "Plain Text Report (.txt)"
+                          : exportFileExtension === "xml"
+                          ? "XML Document (.xml)"
+                          : `Custom Extension (.${customExportExtension || "csv"})`}
+                      </span>
+                      <ChevronDown
+                        className={`h-4 w-4 text-slate-400 shrink-0 ml-1 transition-transform ${
+                          isExportFormatDropdownOpen ? "rotate-180" : ""
+                        }`}
+                      />
+                    </button>
+
+                    {isExportFormatDropdownOpen && (
+                      <>
+                        <div
+                          className="fixed inset-0 z-40"
+                          onClick={() => setIsExportFormatDropdownOpen(false)}
+                        />
+                        <div className="absolute left-0 right-0 top-full mt-1.5 z-50 rounded-2xl border border-slate-200 bg-white p-1.5 shadow-2xl dark:border-slate-700 dark:bg-slate-800 space-y-0.5">
+                          {(
+                            [
+                              { ext: "csv", label: "CSV Spreadsheet", badge: ".csv" },
+                              { ext: "xlsx", label: "Excel Workbook", badge: ".xlsx" },
+                              { ext: "xls", label: "Excel Legacy", badge: ".xls" },
+                              { ext: "json", label: "Structured JSON", badge: ".json" },
+                              { ext: "tsv", label: "Tab-Separated Values", badge: ".tsv" },
+                              { ext: "txt", label: "Plain Text Report", badge: ".txt" },
+                              { ext: "xml", label: "XML Data Feed", badge: ".xml" },
+                              { ext: "custom", label: "Any Custom Extension...", badge: ".ext" },
+                            ] as const
+                          ).map((fmt) => (
+                            <button
+                              key={fmt.ext}
+                              type="button"
+                              onClick={() => {
+                                setExportFileExtension(fmt.ext);
+                                setIsExportFormatDropdownOpen(false);
+                              }}
+                              className={`w-full flex items-center justify-between rounded-xl px-2.5 py-1.5 text-xs font-semibold transition-colors cursor-pointer ${
+                                exportFileExtension === fmt.ext
+                                  ? "bg-indigo-50 text-indigo-700 dark:bg-indigo-950/70 dark:text-indigo-300 font-bold"
+                                  : "text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-700/70"
+                              }`}
+                            >
+                              <span>{fmt.label}</span>
+                              <span className="font-mono text-[10px] font-bold text-indigo-600 dark:text-indigo-400">
+                                {fmt.badge}
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                      </>
+                    )}
+                  </div>
+
+                  {exportFileExtension === "custom" && (
+                    <div className="flex items-center gap-2">
+                      <span className="text-[11px] font-bold text-slate-600 dark:text-slate-300">
+                        Extension:
+                      </span>
+                      <input
+                        type="text"
+                        value={customExportExtension}
+                        onChange={(e) =>
+                          setCustomExportExtension(e.target.value.replace(/[^a-zA-Z0-9]/g, ""))
+                        }
+                        placeholder="e.g. dat, log, csv"
+                        className="flex-1 rounded-xl border border-slate-200 bg-white px-2.5 py-1.5 font-mono text-xs font-bold text-slate-800 dark:border-slate-700 dark:bg-slate-900 dark:text-white focus:outline-none focus:border-indigo-500"
+                      />
+                    </div>
+                  )}
 
                   {batchCsvExportMsg && (
                     <div className="rounded-xl border border-emerald-300 bg-white dark:border-emerald-800 dark:bg-slate-900 px-3 py-1.5 text-[11px] font-bold text-emerald-700 dark:text-emerald-300 flex items-center gap-1.5">
@@ -3090,7 +3569,9 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                     className="w-full inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 px-3.5 py-2.5 text-xs font-extrabold text-white shadow-xs transition-colors cursor-pointer"
                   >
                     <Download className="h-3.5 w-3.5" />
-                    <span>Download Batch CSV</span>
+                    <span>
+                      Download Batch (.{(exportFileExtension === "custom" ? customExportExtension || "csv" : exportFileExtension).toUpperCase()})
+                    </span>
                   </button>
                 </div>
 
@@ -3213,43 +3694,6 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
 
         {/* RIGHT / MAIN WORKSPACE: SHIPMENTS DATA TABLE */}
         <div className="lg:col-span-8 xl:col-span-8 space-y-4">
-          {/* Active Scope Header Bar */}
-          <div className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-slate-200/80 bg-white px-4 py-3 shadow-2xs dark:border-slate-800 dark:bg-slate-900">
-            <div className="flex flex-wrap items-center gap-2 text-xs">
-              <span className="font-extrabold text-slate-900 dark:text-white">
-                Showing {filteredShipments.length} of {scopedTotalCount} Consignments
-              </span>
-              {selectedBatchId !== "all" && (
-                <span className="inline-flex items-center gap-1 rounded-lg bg-emerald-50 dark:bg-emerald-950 px-2 py-0.5 text-[11px] font-bold text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
-                  <span>
-                    {selectedBatchId === "imported_all"
-                      ? "All Imported Batches"
-                      : uniqueBatches.find((b) => b.id === selectedBatchId)?.name || "Filtered Batch"}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => setSelectedBatchId("all")}
-                    className="ml-1 hover:text-rose-600 cursor-pointer"
-                  >
-                    <X className="h-3 w-3" />
-                  </button>
-                </span>
-              )}
-            </div>
-
-            {/* Quick Bulk CSV Export Button for Active Scope */}
-            <button
-              type="button"
-              onClick={() => handleExportBatchCsv(selectedBatchId)}
-              disabled={filteredShipments.length === 0}
-              className="inline-flex items-center gap-1.5 rounded-xl border border-indigo-200 bg-indigo-50/80 hover:bg-indigo-100 text-indigo-700 dark:border-indigo-800 dark:bg-indigo-950/60 dark:text-indigo-300 px-3 py-1.5 text-xs font-bold transition-colors cursor-pointer disabled:opacity-50"
-              title="Download currently selected batch / scope as a structured CSV file"
-            >
-              <Download className="h-3.5 w-3.5" />
-              <span>Bulk Export CSV</span>
-            </button>
-          </div>
-
           {/* 4. SHIPMENTS DATA TABLE */}
           <div className="overflow-hidden rounded-3xl border border-slate-200/90 bg-white shadow-xs dark:border-slate-800 dark:bg-slate-900">
             <div className="overflow-x-auto">
@@ -3498,47 +3942,202 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
 
             {/* Scrollable Modal Body */}
             <div className="flex-1 overflow-y-auto p-5 sm:p-6 space-y-5">
-              {/* Bulk CSV Export by Batch inside Settings Modal */}
+              {/* Multi-Format Bulk Export by Batch inside Settings Modal */}
               <div className="rounded-2xl border border-indigo-200/80 bg-indigo-50/50 p-4 dark:border-indigo-900/60 dark:bg-indigo-950/30 space-y-3">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     <FileSpreadsheet className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
                     <span className="text-xs font-bold text-slate-900 dark:text-white">
-                      Bulk Export Shipments by Batch (.CSV)
+                      Bulk Export Shipments by Batch
                     </span>
                   </div>
-                  <span className="rounded-lg bg-indigo-100 dark:bg-indigo-950 px-2 py-0.5 text-[10px] font-mono font-bold text-indigo-800 dark:text-indigo-300">
-                    Platform CSV
+                  <span className="rounded-lg bg-indigo-100 dark:bg-indigo-950 px-2 py-0.5 text-[10px] font-mono font-bold text-indigo-800 dark:text-indigo-300 uppercase">
+                    .{exportFileExtension === "custom" ? customExportExtension || "csv" : exportFileExtension}
                   </span>
                 </div>
                 <p className="text-[11px] text-slate-600 dark:text-slate-400">
-                  Download all tracked shipment data within a selected batch as a structured CSV file ready for analytics or re-import.
+                  Select any batch and choose your desired file extension (.csv, .xlsx, .xls, .json, .tsv, .txt, .xml, or custom).
                 </p>
-                <div className="flex flex-col sm:flex-row gap-2">
-                  <select
-                    value={exportBatchTargetId}
-                    onChange={(e) => setExportBatchTargetId(e.target.value)}
-                    className="flex-1 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-800 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 cursor-pointer"
-                  >
-                    <option value="all">All Tracked Shipments ({totalCount})</option>
-                    <option value="imported_all">All Imported Batches ({importedCount})</option>
-                    <option value="direct_only">Direct Added Consignments ({Math.max(0, totalCount - importedCount)})</option>
-                    {uniqueBatches.map((b) => (
-                      <option key={b.id} value={b.id}>
-                        {b.name} ({b.count} items)
-                      </option>
-                    ))}
-                  </select>
-                  <button
-                    type="button"
-                    onClick={() => handleExportBatchCsv()}
-                    disabled={totalCount === 0}
-                    className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 px-4 py-2.5 text-xs font-extrabold text-white shadow-2xs transition-colors cursor-pointer"
-                  >
-                    <Download className="h-3.5 w-3.5" />
-                    <span>Bulk Export CSV</span>
-                  </button>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  {/* Custom Styled Select Batch Dropdown */}
+                  <div className="relative">
+                    <label className="text-[10px] font-bold uppercase text-slate-500 dark:text-slate-400 block mb-1">
+                      Select Batch to Export:
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsModalExportBatchDropdownOpen((prev) => !prev);
+                        setIsModalExportFormatDropdownOpen(false);
+                      }}
+                      className="w-full flex items-center justify-between rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-800 shadow-2xs hover:border-indigo-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 cursor-pointer"
+                    >
+                      <span className="truncate">
+                        {exportBatchTargetId === "all"
+                          ? `All Tracked Shipments (${totalCount})`
+                          : exportBatchTargetId === "imported_all"
+                          ? `All Imported Batches (${importedCount})`
+                          : exportBatchTargetId === "direct_only"
+                          ? `Direct Consignments (${Math.max(0, totalCount - importedCount)})`
+                          : (() => {
+                              const b = uniqueBatches.find((x) => x.id === exportBatchTargetId);
+                              return b ? `${b.name} (${b.count})` : `All Tracked Shipments (${totalCount})`;
+                            })()}
+                      </span>
+                      <ChevronDown className="h-3.5 w-3.5 text-slate-400 shrink-0 ml-1" />
+                    </button>
+
+                    {isModalExportBatchDropdownOpen && (
+                      <>
+                        <div
+                          className="fixed inset-0 z-40"
+                          onClick={() => setIsModalExportBatchDropdownOpen(false)}
+                        />
+                        <div className="absolute left-0 right-0 top-full mt-1 z-50 max-h-56 overflow-y-auto rounded-2xl border border-slate-200 bg-white p-1.5 shadow-2xl dark:border-slate-700 dark:bg-slate-800 space-y-0.5">
+                          {[
+                            { id: "all", label: "All Tracked Shipments", count: totalCount },
+                            { id: "imported_all", label: "All Imported Batches", count: importedCount },
+                            {
+                              id: "direct_only",
+                              label: "Direct Added Consignments",
+                              count: Math.max(0, totalCount - importedCount),
+                            },
+                            ...uniqueBatches.map((b) => ({
+                              id: b.id,
+                              label: b.name,
+                              count: b.count,
+                            })),
+                          ].map((opt) => (
+                            <button
+                              key={opt.id}
+                              type="button"
+                              onClick={() => {
+                                setExportBatchTargetId(opt.id);
+                                setIsModalExportBatchDropdownOpen(false);
+                              }}
+                              className={`w-full flex items-center justify-between rounded-xl px-2.5 py-2 text-xs font-semibold transition-colors cursor-pointer ${
+                                exportBatchTargetId === opt.id
+                                  ? "bg-indigo-50 text-indigo-700 dark:bg-indigo-950/70 dark:text-indigo-300 font-bold"
+                                  : "text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-700/70"
+                              }`}
+                            >
+                              <span className="truncate pr-2">{opt.label}</span>
+                              <span className="rounded-md bg-slate-100 dark:bg-slate-900 px-1.5 py-0.5 font-mono text-[10px] font-bold text-slate-600 dark:text-slate-300">
+                                {opt.count}
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                      </>
+                    )}
+                  </div>
+
+                  {/* Custom Styled File Extension Dropdown */}
+                  <div className="relative">
+                    <label className="text-[10px] font-bold uppercase text-slate-500 dark:text-slate-400 block mb-1">
+                      File Extension:
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsModalExportFormatDropdownOpen((prev) => !prev);
+                        setIsModalExportBatchDropdownOpen(false);
+                      }}
+                      className="w-full flex items-center justify-between rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-800 shadow-2xs hover:border-indigo-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 cursor-pointer"
+                    >
+                      <span className="truncate">
+                        {exportFileExtension === "csv"
+                          ? "CSV (.csv)"
+                          : exportFileExtension === "xlsx"
+                          ? "Excel (.xlsx)"
+                          : exportFileExtension === "xls"
+                          ? "Excel Legacy (.xls)"
+                          : exportFileExtension === "json"
+                          ? "JSON (.json)"
+                          : exportFileExtension === "tsv"
+                          ? "TSV (.tsv)"
+                          : exportFileExtension === "txt"
+                          ? "Text (.txt)"
+                          : exportFileExtension === "xml"
+                          ? "XML (.xml)"
+                          : `Custom (.${customExportExtension || "csv"})`}
+                      </span>
+                      <ChevronDown className="h-3.5 w-3.5 text-slate-400 shrink-0 ml-1" />
+                    </button>
+
+                    {isModalExportFormatDropdownOpen && (
+                      <>
+                        <div
+                          className="fixed inset-0 z-40"
+                          onClick={() => setIsModalExportFormatDropdownOpen(false)}
+                        />
+                        <div className="absolute left-0 right-0 top-full mt-1 z-50 rounded-2xl border border-slate-200 bg-white p-1.5 shadow-2xl dark:border-slate-700 dark:bg-slate-800 space-y-0.5">
+                          {(
+                            [
+                              { ext: "csv", label: "CSV Spreadsheet", badge: ".csv" },
+                              { ext: "xlsx", label: "Excel Workbook", badge: ".xlsx" },
+                              { ext: "xls", label: "Excel 97-2004", badge: ".xls" },
+                              { ext: "json", label: "Structured JSON", badge: ".json" },
+                              { ext: "tsv", label: "Tab-Separated", badge: ".tsv" },
+                              { ext: "txt", label: "Plain Text", badge: ".txt" },
+                              { ext: "xml", label: "XML Data", badge: ".xml" },
+                              { ext: "custom", label: "Custom Extension...", badge: ".ext" },
+                            ] as const
+                          ).map((fmt) => (
+                            <button
+                              key={fmt.ext}
+                              type="button"
+                              onClick={() => {
+                                setExportFileExtension(fmt.ext);
+                                setIsModalExportFormatDropdownOpen(false);
+                              }}
+                              className={`w-full flex items-center justify-between rounded-xl px-2.5 py-1.5 text-xs font-semibold transition-colors cursor-pointer ${
+                                exportFileExtension === fmt.ext
+                                  ? "bg-indigo-50 text-indigo-700 dark:bg-indigo-950/70 dark:text-indigo-300 font-bold"
+                                  : "text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-700/70"
+                              }`}
+                            >
+                              <span>{fmt.label}</span>
+                              <span className="font-mono text-[10px] font-bold text-indigo-600 dark:text-indigo-400">
+                                {fmt.badge}
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                      </>
+                    )}
+                  </div>
                 </div>
+
+                {exportFileExtension === "custom" && (
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-bold text-slate-600 dark:text-slate-300">
+                      Custom Extension:
+                    </span>
+                    <input
+                      type="text"
+                      value={customExportExtension}
+                      onChange={(e) =>
+                        setCustomExportExtension(e.target.value.replace(/[^a-zA-Z0-9]/g, ""))
+                      }
+                      placeholder="Enter extension (e.g. dat, log, csv)"
+                      className="flex-1 rounded-xl border border-slate-200 bg-white px-3 py-1.5 font-mono text-xs font-bold text-slate-800 dark:border-slate-700 dark:bg-slate-900 dark:text-white focus:outline-none focus:border-indigo-500"
+                    />
+                  </div>
+                )}
+
+                <button
+                  type="button"
+                  onClick={() => handleExportBatchCsv()}
+                  disabled={totalCount === 0}
+                  className="w-full inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 px-4 py-2.5 text-xs font-extrabold text-white shadow-2xs transition-colors cursor-pointer"
+                >
+                  <Download className="h-3.5 w-3.5" />
+                  <span>
+                    Bulk Export as .{(exportFileExtension === "custom" ? customExportExtension || "csv" : exportFileExtension).toUpperCase()}
+                  </span>
+                </button>
                 {batchCsvExportMsg && (
                   <div className="rounded-xl border border-emerald-300 bg-white/90 dark:border-emerald-800 dark:bg-slate-900 px-3 py-2 text-xs font-bold text-emerald-700 dark:text-emerald-300">
                     {batchCsvExportMsg}
@@ -3874,47 +4473,91 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                   </button>
                 </div>
 
-                {/* Camera Mode Switcher & Auto-Next Bar */}
+                {/* Camera Mode Switcher, Auto-Zoom/Focus Controls & Auto-Next Bar */}
                 <div className="flex flex-wrap items-center justify-between gap-2 px-4 sm:px-6 py-3 bg-slate-900/90 border-b border-slate-800 shrink-0">
-                  <div className="inline-flex items-center gap-1 rounded-xl bg-slate-950 p-1 border border-slate-800 text-xs font-bold">
-                    <button
-                      type="button"
-                      onClick={() => setCameraGuideMode("barcode")}
-                      className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
-                        cameraGuideMode === "barcode"
-                          ? "bg-indigo-600 text-white shadow-xs"
-                          : "text-slate-400 hover:text-slate-200"
-                      }`}
-                    >
-                      Barcode
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setCameraGuideMode("qr")}
-                      className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
-                        cameraGuideMode === "qr"
-                          ? "bg-indigo-600 text-white shadow-xs"
-                          : "text-slate-400 hover:text-slate-200"
-                      }`}
-                    >
-                      QR
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setCameraGuideMode("both")}
-                      className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
-                        cameraGuideMode === "both"
-                          ? "bg-indigo-600 text-white shadow-xs"
-                          : "text-slate-400 hover:text-slate-200"
-                      }`}
-                    >
-                      Both
-                    </button>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div className="inline-flex items-center gap-1 rounded-xl bg-slate-950 p-1 border border-slate-800 text-xs font-bold">
+                      <button
+                        type="button"
+                        onClick={() => setCameraGuideMode("barcode")}
+                        className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
+                          cameraGuideMode === "barcode"
+                            ? "bg-indigo-600 text-white shadow-xs"
+                            : "text-slate-400 hover:text-slate-200"
+                        }`}
+                      >
+                        Barcode
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setCameraGuideMode("qr")}
+                        className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
+                          cameraGuideMode === "qr"
+                            ? "bg-indigo-600 text-white shadow-xs"
+                            : "text-slate-400 hover:text-slate-200"
+                        }`}
+                      >
+                        QR
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setCameraGuideMode("both")}
+                        className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
+                          cameraGuideMode === "both"
+                            ? "bg-indigo-600 text-white shadow-xs"
+                            : "text-slate-400 hover:text-slate-200"
+                        }`}
+                      >
+                        Both
+                      </button>
+                    </div>
+
+                    {/* Smart Auto-Zoom & Focus Sensitivity Controls for Damaged Labels */}
+                    <div className="inline-flex items-center gap-1 rounded-xl bg-slate-950 px-2 py-1 border border-slate-800 text-[11px] font-bold">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const next = !isAutoZoomFocusEnabled;
+                          setIsAutoZoomFocusEnabled(next);
+                          if (!next) setIsEnhancingDamagedLabel(false);
+                        }}
+                        className={`inline-flex items-center gap-1 rounded-lg px-2 py-0.5 transition-colors cursor-pointer ${
+                          isAutoZoomFocusEnabled
+                            ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40"
+                            : "text-slate-400 hover:text-slate-200"
+                        }`}
+                      >
+                        <Focus className="h-3 w-3" />
+                        <span>Auto-Focus/Zoom: {isAutoZoomFocusEnabled ? "ON" : "OFF"}</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => applyInlineCameraZoomAndFocus(cameraZoomLevel - 0.25)}
+                        disabled={cameraZoomLevel <= 1.0}
+                        className="p-1 rounded-md text-slate-400 hover:text-white disabled:opacity-40 cursor-pointer"
+                      >
+                        <ZoomOut className="h-3.5 w-3.5" />
+                      </button>
+                      <span className="font-mono text-[11px] font-black text-indigo-300 px-1 tabular-nums">
+                        {cameraZoomLevel.toFixed(1)}x
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => applyInlineCameraZoomAndFocus(cameraZoomLevel + 0.25)}
+                        disabled={cameraZoomLevel >= 2.4}
+                        className="p-1 rounded-md text-slate-400 hover:text-white disabled:opacity-40 cursor-pointer"
+                      >
+                        <ZoomIn className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
                   </div>
 
                   <div className="flex items-center gap-2.5">
                     <span className="text-xs font-bold text-slate-300">
-                      Auto-Next: <span className={isAutoNextEnabled ? "text-emerald-400" : "text-amber-400"}>{isAutoNextEnabled ? "ON" : "OFF"}</span>
+                      Auto-Next:{" "}
+                      <span className={isAutoNextEnabled ? "text-emerald-400" : "text-amber-400"}>
+                        {isAutoNextEnabled ? "ON" : "OFF"}
+                      </span>
                     </span>
                     <button
                       type="button"
@@ -3950,43 +4593,81 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                     className={`relative flex-1 min-h-[260px] sm:min-h-[340px] rounded-2xl bg-black overflow-hidden flex items-center justify-center border-2 transition-colors duration-200 ${
                       cameraScanSuccess
                         ? "border-emerald-500 shadow-[0_0_25px_rgba(16,185,129,0.45)]"
+                        : isEnhancingDamagedLabel
+                        ? "border-amber-500/80 shadow-[0_0_20px_rgba(245,158,11,0.3)]"
                         : "border-slate-800"
                     }`}
                   >
                     <video
                       ref={videoRef}
+                      style={{
+                        transform: hwZoomSupportedRef.current.supported
+                          ? undefined
+                          : `scale(${cameraZoomLevel})`,
+                        transition: "transform 220ms ease-out",
+                      }}
                       className="absolute inset-0 w-full h-full object-cover"
                       playsInline
                       muted
                       autoPlay
                     />
 
+                    {/* Top HUD Pill: Strictly Inside Guide Frame & Damaged Label Enhancer */}
+                    <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 pointer-events-none flex flex-wrap items-center justify-center gap-2 px-3">
+                      <span className="inline-flex items-center gap-1.5 rounded-full bg-slate-950/80 border border-slate-700/80 px-3 py-1 text-[10px] font-bold text-slate-200 backdrop-blur-xs">
+                        <span className="h-1.5 w-1.5 rounded-full bg-red-500 animate-ping" />
+                        <span>Scans Only Inside Guide Frame</span>
+                      </span>
+                      {(isEnhancingDamagedLabel || cameraZoomLevel > 1.05) && (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/90 px-2.5 py-0.5 text-[10px] font-black text-slate-950 shadow-sm">
+                          <Zap className="h-3 w-3 fill-slate-950" />
+                          <span>
+                            {isEnhancingDamagedLabel
+                              ? `Wrinkled Label Boost ${cameraZoomLevel.toFixed(1)}x`
+                              : `Zoom ${cameraZoomLevel.toFixed(1)}x`}
+                          </span>
+                        </span>
+                      )}
+                    </div>
+
                     {/* Horizontal RED Laser Scan Line */}
                     {!cameraScanSuccess && (
                       <div className="absolute left-8 right-8 h-0.5 bg-red-500 shadow-[0_0_14px_#ef4444] animate-pulse z-10 pointer-events-none" />
                     )}
 
-                    {/* Clean Guide Frame Only */}
+                    {/* Clean Guide Frame Only (with outside mask indicating active scan area) */}
                     {cameraGuideMode === "barcode" && (
                       <div
-                        className={`relative z-10 w-4/5 max-w-sm h-28 rounded-xl border-2 pointer-events-none transition-colors ${
-                          cameraScanSuccess ? "border-emerald-400 bg-emerald-500/15" : "border-white/70"
+                        className={`relative z-10 w-4/5 max-w-sm h-28 rounded-xl border-2 pointer-events-none shadow-[0_0_0_9999px_rgba(2,6,23,0.52)] transition-colors ${
+                          cameraScanSuccess
+                            ? "border-emerald-400 bg-emerald-500/15"
+                            : isEnhancingDamagedLabel
+                            ? "border-amber-400"
+                            : "border-white/80"
                         }`}
                       />
                     )}
 
                     {cameraGuideMode === "qr" && (
                       <div
-                        className={`relative z-10 w-48 h-48 sm:w-52 sm:h-52 rounded-2xl border-2 pointer-events-none transition-colors ${
-                          cameraScanSuccess ? "border-emerald-400 bg-emerald-500/15" : "border-white/70"
+                        className={`relative z-10 w-48 h-48 sm:w-52 sm:h-52 rounded-2xl border-2 pointer-events-none shadow-[0_0_0_9999px_rgba(2,6,23,0.52)] transition-colors ${
+                          cameraScanSuccess
+                            ? "border-emerald-400 bg-emerald-500/15"
+                            : isEnhancingDamagedLabel
+                            ? "border-amber-400"
+                            : "border-white/80"
                         }`}
                       />
                     )}
 
                     {cameraGuideMode === "both" && (
                       <div
-                        className={`relative z-10 w-4/5 max-w-md h-44 rounded-2xl border-2 pointer-events-none flex items-center justify-center transition-colors ${
-                          cameraScanSuccess ? "border-emerald-400 bg-emerald-500/15" : "border-white/60"
+                        className={`relative z-10 w-4/5 max-w-md h-44 rounded-2xl border-2 pointer-events-none shadow-[0_0_0_9999px_rgba(2,6,23,0.52)] flex items-center justify-center transition-colors ${
+                          cameraScanSuccess
+                            ? "border-emerald-400 bg-emerald-500/15"
+                            : isEnhancingDamagedLabel
+                            ? "border-amber-400"
+                            : "border-white/75"
                         }`}
                       >
                         <div className="w-32 h-32 rounded-xl border border-white/50" />

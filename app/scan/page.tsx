@@ -5,18 +5,17 @@ import { useRouter } from "next/navigation";
 import {
   Camera,
   Check,
-  X,
   ArrowLeft,
   Trash2,
-  Package,
   ShieldAlert,
-  Sparkles,
-  CheckCircle2,
   Volume2,
   VolumeX,
   ChevronUp,
   ChevronDown,
-  Search,
+  Zap,
+  ZoomIn,
+  ZoomOut,
+  Focus,
 } from "lucide-react";
 import {
   MultiFormatReader,
@@ -36,6 +35,99 @@ const SCAN_CONTEXT_KEY = "trackflow_scan_context";
 const SCAN_RETURN_KEY = "trackflow_scan_return";
 
 type StatusOption = "booked" | "in_transit" | "out_for_delivery" | "delivered" | "returned";
+
+/**
+ * Analyze the cropped guide region for barcode/QR edge density, contrast, and sharpness,
+ * and apply adaptive contrast stretching + unsharp-mask sharpening for wrinkled or damaged labels.
+ */
+function analyzeAndEnhanceDamagedLabelROI(
+  ctx: CanvasRenderingContext2D,
+  w: number,
+  h: number
+): { hasLabelCandidate: boolean; isLowQuality: boolean } {
+  const imgData = ctx.getImageData(0, 0, w, h);
+  const data = imgData.data;
+  const pixelCount = w * h;
+  if (pixelCount === 0) return { hasLabelCandidate: false, isLowQuality: false };
+
+  const lum = new Uint8Array(pixelCount);
+  let minLum = 255;
+  let maxLum = 0;
+  let sumLum = 0;
+
+  for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+    const y = (data[i] * 77 + data[i + 1] * 150 + data[i + 2] * 29) >> 8;
+    lum[p] = y;
+    if (y < minLum) minLum = y;
+    if (y > maxLum) maxLum = y;
+    sumLum += y;
+  }
+
+  const contrastSpan = maxLum - minLum;
+  const meanLum = sumLum / pixelCount;
+
+  // Measure horizontal & vertical edge transitions inside center of guide ROI
+  let edgeTransitions = 0;
+  let gradientSum = 0;
+  let sampleCount = 0;
+
+  const startY = Math.floor(h * 0.2);
+  const endY = Math.floor(h * 0.8);
+  const startX = Math.floor(w * 0.15);
+  const endX = Math.floor(w * 0.85);
+
+  for (let y = startY; y < endY; y += 2) {
+    const rowOffset = y * w;
+    for (let x = startX; x < endX - 1; x += 2) {
+      const idx = rowOffset + x;
+      const diffX = Math.abs(lum[idx] - lum[idx + 1]);
+      const diffY = y + 1 < h ? Math.abs(lum[idx] - lum[idx + w]) : 0;
+      const grad = Math.max(diffX, diffY);
+      gradientSum += grad;
+      sampleCount++;
+      if (grad > 18) {
+        edgeTransitions++;
+      }
+    }
+  }
+
+  const edgeDensity = sampleCount > 0 ? edgeTransitions / sampleCount : 0;
+  const avgGradient = sampleCount > 0 ? gradientSum / sampleCount : 0;
+
+  // A label is likely inside the guide box if there are recurring bar/module transitions
+  const hasLabelCandidate = edgeDensity > 0.065 && contrastSpan > 28;
+  // It is low-quality / wrinkled / blurry / low-contrast if it has bar structure but weak sharpness or uneven contrast
+  const isLowQuality =
+    hasLabelCandidate && (avgGradient < 26 || contrastSpan < 145 || meanLum < 70 || meanLum > 205);
+
+  // Enhance the canvas in-place using contrast stretching + 3x3 sharpening + adaptive threshold blend
+  const range = Math.max(1, maxLum - minLum);
+  const stretched = new Uint8ClampedArray(pixelCount);
+  for (let p = 0; p < pixelCount; p++) {
+    stretched[p] = ((lum[p] - minLum) * 255) / range;
+  }
+
+  for (let y = 1; y < h - 1; y++) {
+    const row = y * w;
+    for (let x = 1; x < w - 1; x++) {
+      const p = row + x;
+      const center = stretched[p];
+      const neighbors =
+        (stretched[p - 1] + stretched[p + 1] + stretched[p - w] + stretched[p + w]) >> 2;
+      // Unsharp mask boost for wrinkled / creased barcode bars
+      const sharpened = Math.min(255, Math.max(0, center + ((center - neighbors) * 2)));
+      // Soft high-contrast S-curve for damaged/faded ink
+      const finalVal = sharpened < 120 ? Math.max(0, sharpened - 22) : Math.min(255, sharpened + 22);
+      const idx = p * 4;
+      data[idx] = finalVal;
+      data[idx + 1] = finalVal;
+      data[idx + 2] = finalVal;
+    }
+  }
+
+  ctx.putImageData(imgData, 0, 0);
+  return { hasLabelCandidate, isLowQuality };
+}
 
 export default function DedicatedCameraScanPage() {
   const router = useRouter();
@@ -63,6 +155,20 @@ export default function DedicatedCameraScanPage() {
     code: string;
     carrier: string;
   } | null>(null);
+
+  // Adaptive Auto-Zoom & Focus Sensitivity state for wrinkled / damaged labels
+  const [isAutoZoomFocusEnabled, setIsAutoZoomFocusEnabled] = useState<boolean>(true);
+  const [cameraZoomLevel, setCameraZoomLevel] = useState<number>(1.0);
+  const [isEnhancingDamagedLabel, setIsEnhancingDamagedLabel] = useState<boolean>(false);
+  const [focusSensitivityMode, setFocusSensitivityMode] = useState<"standard" | "macro_boost">("standard");
+  const hwZoomSupportedRef = useRef<{ supported: boolean; min: number; max: number }>({
+    supported: false,
+    min: 1,
+    max: 1,
+  });
+  const lowQualityStreakRef = useRef<number>(0);
+  const emptyFrameStreakRef = useRef<number>(0);
+  const currentZoomRef = useRef<number>(1.0);
 
   // Default Status & Carrier applied to newly scanned items (pill buttons — never opens mobile keyboard)
   const [defaultStatus, setDefaultStatus] = useState<StatusOption>(() => {
@@ -133,6 +239,47 @@ export default function DedicatedCameraScanPage() {
     }
   }, [stagedItems]);
 
+  // Apply hardware camera zoom & focus sensitivity constraints when available
+  const applyCameraZoomAndFocus = useCallback((nextZoom: number, boostFocus: boolean) => {
+    const clamped = Number(Math.min(2.4, Math.max(1.0, nextZoom)).toFixed(2));
+    currentZoomRef.current = clamped;
+    setCameraZoomLevel(clamped);
+    setFocusSensitivityMode(boostFocus ? "macro_boost" : "standard");
+
+    const stream = cameraStreamRef.current;
+    if (!stream) return;
+    const [track] = stream.getVideoTracks();
+    if (!track || typeof track.applyConstraints !== "function") return;
+
+    try {
+      const advancedConstraints: Record<string, unknown> = {};
+      if (hwZoomSupportedRef.current.supported) {
+        const { min, max } = hwZoomSupportedRef.current;
+        advancedConstraints.zoom = Math.min(max, Math.max(min, clamped));
+      }
+      const capabilities =
+        typeof track.getCapabilities === "function"
+          ? (track.getCapabilities() as Record<string, unknown>)
+          : {};
+      if (Array.isArray(capabilities.focusMode)) {
+        if (capabilities.focusMode.includes("continuous")) {
+          advancedConstraints.focusMode = "continuous";
+        } else if (capabilities.focusMode.includes("single-shot")) {
+          advancedConstraints.focusMode = "single-shot";
+        }
+      }
+      if (Object.keys(advancedConstraints).length > 0) {
+        track
+          .applyConstraints({
+            advanced: [advancedConstraints as MediaTrackConstraintSet],
+          })
+          .catch(() => {});
+      }
+    } catch {
+      // fallback to optical ROI crop zoom
+    }
+  }, []);
+
   // Stop camera stream helper
   const stopCameraStream = useCallback(() => {
     if (cameraStreamRef.current) {
@@ -146,7 +293,9 @@ export default function DedicatedCameraScanPage() {
     (isSuccess: boolean = true) => {
       if (!isSoundEnabled || typeof window === "undefined") return;
       try {
-        const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+        const AudioCtx =
+          window.AudioContext ||
+          (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
         if (!AudioCtx) return;
         const ctx = new AudioCtx();
         const osc = ctx.createOscillator();
@@ -244,6 +393,10 @@ export default function DedicatedCameraScanPage() {
       const cleanNum = code.trim().toUpperCase();
       if (!cleanNum) return;
 
+      // Reset low-quality streak after a successful decode
+      lowQualityStreakRef.current = 0;
+      setIsEnhancingDamagedLabel(false);
+
       const detected = autoDetectCourier(cleanNum);
       const chosenCourier =
         defaultCourierId !== "auto" && COURIER_MAP[defaultCourierId]
@@ -316,7 +469,7 @@ export default function DedicatedCameraScanPage() {
     [defaultCourierId, defaultStatus, playScanBeep, router, scanWorkflow, stopCameraStream]
   );
 
-  // Camera stream & multi-engine barcode / QR loop
+  // Camera stream & strictly Guide-Box-Cropped + Auto-Zoom/Focus Multi-Pass Decoder Loop
   useEffect(() => {
     let isCancelled = false;
     let scanIntervalId: NodeJS.Timeout | null = null;
@@ -357,7 +510,9 @@ export default function DedicatedCameraScanPage() {
     hints.set(DecodeHintType.TRY_HARDER, true);
     zxingReader.setHints(hints);
 
-    let nativeDetector: { detect: (source: HTMLCanvasElement) => Promise<Array<{ rawValue?: string }>> } | null = null;
+    let nativeDetector: {
+      detect: (source: HTMLCanvasElement) => Promise<Array<{ rawValue?: string }>>;
+    } | null = null;
     if (typeof window !== "undefined" && "BarcodeDetector" in window) {
       try {
         const NativeBarcodeDetector = (window as unknown as {
@@ -391,19 +546,66 @@ export default function DedicatedCameraScanPage() {
       }
     }
 
-    const onDetectedRaw = (rawVal: string) => {
+    const onDetectedRaw = (rawVal: string): boolean => {
       const code = extractCleanScannedCode(rawVal);
-      if (!code || code.length < 4) return;
+      if (!code || code.length < 4) return false;
 
       const now = Date.now();
       if (
         lastScannedRef.current.code === code &&
         now - lastScannedRef.current.timestamp < 2200
       ) {
-        return;
+        return true;
       }
       lastScannedRef.current = { code, timestamp: now };
       handleStageScannedCode(code);
+      return true;
+    };
+
+    const tryDecodeCanvas = async (canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D): Promise<boolean> => {
+      const w = canvas.width;
+      const h = canvas.height;
+
+      // 1. Native BarcodeDetector on strictly cropped Guide ROI
+      if (nativeDetector) {
+        try {
+          const detected = await nativeDetector.detect(canvas);
+          if (detected && detected.length > 0 && detected[0].rawValue) {
+            if (onDetectedRaw(detected[0].rawValue)) return true;
+          }
+        } catch {
+          // continue
+        }
+      }
+
+      // 2. jsQR for 2D QR codes inside Guide ROI
+      if (cameraGuideMode !== "barcode") {
+        try {
+          const imageData = ctx.getImageData(0, 0, w, h);
+          const qrResult = jsQR(imageData.data, w, h, {
+            inversionAttempts: "attemptBoth",
+          });
+          if (qrResult && qrResult.data) {
+            if (onDetectedRaw(qrResult.data)) return true;
+          }
+        } catch {
+          // continue
+        }
+      }
+
+      // 3. ZXing MultiFormatReader inside Guide ROI
+      try {
+        const luminanceSource = new HTMLCanvasElementLuminanceSource(canvas);
+        const binaryBitmap = new BinaryBitmap(new HybridBinarizer(luminanceSource));
+        const result = zxingReader.decodeWithState(binaryBitmap);
+        if (result && result.getText()) {
+          if (onDetectedRaw(result.getText())) return true;
+        }
+      } catch {
+        // continue
+      }
+
+      return false;
     };
 
     const startCamera = async () => {
@@ -418,8 +620,8 @@ export default function DedicatedCameraScanPage() {
           stream = await navigator.mediaDevices.getUserMedia({
             video: {
               facingMode: { ideal: "environment" },
-              width: { ideal: 1280 },
-              height: { ideal: 720 },
+              width: { ideal: 1920 },
+              height: { ideal: 1080 },
             },
             audio: false,
           });
@@ -431,6 +633,32 @@ export default function DedicatedCameraScanPage() {
         }
 
         cameraStreamRef.current = stream;
+
+        // Inspect hardware zoom & continuous autofocus capabilities
+        const [videoTrack] = stream.getVideoTracks();
+        if (videoTrack && typeof videoTrack.getCapabilities === "function") {
+          try {
+            const caps = videoTrack.getCapabilities() as Record<string, unknown>;
+            if (caps.zoom && typeof caps.zoom === "object") {
+              const z = caps.zoom as { min?: number; max?: number };
+              hwZoomSupportedRef.current = {
+                supported: true,
+                min: z.min ?? 1,
+                max: Math.min(z.max ?? 3, 3),
+              };
+            }
+            if (Array.isArray(caps.focusMode) && caps.focusMode.includes("continuous")) {
+              videoTrack
+                .applyConstraints({
+                  advanced: [{ focusMode: "continuous" } as unknown as MediaTrackConstraintSet],
+                })
+                .catch(() => {});
+            }
+          } catch {
+            // ignore capability inspection errors
+          }
+        }
+
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           await videoRef.current.play().catch(() => {});
@@ -445,56 +673,92 @@ export default function DedicatedCameraScanPage() {
           const video = videoRef.current;
           if (video.readyState < 2 || video.videoWidth === 0 || video.videoHeight === 0) return;
 
-          const canvas = scanCanvasRef.current;
-          const maxDim = 640;
-          const scale = Math.min(1, maxDim / Math.max(video.videoWidth, video.videoHeight));
-          const w = Math.max(1, Math.floor(video.videoWidth * scale));
-          const h = Math.max(1, Math.floor(video.videoHeight * scale));
+          const vw = video.videoWidth;
+          const vh = video.videoHeight;
 
-          if (canvas.width !== w) canvas.width = w;
-          if (canvas.height !== h) canvas.height = h;
+          // STRICT GUIDE-ONLY CROP: Calculate source rectangle matching the visual guide box
+          // Only barcodes/QR codes inside the guide frame are drawn onto the decoding canvas!
+          let roiWidthRatio = 0.76;
+          let roiHeightRatio = 0.48;
+          if (cameraGuideMode === "barcode") {
+            roiWidthRatio = 0.78;
+            roiHeightRatio = 0.28;
+          } else if (cameraGuideMode === "qr") {
+            const squareSide = Math.min(vw, vh) * 0.54;
+            roiWidthRatio = squareSide / vw;
+            roiHeightRatio = squareSide / vh;
+          }
+
+          // Apply optical/digital zoom factor when hardware zoom is not handling it
+          const effectiveDigitalZoom = hwZoomSupportedRef.current.supported
+            ? 1.0
+            : currentZoomRef.current;
+
+          const cropW = Math.max(64, Math.floor((vw * roiWidthRatio) / effectiveDigitalZoom));
+          const cropH = Math.max(64, Math.floor((vh * roiHeightRatio) / effectiveDigitalZoom));
+          const cropX = Math.max(0, Math.floor((vw - cropW) / 2));
+          const cropY = Math.max(0, Math.floor((vh - cropH) / 2));
+
+          const canvas = scanCanvasRef.current;
+          const maxTargetDim = 720;
+          const scale = Math.min(1.5, maxTargetDim / Math.max(cropW, cropH));
+          const targetW = Math.max(64, Math.floor(cropW * scale));
+          const targetH = Math.max(64, Math.floor(cropH * scale));
+
+          if (canvas.width !== targetW) canvas.width = targetW;
+          if (canvas.height !== targetH) canvas.height = targetH;
 
           const ctx = canvas.getContext("2d", { willReadFrequently: true });
           if (!ctx) return;
-          ctx.drawImage(video, 0, 0, w, h);
 
-          if (nativeDetector) {
-            try {
-              const detected = await nativeDetector.detect(canvas);
-              if (detected && detected.length > 0 && detected[0].rawValue) {
-                onDetectedRaw(detected[0].rawValue);
-                return;
+          // Draw ONLY the Guide Box ROI from the video feed
+          ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, targetW, targetH);
+
+          // PASS 1: Standard decode on the Guide Box ROI
+          const decodedPass1 = await tryDecodeCanvas(canvas, ctx);
+          if (decodedPass1) return;
+
+          // PASS 2: Analyze Guide ROI for low-quality / wrinkled / damaged label & apply enhancement
+          const { hasLabelCandidate, isLowQuality } = analyzeAndEnhanceDamagedLabelROI(
+            ctx,
+            targetW,
+            targetH
+          );
+
+          if (hasLabelCandidate) {
+            emptyFrameStreakRef.current = 0;
+            // Try decoding the contrast-stretched & sharpened ROI buffer
+            const decodedPass2 = await tryDecodeCanvas(canvas, ctx);
+            if (decodedPass2) return;
+
+            // If label is inside guide box but still undecodable (wrinkled/damaged/blurry), auto-adjust zoom & focus sensitivity
+            if (isAutoZoomFocusEnabled && isLowQuality) {
+              lowQualityStreakRef.current += 1;
+              setIsEnhancingDamagedLabel(true);
+
+              if (lowQualityStreakRef.current >= 3) {
+                lowQualityStreakRef.current = 0;
+                const currentZ = currentZoomRef.current;
+                const nextZ =
+                  currentZ < 1.3
+                    ? 1.35
+                    : currentZ < 1.65
+                    ? 1.7
+                    : currentZ < 2.0
+                    ? 2.0
+                    : 1.2;
+                applyCameraZoomAndFocus(nextZ, true);
               }
-            } catch {
-              // continue
             }
-          }
-
-          if (cameraGuideMode !== "barcode") {
-            try {
-              const imageData = ctx.getImageData(0, 0, w, h);
-              const qrResult = jsQR(imageData.data, w, h, {
-                inversionAttempts: "attemptBoth",
-              });
-              if (qrResult && qrResult.data) {
-                onDetectedRaw(qrResult.data);
-                return;
+          } else {
+            emptyFrameStreakRef.current += 1;
+            if (emptyFrameStreakRef.current >= 8) {
+              setIsEnhancingDamagedLabel(false);
+              // Smoothly relax auto-zoom back to 1.0x when no label is in the guide box
+              if (isAutoZoomFocusEnabled && currentZoomRef.current > 1.05) {
+                applyCameraZoomAndFocus(1.0, false);
               }
-            } catch {
-              // continue
             }
-          }
-
-          try {
-            const luminanceSource = new HTMLCanvasElementLuminanceSource(canvas);
-            const binaryBitmap = new BinaryBitmap(new HybridBinarizer(luminanceSource));
-            const result = zxingReader.decodeWithState(binaryBitmap);
-            if (result && result.getText()) {
-              onDetectedRaw(result.getText());
-              return;
-            }
-          } catch {
-            // continue scanning
           }
         }, 180);
       } catch {
@@ -510,7 +774,13 @@ export default function DedicatedCameraScanPage() {
       isCancelled = true;
       if (scanIntervalId) clearInterval(scanIntervalId);
     };
-  }, [cameraGuideMode, extractCleanScannedCode, handleStageScannedCode]);
+  }, [
+    cameraGuideMode,
+    isAutoZoomFocusEnabled,
+    extractCleanScannedCode,
+    handleStageScannedCode,
+    applyCameraZoomAndFocus,
+  ]);
 
   // Cleanup camera tracks on unmount
   useEffect(() => {
@@ -656,7 +926,7 @@ export default function DedicatedCameraScanPage() {
                 </span>
               </div>
               <p className="text-[11px] text-slate-400 hidden sm:block">
-                Standalone zero-keyboard scanner — auto-detects shipping partner on every barcode or QR
+                Scans strictly inside guide box • Auto-adjusts zoom &amp; focus for wrinkled or damaged labels
               </p>
             </div>
           </div>
@@ -695,15 +965,19 @@ export default function DedicatedCameraScanPage() {
             className="rounded-xl border border-slate-800 bg-slate-950 p-2 text-slate-300 hover:text-white cursor-pointer"
             title={isSoundEnabled ? "Mute scan beep" : "Unmute scan beep"}
           >
-            {isSoundEnabled ? <Volume2 className="h-4 w-4 text-emerald-400" /> : <VolumeX className="h-4 w-4 text-slate-500" />}
+            {isSoundEnabled ? (
+              <Volume2 className="h-4 w-4 text-emerald-400" />
+            ) : (
+              <VolumeX className="h-4 w-4 text-slate-500" />
+            )}
           </button>
         </div>
       </header>
 
-      {/* Sub-Toolbar: Guide Mode (Barcode / QR / Both), Status Pill Selector, and Auto-Next */}
+      {/* Sub-Toolbar: Guide Mode (Barcode / QR / Both), Adaptive Auto-Zoom/Focus Controls, and Status Pills */}
       <div className="flex flex-wrap items-center justify-between gap-2 px-4 sm:px-6 py-2.5 bg-slate-900/80 border-b border-slate-800/80 shrink-0">
-        {/* Guide Mode Switcher */}
-        <div className="flex items-center gap-2">
+        {/* Left: Guide Mode Switcher + Auto-Zoom/Focus Controls */}
+        <div className="flex flex-wrap items-center gap-2">
           <div className="inline-flex items-center gap-1 rounded-xl bg-slate-950 p-1 border border-slate-800 text-xs font-bold">
             {(["barcode", "qr", "both"] as const).map((m) => (
               <button
@@ -719,6 +993,51 @@ export default function DedicatedCameraScanPage() {
                 {m === "qr" ? "QR" : m}
               </button>
             ))}
+          </div>
+
+          {/* Smart Auto-Zoom & Damaged Label Focus Enhancer Controls */}
+          <div className="inline-flex items-center gap-1 rounded-xl bg-slate-950 px-2 py-1 border border-slate-800 text-[11px] font-bold">
+            <button
+              type="button"
+              onClick={() => {
+                const next = !isAutoZoomFocusEnabled;
+                setIsAutoZoomFocusEnabled(next);
+                if (!next) {
+                  setIsEnhancingDamagedLabel(false);
+                }
+              }}
+              className={`inline-flex items-center gap-1 rounded-lg px-2 py-0.5 transition-colors cursor-pointer ${
+                isAutoZoomFocusEnabled
+                  ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40"
+                  : "text-slate-400 hover:text-slate-200"
+              }`}
+              title="Automatically boosts camera zoom and contrast/focus sensitivity when wrinkled or damaged barcodes are detected inside the guide frame"
+            >
+              <Focus className="h-3 w-3" />
+              <span>Auto-Focus/Zoom: {isAutoZoomFocusEnabled ? "ON" : "OFF"}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => applyCameraZoomAndFocus(cameraZoomLevel - 0.25, false)}
+              disabled={cameraZoomLevel <= 1.0}
+              className="p-1 rounded-md text-slate-400 hover:text-white hover:bg-slate-800 disabled:opacity-40 cursor-pointer"
+              title="Zoom out"
+            >
+              <ZoomOut className="h-3.5 w-3.5" />
+            </button>
+            <span className="font-mono text-[11px] font-black text-indigo-300 px-1 tabular-nums">
+              {cameraZoomLevel.toFixed(1)}x
+            </span>
+            <button
+              type="button"
+              onClick={() => applyCameraZoomAndFocus(cameraZoomLevel + 0.25, true)}
+              disabled={cameraZoomLevel >= 2.4}
+              className="p-1 rounded-md text-slate-400 hover:text-white hover:bg-slate-800 disabled:opacity-40 cursor-pointer"
+              title="Zoom in for damaged or small barcodes"
+            >
+              <ZoomIn className="h-3.5 w-3.5" />
+            </button>
           </div>
         </div>
 
@@ -796,43 +1115,82 @@ export default function DedicatedCameraScanPage() {
           className={`relative flex-1 rounded-2xl bg-black overflow-hidden flex items-center justify-center border-2 transition-colors duration-200 ${
             cameraScanSuccess
               ? "border-emerald-500 shadow-[0_0_30px_rgba(16,185,129,0.5)]"
+              : isEnhancingDamagedLabel
+              ? "border-amber-500/80 shadow-[0_0_20px_rgba(245,158,11,0.3)]"
               : "border-slate-800"
           }`}
         >
           <video
             ref={videoRef}
+            style={{
+              transform: hwZoomSupportedRef.current.supported
+                ? undefined
+                : `scale(${cameraZoomLevel})`,
+              transition: "transform 220ms ease-out",
+            }}
             className="absolute inset-0 w-full h-full object-cover"
             playsInline
             muted
             autoPlay
           />
 
+          {/* Top Floating HUD Badge: Active Guide-Only Zone & Damaged Label Enhancer Status */}
+          <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 pointer-events-none flex flex-wrap items-center justify-center gap-2 px-3">
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-slate-950/80 border border-slate-700/80 px-3 py-1 text-[11px] font-bold text-slate-200 backdrop-blur-xs">
+              <span className="h-2 w-2 rounded-full bg-red-500 animate-ping" />
+              <span>Scanning Strictly Inside Guide Frame</span>
+            </span>
+
+            {(isEnhancingDamagedLabel || cameraZoomLevel > 1.05) && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/90 px-3 py-1 text-[11px] font-black text-slate-950 shadow-md animate-in fade-in">
+                <Zap className="h-3 w-3 fill-slate-950" />
+                <span>
+                  {isEnhancingDamagedLabel
+                    ? `Low-Quality Label Detected • Auto-Zoom ${cameraZoomLevel.toFixed(1)}x & Focus Boost`
+                    : `Zoom ${cameraZoomLevel.toFixed(1)}x (${focusSensitivityMode === "macro_boost" ? "Macro Focus" : "Standard"})`}
+                </span>
+              </span>
+            )}
+          </div>
+
           {/* Horizontal RED Laser Scan Line */}
           {!cameraScanSuccess && (
             <div className="absolute left-6 right-6 sm:left-12 sm:right-12 h-0.5 bg-red-500 shadow-[0_0_16px_#ef4444] animate-pulse z-10 pointer-events-none" />
           )}
 
-          {/* Clean Guide Frame */}
+          {/* Clean Guide Frame with darkened outside mask so user clearly sees only inside guide is scanned */}
           {cameraGuideMode === "barcode" && (
             <div
-              className={`relative z-10 w-4/5 max-w-md h-32 rounded-2xl border-2 pointer-events-none transition-colors ${
-                cameraScanSuccess ? "border-emerald-400 bg-emerald-500/15" : "border-white/70"
+              className={`relative z-10 w-4/5 max-w-md h-32 rounded-2xl border-2 pointer-events-none shadow-[0_0_0_9999px_rgba(2,6,23,0.52)] transition-colors ${
+                cameraScanSuccess
+                  ? "border-emerald-400 bg-emerald-500/15"
+                  : isEnhancingDamagedLabel
+                  ? "border-amber-400"
+                  : "border-white/80"
               }`}
             />
           )}
 
           {cameraGuideMode === "qr" && (
             <div
-              className={`relative z-10 w-52 h-52 sm:w-60 sm:h-60 rounded-2xl border-2 pointer-events-none transition-colors ${
-                cameraScanSuccess ? "border-emerald-400 bg-emerald-500/15" : "border-white/70"
+              className={`relative z-10 w-52 h-52 sm:w-60 sm:h-60 rounded-2xl border-2 pointer-events-none shadow-[0_0_0_9999px_rgba(2,6,23,0.52)] transition-colors ${
+                cameraScanSuccess
+                  ? "border-emerald-400 bg-emerald-500/15"
+                  : isEnhancingDamagedLabel
+                  ? "border-amber-400"
+                  : "border-white/80"
               }`}
             />
           )}
 
           {cameraGuideMode === "both" && (
             <div
-              className={`relative z-10 w-4/5 max-w-lg h-48 sm:h-56 rounded-2xl border-2 pointer-events-none flex items-center justify-center transition-colors ${
-                cameraScanSuccess ? "border-emerald-400 bg-emerald-500/15" : "border-white/60"
+              className={`relative z-10 w-4/5 max-w-lg h-48 sm:h-56 rounded-2xl border-2 pointer-events-none shadow-[0_0_0_9999px_rgba(2,6,23,0.52)] flex items-center justify-center transition-colors ${
+                cameraScanSuccess
+                  ? "border-emerald-400 bg-emerald-500/15"
+                  : isEnhancingDamagedLabel
+                  ? "border-amber-400"
+                  : "border-white/75"
               }`}
             >
               <div className="w-36 h-36 rounded-xl border border-white/45" />
@@ -881,7 +1239,7 @@ export default function DedicatedCameraScanPage() {
                 </div>
               ) : (
                 <span className="text-xs text-slate-400">
-                  Align any barcode or QR code with the red laser line to scan automatically.
+                  Place barcode or QR inside the highlighted guide frame to scan automatically.
                 </span>
               )}
 
@@ -993,13 +1351,13 @@ export default function DedicatedCameraScanPage() {
                 className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 px-5 py-2.5 text-xs font-extrabold text-white shadow-md cursor-pointer"
               >
                 <Check className="h-4 w-4 stroke-[3]" />
-                <span>Confirm & Add to Dashboard ({stagedItems.length})</span>
+                <span>Confirm &amp; Add to Dashboard ({stagedItems.length})</span>
               </button>
             )}
           </div>
         ) : (
           <div className="text-xs text-slate-400 font-medium">
-            Point camera at any parcel barcode/QR to track immediately
+            Place parcel barcode or QR inside guide frame to track immediately
           </div>
         )}
       </footer>
@@ -1042,7 +1400,7 @@ export default function DedicatedCameraScanPage() {
                 onClick={handleConfirmDiscardAndExit}
                 className="rounded-xl bg-rose-600 hover:bg-rose-500 px-3.5 py-2 text-xs font-extrabold text-white cursor-pointer"
               >
-                Discard & Exit
+                Discard &amp; Exit
               </button>
             </div>
           </div>
