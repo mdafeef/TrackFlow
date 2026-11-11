@@ -31,8 +31,8 @@ export const metadata: Metadata = {
 
 export default function RootLayout({children}: {children: React.ReactNode}) {
   return (
-    <html lang="en" className={`${jakarta.variable} ${jetbrainsMono.variable} antialiased`} suppressHydrationWarning>
-      <body className="min-h-screen bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100 selection:bg-indigo-500 selection:text-white" suppressHydrationWarning>
+    <html lang="en" className={`${jakarta.variable} ${jetbrainsMono.variable} antialiased overflow-x-hidden max-w-full`} suppressHydrationWarning>
+      <body className="min-h-screen w-full max-w-full overflow-x-hidden bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100 selection:bg-indigo-500 selection:text-white" suppressHydrationWarning>
         {children}
       </body>
     </html>

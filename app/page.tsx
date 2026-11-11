@@ -445,7 +445,7 @@ function TrackingAppContent() {
   };
 
   return (
-    <div className="min-h-screen flex flex-col bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100 transition-colors">
+    <div className="min-h-screen w-full max-w-full overflow-x-hidden flex flex-col bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100 transition-colors">
       {/* Top Bar Contract */}
       <Navbar
         watchlistCount={watchlist.length}
@@ -479,16 +479,8 @@ function TrackingAppContent() {
             />
 
             {/* Scrolling Supported Partners Logo Ribbon */}
-            <PartnerMarquee
-              onSelectCourier={(courierId) => {
-                const cMeta = COURIER_MAP[courierId];
-                if (cMeta && cMeta.sampleNumber) {
-                  performSearch(cMeta.sampleNumber, courierId, undefined, true);
-                } else {
-                  performSearch("", courierId, undefined, true);
-                }
-              }}
-            />
+            <PartnerMarquee />
+
 
             {/* Streamlined Status Banner if activeResult is present outside modal or after modal dismissal */}
             {activeResult && !isLoading && !isTrackingModalOpen && (
@@ -510,9 +502,15 @@ function TrackingAppContent() {
                           · {activeResult.overallStatus.phrase}
                         </span>
                       </div>
-                      <p className="text-xs text-slate-500 dark:text-slate-400">
-                        Route: {activeResult.bookingDetails.origin.split(",")[0]} → {activeResult.bookingDetails.destination.split(",")[0]}
-                      </p>
+                      {activeResult.bookingDetails.origin && activeResult.bookingDetails.destination ? (
+                        <p className="text-xs text-slate-500 dark:text-slate-400">
+                          {activeResult.bookingDetails.origin.split(",")[0]} → {activeResult.bookingDetails.destination.split(",")[0]}
+                        </p>
+                      ) : (
+                        <p className="text-xs text-slate-500 dark:text-slate-400">
+                          Last scan: {activeResult.overallStatus.timestamp}
+                        </p>
+                      )}
                     </div>
                   </div>
                   <div className="flex items-center gap-2 w-full sm:w-auto">
@@ -542,22 +540,25 @@ function TrackingAppContent() {
 
             {/* 20+ Supported Couriers Directory */}
             <CourierDirectory
-              onSelectCourierSample={(num, cId) => {
-                if (num) {
-                  performSearch(num, cId, undefined, true);
-                } else {
-                  const el = document.getElementById("track-section");
-                  if (el) {
-                    el.scrollIntoView({ behavior: "smooth", block: "start" });
-                  }
-                  setTimeout(() => {
-                    const inputEl = document.getElementById("tracking-input") as HTMLInputElement | null;
-                    if (inputEl) {
-                      inputEl.focus();
-                      inputEl.select();
-                    }
-                  }, 200);
+              onSelectCourier={(courierId) => {
+                const el = document.getElementById("track-section");
+                if (el) {
+                  el.scrollIntoView({ behavior: "smooth", block: "start" });
                 }
+                if (typeof window !== "undefined") {
+                  window.dispatchEvent(
+                    new CustomEvent("trackflow:set-courier", {
+                      detail: { courierId },
+                    })
+                  );
+                }
+                setTimeout(() => {
+                  const inputEl = document.getElementById("tracking-input") as HTMLInputElement | null;
+                  if (inputEl) {
+                    inputEl.focus();
+                    inputEl.select();
+                  }
+                }, 200);
               }}
             />
 

@@ -140,33 +140,39 @@ export function TrackingModalPopup({
     }
   };
 
-  // Helper to extract clean PIN and location
-  const parsePinLocation = (text?: string, fallbackPin = "680003", fallbackName = "Origin Hub") => {
-    if (!text) return { pin: fallbackPin, name: fallbackName };
+  // Helper to extract clean PIN and location without fake fallbacks
+  const parsePinLocation = (text?: string) => {
+    if (!text || text === "N/A" || text === "Null" || text.includes("Destination Hub") || text.includes("Origin Facility")) {
+      return null;
+    }
     const pinMatch = text.match(/\b\d{6}\b/);
-    const pin = pinMatch ? pinMatch[0] : fallbackPin;
+    const pin = pinMatch ? pinMatch[0] : "";
     const name = text
       .replace(/\(\d{6}\)/g, "")
       .replace(/\b\d{6}\b/g, "")
       .replace(/^[,\s-]+|[,\s-]+$/g, "")
       .trim();
 
+    if (!name && !pin) return null;
     return {
       pin,
-      name: name || fallbackName,
+      name: name || (pin ? `PIN ${pin}` : ""),
     };
   };
 
-  const originParsed = parsePinLocation(
-    trackingResult?.bookingDetails?.origin,
-    "680003",
-    "Ayyanthole SO"
-  );
-  const destParsed = parsePinLocation(
-    trackingResult?.bookingDetails?.destination,
-    "679579",
-    "Veliankode SO"
-  );
+  const originParsed = parsePinLocation(trackingResult?.bookingDetails?.origin);
+  const destParsed = parsePinLocation(trackingResult?.bookingDetails?.destination);
+
+  // Clean status description to eliminate marketing filler phrases
+  const rawStatusMessage = trackingResult?.estimatedDelivery?.message || "";
+  const isGenericFiller =
+    rawStatusMessage.toLowerCase().includes("moving on schedule across") ||
+    rawStatusMessage.toLowerCase().includes("moving on schedule");
+  const cleanStatusDescription = isGenericFiller
+    ? trackingResult?.activities?.[0]?.statusText
+      ? `${trackingResult.activities[0].statusText}${trackingResult.activities[0].facility ? ` at ${trackingResult.activities[0].facility}` : ""}`
+      : `Active shipment with ${trackingResult?.courier?.name || "carrier"}.`
+    : rawStatusMessage;
 
   // Distinct icons and styles for each logistics checkpoint
   const getCheckpointStyle = (act: TrackingActivity) => {
@@ -470,7 +476,7 @@ export function TrackingModalPopup({
                       </h2>
 
                       <p className="mt-1 text-xs sm:text-sm text-slate-600 dark:text-slate-300 max-w-xl font-medium">
-                        {trackingResult.estimatedDelivery.message}
+                        {cleanStatusDescription}
                       </p>
                     </div>
                   </div>
@@ -496,110 +502,63 @@ export function TrackingModalPopup({
                     </button>
                   </div>
                 </div>
-
-                {/* Sub Route Bar inside Banner - Clean, no tariff, no weight */}
-                <div className="mt-5 pt-4 border-t border-slate-200/70 dark:border-slate-800/80 flex flex-wrap items-center justify-between gap-3 text-xs">
-                  <div className="flex flex-wrap items-center gap-2 text-slate-700 dark:text-slate-300">
-                    <span className="font-extrabold text-slate-900 dark:text-white">Route:</span>
-                    <span className="font-semibold text-emerald-700 dark:text-emerald-400">{destParsed.name} (PIN {destParsed.pin})</span>
-                    <span className="text-slate-400">←</span>
-                    <span className="font-semibold">{originParsed.name} (PIN {originParsed.pin})</span>
-                  </div>
-                  <div className="font-medium text-slate-500 dark:text-slate-400">
-                    Article: <span className="font-bold text-slate-800 dark:text-slate-200">{trackingResult.bookingDetails.articleType || "Standard Consignment"}</span>
-                  </div>
-                </div>
               </div>
 
-              {/* ============================================================== */}
-              {/* SPECIFICATION CARDS: DESTINATION TOP, STARTING BOTTOM           */}
-              {/* ============================================================== */}
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                {/* 1. Destination Hub Card (TOP) */}
-                <div className="relative overflow-hidden rounded-2xl border border-slate-200/90 bg-white/90 p-4 shadow-2xs backdrop-blur-xs transition-all hover:border-emerald-300 dark:border-slate-800 dark:bg-slate-850/90 dark:hover:border-emerald-800">
-                  <div className="flex items-start gap-3">
-                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-emerald-50 text-emerald-600 dark:bg-emerald-950/70 dark:text-emerald-400 ring-1 ring-emerald-500/15">
-                      <MapPin className="h-5 w-5 stroke-[2.2]" />
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center justify-between gap-1">
-                        <span className="text-[10px] font-extrabold uppercase tracking-wider text-emerald-600 dark:text-emerald-400">
-                          Destination Hub
-                        </span>
-                        <span className="rounded-md bg-emerald-50 px-2 py-0.5 text-[10px] font-mono font-bold text-emerald-700 dark:bg-emerald-950/80 dark:text-emerald-300">
-                          PIN {destParsed.pin}
+              {/* Minimal Informative Details Strip (Only when real origin/destination/service exist) */}
+              {(originParsed?.name || destParsed?.name || (trackingResult.bookingDetails.articleType && trackingResult.bookingDetails.articleType !== "Standard Express Parcel")) && (
+                <div className="rounded-2xl border border-slate-200/80 bg-slate-50/70 p-3.5 px-4.5 dark:border-slate-800/80 dark:bg-slate-850/60 flex flex-wrap items-center justify-between gap-3 text-xs">
+                  <div className="flex flex-wrap items-center gap-4 text-slate-600 dark:text-slate-300">
+                    {originParsed?.name && (
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-slate-400 font-medium">Origin:</span>
+                        <span className="font-bold text-slate-900 dark:text-white">
+                          {originParsed.name} {originParsed.pin ? `(${originParsed.pin})` : ""}
                         </span>
                       </div>
-                      <div className="mt-1 text-sm font-extrabold text-slate-900 dark:text-white truncate">
-                        {destParsed.name}
+                    )}
+                    {destParsed?.name && (
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-slate-400 font-medium">Destination:</span>
+                        <span className="font-bold text-slate-900 dark:text-white">
+                          {destParsed.name} {destParsed.pin ? `(${destParsed.pin})` : ""}
+                        </span>
                       </div>
-                      <div className="mt-1 text-[11px] text-slate-500 dark:text-slate-400 font-medium">
-                        Delivery Post Office
+                    )}
+                    {trackingResult.bookingDetails.articleType && trackingResult.bookingDetails.articleType !== "Standard Express Parcel" && (
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-slate-400 font-medium">Service:</span>
+                        <span className="font-bold text-slate-800 dark:text-slate-200">
+                          {trackingResult.bookingDetails.articleType}
+                        </span>
                       </div>
-                    </div>
+                    )}
                   </div>
+                  {trackingResult.bookingDetails.bookedAt && trackingResult.bookingDetails.bookedAt !== "N/A" && (
+                    <div className="text-[11px] text-slate-400 font-mono">
+                      Booked: {trackingResult.bookingDetails.bookedAt}
+                    </div>
+                  )}
                 </div>
+              )}
 
-                {/* 2. Origin Facility Card (STARTING / BOTTOM) */}
-                <div className="relative overflow-hidden rounded-2xl border border-slate-200/90 bg-white/90 p-4 shadow-2xs backdrop-blur-xs transition-all hover:border-indigo-300 dark:border-slate-800 dark:bg-slate-850/90 dark:hover:border-indigo-800">
-                  <div className="flex items-start gap-3">
-                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-indigo-50 text-indigo-600 dark:bg-indigo-950/70 dark:text-indigo-400 ring-1 ring-indigo-500/15">
-                      <Building2 className="h-5 w-5 stroke-[2.2]" />
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center justify-between gap-1">
-                        <span className="text-[10px] font-extrabold uppercase tracking-wider text-indigo-600 dark:text-indigo-400">
-                          Starting Facility (Origin)
-                        </span>
-                        <span className="rounded-md bg-indigo-50 px-2 py-0.5 text-[10px] font-mono font-bold text-indigo-700 dark:bg-indigo-950/80 dark:text-indigo-300">
-                          PIN {originParsed.pin}
-                        </span>
-                      </div>
-                      <div className="mt-1 text-sm font-extrabold text-slate-900 dark:text-white truncate">
-                        {originParsed.name}
-                      </div>
-                      <div className="mt-1 text-[11px] text-slate-500 dark:text-slate-400 font-medium">
-                        {trackingResult.bookingDetails.bookedAt ? `Booked: ${trackingResult.bookingDetails.bookedAt}` : "Booking Hub"}
-                      </div>
-                    </div>
-                  </div>
+              {/* Movement History / Timeline Section */}
+              {chronologicalActivities.length === 0 ? (
+                <div className="rounded-3xl border border-slate-200/90 bg-white p-6 shadow-xs dark:border-slate-800 dark:bg-slate-900 text-center">
+                  <Package className="mx-auto h-7 w-7 text-slate-300 dark:text-slate-600 mb-2" />
+                  <p className="text-xs font-semibold text-slate-600 dark:text-slate-300">
+                    No movement checkpoints recorded yet
+                  </p>
+                  <p className="text-[11px] text-slate-400 mt-1">
+                    Checkpoint logs will appear as soon as the carrier registers transit scan events.
+                  </p>
                 </div>
-
-                {/* 3. Article Specs Card (No weight) */}
-                <div className="relative overflow-hidden rounded-2xl border border-slate-200/90 bg-white/90 p-4 shadow-2xs backdrop-blur-xs transition-all hover:border-violet-300 dark:border-slate-800 dark:bg-slate-850/90 dark:hover:border-violet-800">
-                  <div className="flex items-start gap-3">
-                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-violet-50 text-violet-600 dark:bg-violet-950/70 dark:text-violet-400 ring-1 ring-violet-500/15">
-                      <Package className="h-5 w-5 stroke-[2.2]" />
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center justify-between gap-1">
-                        <span className="text-[10px] font-extrabold uppercase tracking-wider text-violet-600 dark:text-violet-400">
-                          Article Specs
-                        </span>
-                        <span className="rounded-md bg-violet-50 px-2 py-0.5 text-[10px] font-mono font-bold text-violet-700 dark:bg-violet-950/80 dark:text-violet-300">
-                          Standard Express
-                        </span>
-                      </div>
-                      <div className="mt-1 text-sm font-extrabold text-slate-900 dark:text-white truncate">
-                        {trackingResult.bookingDetails.articleType || "Registered Consignment"}
-                      </div>
-                      <div className="mt-1 text-[11px] text-slate-500 dark:text-slate-400 font-medium">
-                        Priority Surface / Air Network
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* ============================================================== */}
-              {/* VERTICAL HIGHWAY TIMELINE WITH SMOOTH SCROLLING TRUCK          */}
-              {/* ============================================================== */}
-              <div className="rounded-3xl border border-slate-200/90 bg-white p-5 sm:p-6 shadow-xs dark:border-slate-800 dark:bg-slate-850">
+              ) : (
+                <div className="rounded-3xl border border-slate-200/90 bg-white p-5 sm:p-6 shadow-xs dark:border-slate-800 dark:bg-slate-900">
                 <div className="flex items-center justify-between mb-5">
                   <div className="flex items-center gap-2">
                     <Clock className="h-4 w-4 text-indigo-600 stroke-[2.4]" />
                     <h4 className="text-base font-extrabold text-slate-900 dark:text-white">
-                      Complete History
+                       Complete History
                     </h4>
                   </div>
                   <span className="text-xs font-mono font-bold text-slate-500">
@@ -631,19 +590,19 @@ export function TrackingModalPopup({
                                     className={`animate-ping absolute inline-flex h-full w-full rounded-full ${style.dotColor} opacity-40`}
                                   />
                                   <span
-                                    className={`relative inline-flex rounded-full h-3.5 w-3.5 ${style.dotColor} ring-4 ring-white dark:ring-slate-850 shadow-xs`}
+                                    className={`relative inline-flex rounded-full h-3.5 w-3.5 ${style.dotColor} ring-4 ring-white dark:ring-slate-900 shadow-xs`}
                                   />
                                 </span>
                               ) : (
                                 <span
-                                  className={`relative inline-flex rounded-full h-3 w-3 ${style.dotColor} ring-4 ring-white dark:ring-slate-850 shadow-xs`}
+                                  className={`relative inline-flex rounded-full h-3 w-3 ${style.dotColor} ring-4 ring-white dark:ring-slate-900 shadow-xs`}
                                 />
                               )}
                             </div>
                           </div>
 
                           {/* Event Card on the right */}
-                          <div className="flex-1 min-w-0 rounded-2xl border border-slate-200/90 bg-white p-4 shadow-2xs hover:border-slate-300 dark:border-slate-800 dark:bg-slate-850/90 dark:hover:border-slate-700 transition-all">
+                          <div className="flex-1 min-w-0 rounded-2xl border border-slate-200/90 bg-white p-4 shadow-2xs hover:border-slate-300 dark:border-slate-800 dark:bg-slate-900/90 dark:hover:border-slate-700 transition-all">
                             {/* Event Header with Distinct Status Badge */}
                             <div className="flex flex-wrap items-center justify-between gap-1.5">
                               <div className="flex items-center gap-2">
@@ -699,7 +658,7 @@ export function TrackingModalPopup({
                     <button
                       type="button"
                       onClick={handleToggleExpand}
-                      className="w-full flex items-center justify-center gap-2 rounded-xl bg-slate-100 hover:bg-slate-200/90 text-slate-900 dark:bg-slate-800 dark:hover:bg-slate-750 dark:text-white py-3 px-4 text-xs font-extrabold transition-all shadow-2xs cursor-pointer"
+                      className="w-full flex items-center justify-center gap-2 rounded-xl bg-slate-100 hover:bg-slate-200/90 text-slate-900 dark:bg-slate-800 dark:hover:bg-slate-700 dark:text-white py-3 px-4 text-xs font-extrabold transition-all shadow-2xs cursor-pointer"
                     >
                       <span>
                         {isExpandedAll
@@ -715,6 +674,7 @@ export function TrackingModalPopup({
                   </div>
                 )}
               </div>
+              )}
 
               {/* FOOTER ACTIONS BAR */}
               <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-1 pb-2">

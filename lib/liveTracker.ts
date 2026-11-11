@@ -130,25 +130,27 @@ export function normalizeLiveTrackingData(
   });
 
   // Build clean locations
-  const originCity = booking.origin_city || booking.booked_at || booking.booking_office_name || "Origin Facility";
+  const originCity = booking.origin_city || booking.booked_at || booking.booking_office_name || "";
   const originPin = booking.origin_pincode || booking.booking_pin ? ` (${booking.origin_pincode || booking.booking_pin})` : "";
-  const originStr = `${originCity}${originPin}`;
+  const originStr = originCity ? `${originCity}${originPin}` : "";
 
   const destCity =
-    booking.destination_office_name || booking.destination_city || booking.delivery_location || "Destination Hub";
+    booking.destination_office_name || booking.destination_city || booking.delivery_location || "";
   const destPin = booking.destination_pincode ? ` (${booking.destination_pincode})` : "";
-  const destStr = destCity !== "Null" ? `${destCity}${destPin}` : "Destination Hub";
+  const destStr = destCity && destCity !== "Null" ? `${destCity}${destPin}` : "";
 
   // Build Route Milestones
   const routeMilestones: RouteMilestone[] = [];
-  routeMilestones.push({
-    id: "m-origin",
-    name: originCity,
-    city: originStr,
-    role: "origin",
-    status: "completed",
-    timestamp: formatDate(booking.booked_on || booking.booking_date),
-  });
+  if (originCity) {
+    routeMilestones.push({
+      id: "m-origin",
+      name: originCity,
+      city: originStr,
+      role: "origin",
+      status: "completed",
+      timestamp: formatDate(booking.booked_on || booking.booking_date),
+    });
+  }
 
   // Extract unique intermediate facilities
   const intermediateOffices = Array.from(
@@ -169,29 +171,31 @@ export function normalizeLiveTrackingData(
     });
   });
 
-  routeMilestones.push({
-    id: "m-dest",
-    name: destCity !== "Null" ? destCity : "Delivery Destination",
-    city: destStr,
-    role: "destination",
-    status: overallStage === "delivered" ? "completed" : overallStage === "out_for_delivery" ? "active" : "upcoming",
-    timestamp: booking.delivery_confirmed_on
-      ? formatDate(booking.delivery_confirmed_on)
-      : booking.expected_delivery_date || "Expected Soon",
-  });
+  if (destCity && destCity !== "Null") {
+    routeMilestones.push({
+      id: "m-dest",
+      name: destCity,
+      city: destStr,
+      role: "destination",
+      status: overallStage === "delivered" ? "completed" : overallStage === "out_for_delivery" ? "active" : "upcoming",
+      timestamp: booking.delivery_confirmed_on
+        ? formatDate(booking.delivery_confirmed_on)
+        : booking.expected_delivery_date || "Expected Soon",
+    });
+  }
 
   // Weight and Tariff
   const weightStr = booking.weight_value
     ? `${booking.weight_value} ${parseInt(booking.weight_value) > 10 ? "grams" : "kg"}`
-    : "Standard Express";
+    : "";
 
-  const tariffStr = booking.tariff ? `₹ ${booking.tariff}` : "Prepaid";
+  const tariffStr = booking.tariff ? `₹ ${booking.tariff}` : "";
 
   const lastUpdated = activities[0]?.date ? `${activities[0].date} · ${activities[0].time}` : "Updated Live";
 
   // Estimated Delivery
   const isDelivered = overallStage === "delivered";
-  let etaDate = isDelivered ? "Delivered" : "Expected in 1-2 Business Days";
+  let etaDate = isDelivered ? "Delivered" : "In Transit";
   if (!isDelivered && booking.expected_delivery_date) {
     try {
       const ed = new Date(booking.expected_delivery_date);
@@ -229,8 +233,10 @@ export function normalizeLiveTrackingData(
       confidence: isDelivered ? "100%" : "95%",
       rangeDays: courier.avgTransitDays,
       message: isDelivered
-        ? `Delivered to recipient at ${destStr}${booking.delivery_confirmed_on ? ` on ${formatDate(booking.delivery_confirmed_on)}` : ""}.`
-        : `Consignment is moving on schedule across ${courier.name} logistics network.`,
+        ? `Delivered to recipient${destStr ? ` at ${destStr}` : ""}${booking.delivery_confirmed_on ? ` on ${formatDate(booking.delivery_confirmed_on)}` : ""}.`
+        : activities[0]?.statusText
+        ? `${activities[0].statusText}${activities[0].facility ? ` — ${activities[0].facility}` : ""}`
+        : `Consignment is in transit with ${courier.name}.`,
     },
     bookingDetails: {
       trackingNumber,

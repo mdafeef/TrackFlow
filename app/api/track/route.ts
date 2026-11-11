@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { autoDetectCourier, COURIER_MAP, COURIER_LIST } from "@/lib/couriers";
 import { fetchLiveTracking, normalizeLiveTrackingData } from "@/lib/liveTracker";
 import { generateSecureTrackingToken, verifySecureTrackingToken } from "@/lib/security";
-import { generateRealisticTracking } from "@/lib/realisticTracking";
 
 export interface TrackingActivity {
   id: string;
@@ -722,12 +721,26 @@ export async function GET(req: NextRequest) {
     try {
       const liveRaw = await fetchLiveTracking(trackingNumber, courierId);
       if (liveRaw && liveRaw.status === "OK" && liveRaw.data) {
-        const normalized = normalizeLiveTrackingData(liveRaw, trackingNumber, courier);
-        normalized.secureToken = secureToken;
-        return NextResponse.json(
-          { success: true, data: normalized, live: true },
-          { headers: responseHeaders }
+        const details = Array.isArray(liveRaw.data.details) ? liveRaw.data.details : [];
+        const booking = liveRaw.data.booking || {};
+        const hasRealEvents = details.length > 0;
+        const hasRealBooking = Boolean(
+          booking.booked_at ||
+            booking.booking_date ||
+            booking.origin_city ||
+            booking.destination_office_name ||
+            booking.origin_office_name
         );
+
+        // ONLY treat as success if real tracking checkpoints or booking records exist
+        if (hasRealEvents || hasRealBooking) {
+          const normalized = normalizeLiveTrackingData(liveRaw, trackingNumber, courier);
+          normalized.secureToken = secureToken;
+          return NextResponse.json(
+            { success: true, data: normalized, live: true },
+            { headers: responseHeaders }
+          );
+        }
       }
     } catch (liveErr) {
       console.warn("Live socket fetch attempt notice:", (liveErr as any)?.message || liveErr);
@@ -762,10 +775,27 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    // 3. Fallback to intelligent deterministic realistic tracking dataset
-    const realisticResult = generateRealisticTracking(trackingNumber, courier);
+    // 3. If live carrier network has no record and no verified manifest exists:
+    // Do NOT generate fake checkpoints, fake routes, or assumed details.
     return NextResponse.json(
-      { success: true, data: realisticResult, fallback: true },
+      {
+        success: false,
+        notTrackable: true,
+        code: "NO_DATA_AVAILABLE",
+        error: "No tracking details available for this consignment number.",
+        trackingNumber,
+        courierName: courier.name,
+        courierId: courier.id,
+        courier: {
+          id: courier.id,
+          name: courier.name,
+          shortName: courier.shortName,
+          supportPhone: courier.supportPhone,
+          supportEmail: courier.supportEmail,
+        },
+        message:
+          `No tracking records or manifest data found for consignment #${trackingNumber} with ${courier.name}. If this package was dispatched recently, please allow 12–24 hours for initial scan logs to be uploaded by the carrier, or verify the consignment number.`,
+      },
       { headers: responseHeaders }
     );
   } catch (err: any) {

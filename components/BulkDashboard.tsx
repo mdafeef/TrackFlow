@@ -33,6 +33,8 @@ import {
   Pencil,
   Database,
   FileJson,
+  Camera,
+  CameraOff,
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import { autoDetectCourier, COURIER_LIST, COURIER_MAP } from "@/lib/couriers";
@@ -196,7 +198,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
   const [statusFilter, setStatusFilter] = useState<"all" | "delivered" | "in_transit" | "out_for_delivery" | "returned" | "imported">("all");
 
   // Auto-check Settings
-  // Default interval: 5 minutes = 300 seconds
+  // Default interval: 15 minutes = 900 seconds (Default ON)
   const [isAutoCheckEnabled, setIsAutoCheckEnabled] = useState(() => {
     if (typeof window !== "undefined") {
       try {
@@ -217,7 +219,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
         }
       } catch {}
     }
-    return 300; // 5 minutes default
+    return 900; // 15 minutes default
   });
 
   const [secondsRemaining, setSecondsRemaining] = useState(() => {
@@ -230,36 +232,54 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
         }
       } catch {}
     }
-    return 300;
+    return 900;
   });
 
   const [isRefreshing, setIsRefreshing] = useState(false);
 
   // Modals state
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [isManualAddOpen, setIsManualAddOpen] = useState(false);
-  const [isScannerModalOpen, setIsScannerModalOpen] = useState(false);
+  const [isAddConsignmentsModalOpen, setIsAddConsignmentsModalOpen] = useState(false);
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
+
+  // Checkbox Selection & Multiple Delete state
+  const [selectedShipmentIds, setSelectedShipmentIds] = useState<string[]>([]);
+  const [isBulkDeleteModalOpen, setIsBulkDeleteModalOpen] = useState(false);
+
+  // Export Delivered Only & Quick Delete Exported Delivered Data
+  const [lastExportedDeliveredIds, setLastExportedDeliveredIds] = useState<string[]>([]);
+  const [isDeleteExportedModalOpen, setIsDeleteExportedModalOpen] = useState(false);
+  const [exportDeliveredSuccessMsg, setExportDeliveredSuccessMsg] = useState<string | null>(null);
+
+  // Delivered Notification state
+  const [deliveredNotification, setDeliveredNotification] = useState<{
+    count: number;
+    items: { id: string; trackingNumber: string; courierName: string; destination: string }[];
+    timestamp: string;
+  } | null>(null);
 
   // Settings custom interval input
   const [customMinutesInput, setCustomMinutesInput] = useState("");
 
-  // Manual Add Form state
-  const [manualAwb, setManualAwb] = useState("");
-  const [manualCourier, setManualCourier] = useState("speedpost");
-  const [isManualCourierDropdownOpen, setIsManualCourierDropdownOpen] = useState(false);
-  const [manualRecipient, setManualRecipient] = useState("");
-  const [manualDestination, setManualDestination] = useState("");
-  const [manualStatus, setManualStatus] = useState<"in_transit" | "out_for_delivery" | "delivered" | "returned">("in_transit");
-  const [manualReturnReason, setManualReturnReason] = useState("");
-  const [manualError, setManualError] = useState("");
-
-  // Scanner Modal state
-  const [continuousScanMode, setContinuousScanMode] = useState(true);
-  const [scannedBatch, setScannedBatch] = useState<string[]>([]);
-  const [scannerInputVal, setScannerInputVal] = useState("");
-  const [scannerRecentSuccess, setScannerRecentSuccess] = useState<string | null>(null);
-  const scannerInputRef = useRef<HTMLInputElement | null>(null);
+  // Unified Intake & Scanner Form state (Typing, Hardware Barcode Scanner & Camera QR/Barcode)
+  const [stagedConsignments, setStagedConsignments] = useState<BulkShipment[]>([]);
+  const [intakeAwb, setIntakeAwb] = useState("");
+  const [intakeCourier, setIntakeCourier] = useState("speedpost");
+  const [isIntakeCourierDropdownOpen, setIsIntakeCourierDropdownOpen] = useState(false);
+  const [intakeRecipient, setIntakeRecipient] = useState("");
+  const [intakeDestination, setIntakeDestination] = useState("");
+  const [intakeStatus, setIntakeStatus] = useState<"in_transit" | "out_for_delivery" | "delivered" | "returned">("in_transit");
+  const [isIntakeStatusDropdownOpen, setIsIntakeStatusDropdownOpen] = useState(false);
+  const [intakeReturnReason, setIntakeReturnReason] = useState("");
+  const [intakeError, setIntakeError] = useState("");
+  const [isAutoNextEnabled, setIsAutoNextEnabled] = useState(true);
+  const [recentStagedCode, setRecentStagedCode] = useState<string | null>(null);
+  const [isCameraActive, setIsCameraActive] = useState(false);
+  const [cameraGuideMode, setCameraGuideMode] = useState<"barcode" | "qr" | "both">("both");
+  const [cameraError, setCameraError] = useState<string | null>(null);
+  const intakeInputRef = useRef<HTMLInputElement | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const cameraStreamRef = useRef<MediaStream | null>(null);
 
   // Batch Wise Ingestion state
   const [selectedBatchId, setSelectedBatchId] = useState<string>("all");
@@ -357,15 +377,18 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
     setTimeout(() => {
       setShipments((prev) => {
         let updatedCount = 0;
+        const newlyDeliveredShipments: BulkShipment[] = [];
         const nextList = prev.map((item) => {
           if (item.status === "out_for_delivery" && updatedCount === 0) {
             updatedCount++;
-            return {
+            const deliveredItem = {
               ...item,
               status: "delivered" as const,
               statusText: "Delivered to Recipient",
               lastUpdated: "Just Now",
             };
+            newlyDeliveredShipments.push(deliveredItem);
+            return deliveredItem;
           }
           if (item.status === "in_transit" && updatedCount === 0) {
             updatedCount++;
@@ -379,9 +402,28 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
           return item;
         });
 
-        if (updatedCount > 0) {
+        if (newlyDeliveredShipments.length > 0) {
+          playChime(true);
+          setDeliveredNotification({
+            count: newlyDeliveredShipments.length,
+            items: newlyDeliveredShipments.map((d) => ({
+              id: d.id,
+              trackingNumber: d.trackingNumber,
+              courierName: d.courierName,
+              destination: d.destination,
+            })),
+            timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+          });
+
+          if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "granted") {
+            try {
+              new Notification("TrackFlow: Shipment Delivered!", {
+                body: `${newlyDeliveredShipments[0].trackingNumber} delivered at ${newlyDeliveredShipments[0].destination}`,
+              });
+            } catch {}
+          }
+        } else if (updatedCount > 0) {
           playChime(false);
-          // Removed notification banner: "Shipment status updated automatically!" per user instruction
         }
 
         try {
@@ -450,123 +492,219 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
     });
   };
 
-  // Manual Add Shipment Submission
-  const handleManualAddSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    const cleanNum = manualAwb.trim().toUpperCase();
-    if (!cleanNum) {
-      setManualError("Please enter a valid tracking or consignment number.");
+  // Stage single typed or barcode/QR scanned consignment into review list
+  const handleStageConsignment = useCallback((
+    awbToStage: string,
+    courierOverride?: string,
+    recipientOverride?: string,
+    destinationOverride?: string,
+    statusOverride?: "in_transit" | "out_for_delivery" | "delivered" | "returned",
+    returnReasonOverride?: string
+  ) => {
+    const cleanNum = awbToStage.trim().toUpperCase();
+    if (!cleanNum || cleanNum.length < 4) {
+      setIntakeError("Please enter or scan a valid consignment / AWB number (min 4 characters).");
       return;
     }
 
-    if (shipments.some((s) => s.trackingNumber === cleanNum)) {
-      setManualError("This tracking number already exists in your dashboard.");
+    // Check duplicate in currently staged list
+    if (stagedConsignments.some((s) => s.trackingNumber === cleanNum)) {
+      setIntakeError(`AWB ${cleanNum} is already in your staged review list.`);
       return;
     }
 
-    const courierMeta = COURIER_MAP[manualCourier] || autoDetectCourier(cleanNum) || COURIER_LIST[0];
+    setIntakeError("");
 
-    const newItem: BulkShipment = {
-      id: `bulk-manual-${Date.now()}`,
+    const detected = autoDetectCourier(cleanNum);
+    // If scanning device or camera passes code, auto detect carrier partner
+    const chosenCourier = courierOverride
+      ? (COURIER_MAP[courierOverride] || detected || COURIER_LIST[0])
+      : (detected || (intakeCourier && COURIER_MAP[intakeCourier]) || COURIER_LIST[0]);
+
+    if (detected && detected.id !== intakeCourier) {
+      setIntakeCourier(detected.id);
+    }
+
+    const isReturnedSim = cleanNum.includes("RT") || cleanNum.includes("RETURN");
+    const isDeliveredSim = cleanNum.endsWith("IN") && !isReturnedSim;
+    const finalStatus = statusOverride || (isReturnedSim ? "returned" : isDeliveredSim ? "delivered" : intakeStatus);
+
+    const newStaged: BulkShipment = {
+      id: `staged-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
       trackingNumber: cleanNum,
-      courierId: courierMeta.id,
-      courierName: courierMeta.name,
-      status: manualStatus,
+      courierId: chosenCourier.id,
+      courierName: chosenCourier.name,
+      status: finalStatus,
       statusText:
-        manualStatus === "delivered"
+        finalStatus === "delivered"
           ? "Delivered to Recipient"
-          : manualStatus === "out_for_delivery"
+          : finalStatus === "out_for_delivery"
           ? "Out for Delivery Today"
-          : manualStatus === "returned"
+          : finalStatus === "returned"
           ? "Returned to Shipper (RTO)"
           : "Active In-Transit Scan",
       origin: "Origin Facility",
-      destination: manualDestination.trim() || "Destination Center",
+      destination: destinationOverride?.trim() || intakeDestination.trim() || "Destination Center",
       articleType: "Registered Consignment",
       weight: "250 g",
-      lastUpdated: "Added Just Now",
-      lastLocation: manualStatus === "returned" ? "Return Hub" : "Regional Sort Hub",
-      recipientName: manualRecipient.trim() || "Addressee",
-      returnReason: manualStatus === "returned" ? manualReturnReason.trim() || "Delivery Attempt Failed" : undefined,
+      lastUpdated: "Staged Just Now",
+      lastLocation: finalStatus === "returned" ? "Return Hub" : "Regional Sort Hub",
+      recipientName: recipientOverride?.trim() || intakeRecipient.trim() || undefined,
+      returnReason: finalStatus === "returned" ? (returnReasonOverride || intakeReturnReason.trim() || "Delivery Attempt Failed") : undefined,
     };
 
-    saveShipments([newItem, ...shipments]);
-    playChime(false);
-
-    // Reset form
-    setManualAwb("");
-    setManualRecipient("");
-    setManualDestination("");
-    setManualStatus("in_transit");
-    setManualReturnReason("");
-    setManualError("");
-    setIsManualAddOpen(false);
-  };
-
-  // High-Speed Continuous Barcode / QR Code Ingestion
-  const processBarcodeScan = (awbCode: string) => {
-    const cleanCode = awbCode.trim().toUpperCase();
-    if (!cleanCode || cleanCode.length < 4) return;
-
-    // Check if already in list
-    const exists = shipments.find((s) => s.trackingNumber === cleanCode);
-    if (!exists) {
-      const detected = autoDetectCourier(cleanCode) || COURIER_LIST[0];
-      const isReturnedSim = cleanCode.includes("RT") || cleanCode.includes("RETURN");
-      const isDeliveredSim = cleanCode.endsWith("IN") && !isReturnedSim;
-
-      const newScanned: BulkShipment = {
-        id: `bulk-scan-${Date.now()}`,
-        trackingNumber: cleanCode,
-        courierId: detected.id,
-        courierName: detected.name,
-        status: isReturnedSim ? "returned" : isDeliveredSim ? "delivered" : "in_transit",
-        statusText: isReturnedSim
-          ? "Returned to Origin Hub (RTO)"
-          : isDeliveredSim
-          ? "Delivered to Recipient"
-          : "Scanned at Transit Station",
-        origin: "Origin Facility",
-        destination: "Destination Hub",
-        articleType: "Barcode Scanned Package",
-        weight: "350 g",
-        lastUpdated: "Scanned Just Now",
-        lastLocation: "Scanner Terminal",
-        returnReason: isReturnedSim ? "Customer Refused Delivery" : undefined,
-      };
-
-      saveShipments([newScanned, ...shipments]);
-    }
-
+    setStagedConsignments((prev) => [newStaged, ...prev]);
     playChime(true);
-    setScannedBatch((prev) => [cleanCode, ...prev.filter((c) => c !== cleanCode)]);
-    setScannerRecentSuccess(cleanCode);
-    setTimeout(() => setScannerRecentSuccess(null), 3000);
+    setRecentStagedCode(cleanNum);
+    setTimeout(() => setRecentStagedCode(null), 3000);
 
-    // Immediately reset input and preserve focus for next scan
-    setScannerInputVal("");
-    if (scannerInputRef.current) {
-      scannerInputRef.current.focus();
+    // Auto-Next handling: if ON, clear input and refocus for next scan
+    if (isAutoNextEnabled) {
+      setIntakeAwb("");
+      setIntakeRecipient("");
+      setIntakeDestination("");
+      setIntakeStatus("in_transit");
+      setIntakeReturnReason("");
+      if (intakeInputRef.current) {
+        intakeInputRef.current.focus();
+      }
+    } else {
+      if (intakeInputRef.current) {
+        intakeInputRef.current.select();
+      }
     }
-  };
+  }, [stagedConsignments, intakeCourier, intakeStatus, intakeDestination, intakeRecipient, intakeReturnReason, isAutoNextEnabled, playChime]);
 
-  // Handle hardware scanner or manual Enter in scanner modal
-  const handleScannerInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+  // Handle hardware scanner or manual Enter in input
+  const handleIntakeKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter") {
       e.preventDefault();
-      processBarcodeScan(scannerInputVal);
+      // If Auto-Next is OFF and this ID was already staged, pressing Enter advances to next scan
+      if (!isAutoNextEnabled && recentStagedCode && intakeAwb === recentStagedCode) {
+        setIntakeAwb("");
+        setRecentStagedCode(null);
+        intakeInputRef.current?.focus();
+        return;
+      }
+      handleStageConsignment(intakeAwb);
     }
   };
 
-  // Auto-focus scanner input when modal opens
+  // Remove single item from staged review list
+  const handleRemoveStagedItem = (id: string) => {
+    setStagedConsignments((prev) => prev.filter((item) => item.id !== id));
+  };
+
+  // Update courier for a staged item in review list
+  const handleUpdateStagedCourier = (id: string, newCourierId: string) => {
+    const courierMeta = COURIER_MAP[newCourierId];
+    if (!courierMeta) return;
+    setStagedConsignments((prev) =>
+      prev.map((item) =>
+        item.id === id ? { ...item, courierId: courierMeta.id, courierName: courierMeta.name } : item
+      )
+    );
+  };
+
+  // Confirm and Ingest all staged shipments into live dashboard
+  const handleConfirmIngestStaged = () => {
+    if (stagedConsignments.length === 0) return;
+
+    // Filter out items already in live shipments
+    const deduplicated = stagedConsignments.filter(
+      (s) => !shipments.some((live) => live.trackingNumber === s.trackingNumber)
+    );
+
+    if (deduplicated.length === 0) {
+      setIntakeError("All staged consignments already exist in your live dashboard.");
+      return;
+    }
+
+    const nextBatchNum = uniqueBatches.length + 1;
+    const now = new Date();
+    const timeStr = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const newBatchId = `batch-scan-${Date.now()}`;
+    const newBatchName = `Batch #${nextBatchNum} • Intake & Scanner`;
+    const importedAtStr = `Today, ${timeStr}`;
+
+    const tagged: BulkShipment[] = deduplicated.map((item) => ({
+      ...item,
+      isImported: true,
+      batchId: newBatchId,
+      batchName: newBatchName,
+      importedAt: importedAtStr,
+    }));
+
+    const updated = [...tagged, ...shipments];
+    saveShipments(updated);
+    playChime(false);
+
+    // Stop camera stream if active
+    if (cameraStreamRef.current) {
+      cameraStreamRef.current.getTracks().forEach((t) => t.stop());
+      cameraStreamRef.current = null;
+    }
+    setIsCameraActive(false);
+
+    // Reset and close
+    setStagedConsignments([]);
+    setIntakeAwb("");
+    setIsAddConsignmentsModalOpen(false);
+  };
+
+  // Toggle Camera Viewfinder
+  const handleToggleCamera = async () => {
+    if (isCameraActive) {
+      if (cameraStreamRef.current) {
+        cameraStreamRef.current.getTracks().forEach((t) => t.stop());
+        cameraStreamRef.current = null;
+      }
+      setIsCameraActive(false);
+      setCameraError(null);
+    } else {
+      setCameraError(null);
+      setIsCameraActive(true);
+      try {
+        if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+          const stream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: "environment" },
+          });
+          cameraStreamRef.current = stream;
+          if (videoRef.current) {
+            videoRef.current.srcObject = stream;
+            videoRef.current.play().catch(() => {});
+          }
+        }
+      } catch (err: unknown) {
+        console.warn("Camera access fallback to reticle simulator:", err);
+        setCameraError("Camera permission not granted or device camera unavailable. Use targeting reticle and sample scans below.");
+      }
+    }
+  };
+
+  // Close Add Consignments Modal
+  const handleCloseAddConsignmentsModal = () => {
+    if (cameraStreamRef.current) {
+      cameraStreamRef.current.getTracks().forEach((t) => t.stop());
+      cameraStreamRef.current = null;
+    }
+    setIsCameraActive(false);
+    setIsAddConsignmentsModalOpen(false);
+    setIsIntakeCourierDropdownOpen(false);
+    setIsIntakeStatusDropdownOpen(false);
+    setIntakeError("");
+    setRecentStagedCode(null);
+  };
+
+  // Auto-focus input when Add Consignments Modal opens
   useEffect(() => {
-    if (isScannerModalOpen) {
+    if (isAddConsignmentsModalOpen) {
       const timer = setTimeout(() => {
-        scannerInputRef.current?.focus();
+        intakeInputRef.current?.focus();
       }, 100);
       return () => clearTimeout(timer);
     }
-  }, [isScannerModalOpen]);
+  }, [isAddConsignmentsModalOpen]);
 
   // File Format Validation & Preview for Excel / Google Sheet files
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -709,44 +847,42 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
   };
 
   // Compute unique import batches
-  const uniqueBatches = useMemo(() => {
-    const map = new Map<
-      string,
-      {
-        id: string;
-        name: string;
-        importedAt: string;
-        count: number;
-        delivered: number;
-        inTransit: number;
-        returned: number;
-      }
-    >();
+  const batchMap = new Map<
+    string,
+    {
+      id: string;
+      name: string;
+      importedAt: string;
+      count: number;
+      delivered: number;
+      inTransit: number;
+      returned: number;
+    }
+  >();
 
-    shipments.forEach((s) => {
-      if (s.isImported && s.batchId) {
-        const existing = map.get(s.batchId);
-        if (existing) {
-          existing.count++;
-          if (s.status === "delivered") existing.delivered++;
-          else if (s.status === "returned") existing.returned++;
-          else existing.inTransit++;
-        } else {
-          map.set(s.batchId, {
-            id: s.batchId,
-            name: s.batchName || `Batch ${s.batchId}`,
-            importedAt: s.importedAt || "Imported Batch",
-            count: 1,
-            delivered: s.status === "delivered" ? 1 : 0,
-            inTransit: s.status !== "delivered" && s.status !== "returned" ? 1 : 0,
-            returned: s.status === "returned" ? 1 : 0,
-          });
-        }
+  shipments.forEach((s) => {
+    if (s.isImported && s.batchId) {
+      const existing = batchMap.get(s.batchId);
+      if (existing) {
+        existing.count++;
+        if (s.status === "delivered") existing.delivered++;
+        else if (s.status === "returned") existing.returned++;
+        else existing.inTransit++;
+      } else {
+        batchMap.set(s.batchId, {
+          id: s.batchId,
+          name: s.batchName || `Batch ${s.batchId}`,
+          importedAt: s.importedAt || "Imported Batch",
+          count: 1,
+          delivered: s.status === "delivered" ? 1 : 0,
+          inTransit: s.status !== "delivered" && s.status !== "returned" ? 1 : 0,
+          returned: s.status === "returned" ? 1 : 0,
+        });
       }
-    });
+    }
+  });
 
-    return Array.from(map.values());
-  }, [shipments]);
+  const uniqueBatches = Array.from(batchMap.values());
 
   // User confirms importing the previewed shipments
   const handleConfirmImport = () => {
@@ -1034,6 +1170,79 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
   const handleDeleteShipment = (id: string) => {
     const updated = shipments.filter((s) => s.id !== id);
     saveShipments(updated);
+    setSelectedShipmentIds((prev) => prev.filter((item) => item !== id));
+  };
+
+  // Toggle selection for all visible filtered shipments
+  const handleToggleSelectAll = () => {
+    if (selectedShipmentIds.length === filteredShipments.length && filteredShipments.length > 0) {
+      setSelectedShipmentIds([]);
+    } else {
+      setSelectedShipmentIds(filteredShipments.map((s) => s.id));
+    }
+  };
+
+  // Toggle selection for a single shipment
+  const handleToggleSelectRow = (id: string) => {
+    setSelectedShipmentIds((prev) =>
+      prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]
+    );
+  };
+
+  // Confirm multiple delete to prevent accidental deletion
+  const handleConfirmBulkDelete = () => {
+    if (selectedShipmentIds.length === 0) return;
+    const updated = shipments.filter((s) => !selectedShipmentIds.includes(s.id));
+    saveShipments(updated);
+    setSelectedShipmentIds([]);
+    setIsBulkDeleteModalOpen(false);
+    playChime(false);
+  };
+
+  // Export Delivered Data Only (.xlsx)
+  const handleExportDeliveredOnly = () => {
+    const deliveredShipments = shipments.filter((s) => s.status === "delivered");
+    if (deliveredShipments.length === 0) {
+      alert("No delivered consignments found to export.");
+      return;
+    }
+
+    const rows = deliveredShipments.map((s) => ({
+      "Tracking Number / AWB": s.trackingNumber,
+      "Courier Network": s.courierName,
+      "Status": "Delivered",
+      "Status Text": s.statusText,
+      "Origin": s.origin,
+      "Destination": s.destination,
+      "Article Type": s.articleType,
+      "Recipient Name": s.recipientName || "N/A",
+      "Last Updated": s.lastUpdated,
+      "Batch Name": s.batchName || "Standard",
+      "Exported At": new Date().toLocaleString(),
+    }));
+
+    const worksheet = XLSX.utils.json_to_sheet(rows);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Delivered Consignments");
+    const dateStr = new Date().toISOString().split("T")[0];
+    XLSX.writeFile(workbook, `TrackFlow_Delivered_${dateStr}.xlsx`);
+
+    const exportedIds = deliveredShipments.map((s) => s.id);
+    setLastExportedDeliveredIds(exportedIds);
+    setExportDeliveredSuccessMsg(`Exported ${deliveredShipments.length} delivered consignments.`);
+    playChime(true);
+    setTimeout(() => setExportDeliveredSuccessMsg(null), 8000);
+  };
+
+  // Quick Delete Exported Delivered Data Only
+  const handleQuickDeleteExportedDelivered = () => {
+    if (lastExportedDeliveredIds.length === 0) return;
+    const updated = shipments.filter((s) => !lastExportedDeliveredIds.includes(s.id));
+    saveShipments(updated);
+    setLastExportedDeliveredIds([]);
+    setIsDeleteExportedModalOpen(false);
+    setExportDeliveredSuccessMsg(null);
+    playChime(false);
   };
 
   const handleCopy = (id: string, text: string) => {
@@ -1080,6 +1289,58 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
   return (
     /* Dashboard Page Container with comfortable side margin gaps */
     <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 xl:px-10 py-8 space-y-6">
+      {/* SEPARATE BACKUP REVIEW MODE BANNER */}
+      {isReviewingSeparately && backupReviewData && (
+        <div className="rounded-3xl border-2 border-indigo-500 bg-indigo-50/90 dark:border-indigo-600 dark:bg-indigo-950/80 p-4 sm:p-5 shadow-md flex flex-col md:flex-row items-start md:items-center justify-between gap-4 animate-in fade-in">
+          <div className="flex items-start gap-3">
+            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-indigo-600 text-white shadow-xs">
+              <Database className="h-5 w-5" />
+            </span>
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="rounded-md bg-indigo-600 px-2 py-0.5 text-[10px] font-black uppercase text-white tracking-wider">
+                  Separate Review Mode Active
+                </span>
+                <span className="text-xs font-bold text-slate-900 dark:text-white font-mono">
+                  {backupReviewData.fileName}
+                </span>
+              </div>
+              <p className="text-xs text-indigo-950/80 dark:text-indigo-200/90 mt-1">
+                Viewing isolated backup snapshot with {backupReviewData.shipments.length} consignments (Exported: {backupReviewData.backupDate}). Live operational data is safe and unchanged.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 w-full md:w-auto">
+            <button
+              type="button"
+              onClick={handleMergeBackupIntoLive}
+              className="flex-1 md:flex-initial inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-3.5 py-2 text-xs font-bold text-white shadow-xs transition-colors cursor-pointer"
+              title="Add non-duplicate records from this backup to your live dashboard"
+            >
+              <Plus className="h-3.5 w-3.5" />
+              <span>Merge into Live</span>
+            </button>
+            <button
+              type="button"
+              onClick={handleRestoreBackupOverwrite}
+              className="flex-1 md:flex-initial inline-flex items-center justify-center gap-1.5 rounded-xl border border-rose-300 bg-rose-50 hover:bg-rose-100 text-rose-700 dark:border-rose-800 dark:bg-rose-950/70 dark:text-rose-300 px-3.5 py-2 text-xs font-bold transition-colors cursor-pointer"
+              title="Overwrite live consignments with this backup"
+            >
+              <span>Replace Live</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setIsReviewingSeparately(false)}
+              className="flex-1 md:flex-initial inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 px-3.5 py-2 text-xs font-bold transition-colors cursor-pointer"
+            >
+              <X className="h-3.5 w-3.5" />
+              <span>Exit Review</span>
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* ============================================================== */}
       {/* 1. TOP HEADER CONTROLS                                         */}
       {/* ============================================================== */}
@@ -1101,33 +1362,22 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
             </p>
           </div>
 
-          {/* Action Buttons: Add Manual ID, Scan Barcode / QR, Bulk Import */}
+          {/* Action Buttons: Unified Add Consignments & Bulk Import */}
           <div className="flex flex-wrap items-center gap-2.5">
-            {/* Add Tracking ID Manually */}
+            {/* Unified All-in-One Add Consignments (Manual, Hardware Barcode, Camera QR/Barcode) */}
             <button
               type="button"
               onClick={() => {
-                setManualError("");
-                setIsManualAddOpen(true);
+                setIntakeError("");
+                setIntakeAwb("");
+                setRecentStagedCode(null);
+                setIsAddConsignmentsModalOpen(true);
               }}
               className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-xs font-bold text-slate-700 hover:border-indigo-400 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 shadow-2xs transition-all cursor-pointer"
+              title="Add consignments manually, with barcode scanning devices, or via camera QR / barcode scanning"
             >
               <Plus className="h-4 w-4 text-indigo-600 dark:text-indigo-400 stroke-[2.4]" />
-              <span>Add ID Manually</span>
-            </button>
-
-            {/* Continuous Barcode & QR Scanner */}
-            <button
-              type="button"
-              onClick={() => {
-                setScannerInputVal("");
-                setScannedBatch([]);
-                setIsScannerModalOpen(true);
-              }}
-              className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-xs font-bold text-slate-700 hover:border-indigo-400 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 shadow-2xs transition-all cursor-pointer"
-            >
-              <ScanLine className="h-4 w-4 text-indigo-600 dark:text-indigo-400 stroke-[2.4]" />
-              <span>Scan Barcode / QR</span>
+              <span>Add Consignments</span>
             </button>
 
             {/* Bulk Import */}
@@ -1146,8 +1396,109 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
               <FileSpreadsheet className="h-4 w-4 stroke-[2.4]" />
               <span>Bulk Import</span>
             </button>
+
+            {/* Export Delivered Only */}
+            {deliveredCount > 0 && (
+              <button
+                type="button"
+                onClick={handleExportDeliveredOnly}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/70 dark:text-emerald-300 px-3.5 py-2.5 text-xs font-bold shadow-2xs transition-all cursor-pointer"
+                title="Export all delivered consignments to Excel (.xlsx)"
+              >
+                <Download className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
+                <span>Export Delivered ({deliveredCount})</span>
+              </button>
+            )}
+
+            {/* Quick Delete Exported Delivered (Only for delivered data) */}
+            {lastExportedDeliveredIds.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setIsDeleteExportedModalOpen(true)}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-rose-300 bg-rose-50 hover:bg-rose-100 text-rose-700 dark:border-rose-800 dark:bg-rose-950/70 dark:text-rose-300 px-3.5 py-2.5 text-xs font-bold shadow-2xs transition-all cursor-pointer animate-in fade-in"
+                title="Quick delete previously exported delivered consignments"
+              >
+                <Trash2 className="h-4 w-4 text-rose-600 dark:text-rose-400" />
+                <span>Delete Exported Delivered ({lastExportedDeliveredIds.length})</span>
+              </button>
+            )}
           </div>
         </div>
+
+        {/* Delivered Notification Banner */}
+        {deliveredNotification && (
+          <div className="mt-4 rounded-2xl border border-emerald-300 bg-emerald-50/90 dark:border-emerald-800 dark:bg-emerald-950/80 p-4 shadow-sm flex items-center justify-between gap-3 animate-in fade-in slide-in-from-top-1">
+            <div className="flex items-center gap-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-emerald-600 text-white shadow-xs shrink-0">
+                <CheckCircle2 className="h-5 w-5 stroke-[2.4]" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-black uppercase tracking-wider text-emerald-800 dark:text-emerald-300">
+                    Shipment Delivered Notification
+                  </span>
+                  <span className="text-[10px] font-mono text-emerald-600 dark:text-emerald-400">
+                    • {deliveredNotification.timestamp}
+                  </span>
+                </div>
+                <p className="text-xs font-bold text-slate-800 dark:text-slate-100 mt-0.5">
+                  {deliveredNotification.count === 1
+                    ? `Consignment #${deliveredNotification.items[0].trackingNumber} (${deliveredNotification.items[0].courierName}) was successfully delivered at ${deliveredNotification.items[0].destination}!`
+                    : `${deliveredNotification.count} Consignments were successfully delivered to addressees!`}
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => {
+                  setStatusFilter("delivered");
+                  setDeliveredNotification(null);
+                }}
+                className="rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 text-xs font-bold shadow-xs cursor-pointer transition-colors"
+              >
+                View in Delivered
+              </button>
+              <button
+                type="button"
+                onClick={() => setDeliveredNotification(null)}
+                className="rounded-lg p-1.5 text-emerald-700 hover:bg-emerald-100 dark:text-emerald-300 dark:hover:bg-emerald-900 cursor-pointer"
+                title="Dismiss notification"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Post-Export Delivered Notice & Quick Delete Action */}
+        {exportDeliveredSuccessMsg && (
+          <div className="mt-4 rounded-2xl border border-emerald-300 bg-emerald-50/90 dark:border-emerald-800 dark:bg-emerald-950/80 p-3.5 shadow-sm flex flex-wrap items-center justify-between gap-3 animate-in fade-in">
+            <div className="flex items-center gap-2 text-xs font-bold text-emerald-800 dark:text-emerald-300">
+              <Check className="h-4 w-4 text-emerald-600 stroke-[3]" />
+              <span>{exportDeliveredSuccessMsg}</span>
+            </div>
+            {lastExportedDeliveredIds.length > 0 && (
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setIsDeleteExportedModalOpen(true)}
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white px-3 py-1.5 text-xs font-bold shadow-xs cursor-pointer transition-colors"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                  <span>Quick Delete Exported Delivered ({lastExportedDeliveredIds.length})</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setExportDeliveredSuccessMsg(null)}
+                  className="text-xs text-emerald-700 hover:underline cursor-pointer"
+                >
+                  Dismiss
+                </button>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* ============================================================== */}
         {/* FRONT STATUS BAR: ONLY SHOW NEXT CHECK TIMER & SETTINGS GEAR   */}
@@ -1376,15 +1727,15 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
           )}
         </div>
 
-        {/* Status Filter Tabs */}
-        <div className="flex flex-wrap items-center gap-1 rounded-xl bg-slate-100 p-1 dark:bg-slate-800 self-start sm:self-auto">
+        {/* Status Filter Tabs - Reordered to Delivered, Out for Delivery, In Transit, Returned (RTO), Imported */}
+        <div className="flex items-center gap-1 overflow-x-auto max-w-full rounded-xl bg-slate-100 p-1 dark:bg-slate-800 self-start sm:self-auto scrollbar-none">
           <button
             type="button"
             onClick={() => {
               setStatusFilter("all");
               setSelectedBatchId("all");
             }}
-            className={`rounded-lg px-2.5 py-1 text-xs font-bold transition-all cursor-pointer ${
+            className={`rounded-lg px-2.5 py-1 text-xs font-bold transition-all cursor-pointer shrink-0 ${
               statusFilter === "all"
                 ? "bg-white text-indigo-600 shadow-xs dark:bg-slate-900 dark:text-indigo-400"
                 : "text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200"
@@ -1395,7 +1746,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
           <button
             type="button"
             onClick={() => setStatusFilter("delivered")}
-            className={`rounded-lg px-2.5 py-1 text-xs font-bold transition-all cursor-pointer ${
+            className={`rounded-lg px-2.5 py-1 text-xs font-bold transition-all cursor-pointer shrink-0 ${
               statusFilter === "delivered"
                 ? "bg-white text-emerald-600 shadow-xs dark:bg-slate-900 dark:text-emerald-400"
                 : "text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200"
@@ -1405,8 +1756,19 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
           </button>
           <button
             type="button"
+            onClick={() => setStatusFilter("out_for_delivery")}
+            className={`rounded-lg px-2.5 py-1 text-xs font-bold transition-all cursor-pointer shrink-0 ${
+              statusFilter === "out_for_delivery"
+                ? "bg-white text-amber-600 shadow-xs dark:bg-slate-900 dark:text-amber-400"
+                : "text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200"
+            }`}
+          >
+            Out for Delivery ({outCount})
+          </button>
+          <button
+            type="button"
             onClick={() => setStatusFilter("in_transit")}
-            className={`rounded-lg px-2.5 py-1 text-xs font-bold transition-all cursor-pointer ${
+            className={`rounded-lg px-2.5 py-1 text-xs font-bold transition-all cursor-pointer shrink-0 ${
               statusFilter === "in_transit"
                 ? "bg-white text-sky-600 shadow-xs dark:bg-slate-900 dark:text-sky-400"
                 : "text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200"
@@ -1416,30 +1778,19 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
           </button>
           <button
             type="button"
-            onClick={() => setStatusFilter("out_for_delivery")}
-            className={`rounded-lg px-2.5 py-1 text-xs font-bold transition-all cursor-pointer ${
-              statusFilter === "out_for_delivery"
-                ? "bg-white text-amber-600 shadow-xs dark:bg-slate-900 dark:text-amber-400"
-                : "text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200"
-            }`}
-          >
-            Out ({outCount})
-          </button>
-          <button
-            type="button"
             onClick={() => setStatusFilter("returned")}
-            className={`rounded-lg px-2.5 py-1 text-xs font-bold transition-all cursor-pointer ${
+            className={`rounded-lg px-2.5 py-1 text-xs font-bold transition-all cursor-pointer shrink-0 ${
               statusFilter === "returned"
                 ? "bg-white text-rose-600 shadow-xs dark:bg-slate-900 dark:text-rose-400"
                 : "text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200"
             }`}
           >
-            Returned ({returnedCount})
+            Returned (RTO) ({returnedCount})
           </button>
           <button
             type="button"
             onClick={() => setStatusFilter("imported")}
-            className={`rounded-lg px-2.5 py-1 text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+            className={`rounded-lg px-2.5 py-1 text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 shrink-0 ${
               statusFilter === "imported"
                 ? "bg-white text-emerald-700 shadow-xs dark:bg-slate-900 dark:text-emerald-400 font-extrabold"
                 : "text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200"
@@ -1518,34 +1869,77 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
             if (!activeBatch) return null;
             return (
               <div className="pt-3 border-t border-emerald-200/60 dark:border-emerald-900/60 flex flex-wrap items-center justify-between gap-3 text-xs">
-                <div className="flex flex-wrap items-center gap-2 sm:gap-3 text-slate-700 dark:text-slate-300">
-                  <span className="font-extrabold text-slate-900 dark:text-white">
-                    {activeBatch.name}
-                  </span>
-                  <span className="text-slate-400">•</span>
-                  <span className="text-slate-500 text-[11px]">
-                    Imported: {activeBatch.importedAt}
-                  </span>
-                  <span className="text-slate-400">•</span>
-                  <span className="inline-flex items-center gap-1 font-bold text-emerald-700 dark:text-emerald-400">
-                    <CheckCircle2 className="h-3.5 w-3.5" />
-                    {activeBatch.delivered} Delivered
-                  </span>
-                  <span className="text-slate-400">•</span>
-                  <span className="inline-flex items-center gap-1 font-bold text-sky-700 dark:text-sky-400">
-                    <Truck className="h-3.5 w-3.5" />
-                    {activeBatch.inTransit} In Transit
-                  </span>
-                  {activeBatch.returned > 0 && (
-                    <>
-                      <span className="text-slate-400">•</span>
-                      <span className="inline-flex items-center gap-1 font-bold text-rose-700 dark:text-rose-400">
-                        <RotateCcw className="h-3.5 w-3.5" />
-                        {activeBatch.returned} Returned
+                {editingBatchId === activeBatch.id ? (
+                  <div className="flex items-center gap-1.5 bg-white dark:bg-slate-900 px-2 py-1 rounded-xl border border-emerald-400 dark:border-emerald-600 shadow-xs">
+                    <input
+                      type="text"
+                      value={editingBatchName}
+                      onChange={(e) => setEditingBatchName(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") handleSaveBatchName(activeBatch.id);
+                        if (e.key === "Escape") handleCancelEditBatch();
+                      }}
+                      autoFocus
+                      className="text-xs font-bold text-slate-900 dark:text-white bg-transparent outline-none w-48 sm:w-64"
+                      placeholder="Enter new batch name..."
+                    />
+                    <button
+                      type="button"
+                      onClick={() => handleSaveBatchName(activeBatch.id)}
+                      className="p-1 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 transition-colors cursor-pointer"
+                      title="Save batch name"
+                    >
+                      <Check className="h-3 w-3" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleCancelEditBatch}
+                      className="p-1 rounded-lg bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-300 hover:bg-slate-300 dark:hover:bg-slate-600 transition-colors cursor-pointer"
+                      title="Cancel edit"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex flex-wrap items-center gap-2 sm:gap-3 text-slate-700 dark:text-slate-300">
+                    <div className="flex items-center gap-1.5">
+                      <span className="font-extrabold text-slate-900 dark:text-white">
+                        {activeBatch.name}
                       </span>
-                    </>
-                  )}
-                </div>
+                      <button
+                        type="button"
+                        onClick={() => handleStartEditBatch(activeBatch.id, activeBatch.name)}
+                        className="p-1 rounded-lg hover:bg-emerald-100 dark:hover:bg-emerald-900/60 text-slate-400 hover:text-emerald-700 dark:hover:text-emerald-300 transition-colors cursor-pointer"
+                        title="Edit batch name"
+                      >
+                        <Pencil className="h-3 w-3" />
+                      </button>
+                    </div>
+                    <span className="text-slate-400">•</span>
+                    <span className="text-slate-500 text-[11px]">
+                      Imported: {activeBatch.importedAt}
+                    </span>
+                    <span className="text-slate-400">•</span>
+                    <span className="inline-flex items-center gap-1 font-bold text-emerald-700 dark:text-emerald-400">
+                      <CheckCircle2 className="h-3.5 w-3.5" />
+                      {activeBatch.delivered} Delivered
+                    </span>
+                    <span className="text-slate-400">•</span>
+                    <span className="inline-flex items-center gap-1 font-bold text-sky-700 dark:text-sky-400">
+                      <Truck className="h-3.5 w-3.5" />
+                      {activeBatch.inTransit} In Transit
+                    </span>
+                    {activeBatch.returned > 0 && (
+                      <>
+                        <span className="text-slate-400">•</span>
+                        <span className="inline-flex items-center gap-1 font-bold text-rose-700 dark:text-rose-400">
+                          <RotateCcw className="h-3.5 w-3.5" />
+                          {activeBatch.returned} Returned
+                        </span>
+                      </>
+                    )}
+                  </div>
+                )}
 
                 <div className="flex items-center gap-2.5">
                   <button
@@ -1571,15 +1965,55 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
         </div>
       )}
 
+      {/* Multiple Selection Action Toolbar */}
+      {selectedShipmentIds.length > 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-indigo-50/90 dark:bg-indigo-950/80 border border-indigo-200 dark:border-indigo-800 p-3 sm:px-4 shadow-xs animate-in fade-in">
+          <div className="flex items-center gap-2.5">
+            <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-indigo-600 text-white text-xs font-bold tabular-nums">
+              {selectedShipmentIds.length}
+            </span>
+            <span className="text-xs font-bold text-indigo-900 dark:text-indigo-200">
+              {selectedShipmentIds.length} consignment{selectedShipmentIds.length > 1 ? "s" : ""} selected
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setSelectedShipmentIds([])}
+              className="rounded-xl px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-white dark:text-slate-300 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+            >
+              Clear Selection
+            </button>
+            <button
+              type="button"
+              onClick={() => setIsBulkDeleteModalOpen(true)}
+              className="inline-flex items-center gap-1.5 rounded-xl bg-rose-600 hover:bg-rose-700 px-3.5 py-1.5 text-xs font-bold text-white shadow-xs transition-colors cursor-pointer"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              <span>Delete Selected ({selectedShipmentIds.length})</span>
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* ============================================================== */}
       {/* 4. SHIPMENTS DATA TABLE                                        */}
       {/* ============================================================== */}
       <div className="overflow-hidden rounded-3xl border border-slate-200/90 bg-white shadow-xs dark:border-slate-800 dark:bg-slate-900">
         <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs">
+          <table className="w-full text-left text-xs min-w-[640px]">
             <thead className="bg-slate-50/80 text-[11px] font-extrabold uppercase tracking-wider text-slate-500 dark:bg-slate-800/60 dark:text-slate-400 border-b border-slate-200/80 dark:border-slate-800">
               <tr>
-                <th className="py-3.5 px-4 sm:px-6">Consignment / AWB</th>
+                <th className="py-3.5 pl-4 sm:pl-6 pr-2 w-10">
+                  <input
+                    type="checkbox"
+                    checked={filteredShipments.length > 0 && selectedShipmentIds.length === filteredShipments.length}
+                    onChange={handleToggleSelectAll}
+                    aria-label="Select all consignments"
+                    className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer accent-indigo-600"
+                  />
+                </th>
+                <th className="py-3.5 px-3">Consignment / AWB</th>
                 <th className="py-3.5 px-4">Courier Network</th>
                 <th className="py-3.5 px-4">Current Status</th>
                 <th className="py-3.5 px-4">Last Event</th>
@@ -1589,7 +2023,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
             <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
               {filteredShipments.length === 0 ? (
                 <tr>
-                  <td colSpan={5} className="py-12 text-center text-slate-400">
+                  <td colSpan={6} className="py-12 text-center text-slate-400">
                     <Package className="mx-auto h-8 w-8 text-slate-300 dark:text-slate-600 mb-2" />
                     <p className="text-sm font-semibold text-slate-600 dark:text-slate-300">
                       No shipments matching your filter
@@ -1603,10 +2037,25 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                 filteredShipments.map((item) => (
                   <tr
                     key={item.id}
-                    className="hover:bg-slate-50/80 dark:hover:bg-slate-800/40 transition-colors group"
+                    className={`transition-colors group ${
+                      selectedShipmentIds.includes(item.id)
+                        ? "bg-indigo-50/60 dark:bg-indigo-950/40"
+                        : "hover:bg-slate-50/80 dark:hover:bg-slate-800/40"
+                    }`}
                   >
+                    {/* Row Checkbox */}
+                    <td className="py-3.5 pl-4 sm:pl-6 pr-2 w-10">
+                      <input
+                        type="checkbox"
+                        checked={selectedShipmentIds.includes(item.id)}
+                        onChange={() => handleToggleSelectRow(item.id)}
+                        aria-label={`Select consignment ${item.trackingNumber}`}
+                        className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer accent-indigo-600"
+                      />
+                    </td>
+
                     {/* AWB & Copy */}
-                    <td className="py-3.5 px-4 sm:px-6">
+                    <td className="py-3.5 px-3">
                       <div className="flex items-center gap-2">
                         <button
                           type="button"
@@ -1629,18 +2078,13 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                           )}
                         </button>
                         {item.isImported && (
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setStatusFilter("imported");
-                              if (item.batchId) setSelectedBatchId(item.batchId);
-                            }}
-                            className="inline-flex items-center gap-1 rounded-md bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/80 dark:hover:bg-emerald-900/80 px-1.5 py-0.5 text-[9px] font-bold text-emerald-700 dark:text-emerald-300 border border-emerald-200/60 dark:border-emerald-800/60 transition-colors cursor-pointer"
-                            title={`Filter by ${item.batchName || "this batch"}`}
+                          <span
+                            className="inline-flex items-center gap-1 rounded-md bg-emerald-50 dark:bg-emerald-950/80 px-1.5 py-0.5 text-[9px] font-bold text-emerald-700 dark:text-emerald-300 border border-emerald-200/60 dark:border-emerald-800/60 select-none cursor-default"
+                            title={item.batchName || "Imported batch"}
                           >
                             <FileSpreadsheet className="h-2.5 w-2.5 text-emerald-600" />
                             <span>{item.batchName ? item.batchName.split(" • ")[0] : "Imported"}</span>
-                          </button>
+                          </span>
                         )}
                       </div>
                       <div className="text-[10px] text-slate-400 font-mono mt-0.5">
@@ -1795,9 +2239,9 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                 </label>
                 <div className="grid grid-cols-3 gap-2">
                   {[
-                    { label: "5 mins (Default)", sec: 300 },
+                    { label: "5 mins", sec: 300 },
                     { label: "10 mins", sec: 600 },
-                    { label: "15 mins", sec: 900 },
+                    { label: "15 mins (Default)", sec: 900 },
                     { label: "30 mins", sec: 1800 },
                     { label: "1 hour", sec: 3600 },
                   ].map((opt) => (
@@ -1853,6 +2297,49 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                 </p>
               </div>
 
+              {/* Data Backup & Recovery Section Inside Settings */}
+              <div className="rounded-2xl border border-slate-200 bg-slate-50/80 p-4 dark:border-slate-800 dark:bg-slate-800/50 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Database className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
+                    <span className="text-xs font-bold text-slate-900 dark:text-white">
+                      Data Backup & Recovery
+                    </span>
+                  </div>
+                  <span className="text-[10px] font-mono text-slate-400">
+                    {shipments.length} consignments
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                  Export complete data backup to JSON or import previous archives for review in a separate window.
+                </p>
+
+                <div className="flex flex-col sm:flex-row gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={handleExportBackup}
+                    className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:hover:bg-slate-700/80 px-3 py-2 text-xs font-bold text-slate-700 dark:text-slate-200 shadow-2xs transition-colors cursor-pointer"
+                  >
+                    <Download className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" />
+                    <span>Export JSON Backup</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsSettingsOpen(false);
+                      setBackupError(null);
+                      setBackupSuccessMsg(null);
+                      setIsBackupModalOpen(true);
+                    }}
+                    className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-3 py-2 text-xs font-bold text-white shadow-2xs transition-colors cursor-pointer"
+                  >
+                    <ExternalLink className="h-3.5 w-3.5" />
+                    <span>Import & Review Backup</span>
+                  </button>
+                </div>
+              </div>
+
               <button
                 type="button"
                 onClick={() => setIsSettingsOpen(false)}
@@ -1866,377 +2353,591 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
       )}
 
       {/* ============================================================== */}
-      {/* 6. MANUAL ADD TRACKING ID MODAL                                */}
+      {/* 6. UNIFIED ALL-IN-ONE CONSIGNMENT INTAKE & SCANNING STUDIO     */}
       {/* ============================================================== */}
-      {isManualAddOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs animate-in fade-in">
-          <div className="fixed inset-0" onClick={() => setIsManualAddOpen(false)} />
+      {isAddConsignmentsModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-0 sm:p-4 bg-slate-950/80 backdrop-blur-md animate-in fade-in">
+          <div className="fixed inset-0" onClick={handleCloseAddConsignmentsModal} />
           <div
-            className="relative z-10 w-full max-w-lg rounded-3xl border border-slate-200 bg-white p-6 shadow-2xl dark:border-slate-800 dark:bg-slate-900 text-left"
+            className="relative z-10 w-full h-full sm:h-auto sm:max-h-[92vh] sm:max-w-4xl flex flex-col rounded-none sm:rounded-3xl border-0 sm:border border-slate-200 bg-white shadow-2xl dark:border-slate-800 dark:bg-slate-900 text-left overflow-hidden"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-4">
-              <div className="flex items-center gap-2">
-                <Plus className="h-5 w-5 text-indigo-600" />
-                <h3 className="text-base font-bold text-slate-900 dark:text-white">
-                  Add Tracking ID Manually
-                </h3>
-              </div>
-              <button
-                type="button"
-                onClick={() => setIsManualAddOpen(false)}
-                className="rounded-xl p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800"
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-
-            <form onSubmit={handleManualAddSubmit} className="mt-5 space-y-4">
-              {/* Tracking Number Input */}
-              <div>
-                <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1">
-                  Consignment / AWB Number *
-                </label>
-                <input
-                  type="text"
-                  required
-                  placeholder="e.g. EL855948618IN or B4000211866"
-                  value={manualAwb}
-                  onChange={(e) => {
-                    const val = e.target.value.toUpperCase();
-                    setManualAwb(val);
-                    setManualError("");
-                    const detected = autoDetectCourier(val);
-                    if (detected) setManualCourier(detected.id);
-                  }}
-                  className="w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2 font-mono text-xs font-bold text-slate-900 uppercase tracking-wider focus:border-indigo-500 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
-                />
-              </div>
-
-              {/* Courier Selection */}
-              <div className="relative">
-                <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1">
-                  Courier Partner
-                </label>
-                <button
-                  type="button"
-                  onClick={() => setIsManualCourierDropdownOpen(!isManualCourierDropdownOpen)}
-                  className="w-full flex items-center justify-between rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-xs font-bold text-slate-900 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-white dark:hover:bg-slate-750 transition-colors shadow-2xs cursor-pointer"
-                >
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <span
-                      className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-lg text-[10px] font-black text-white ${
-                        COURIER_MAP[manualCourier]?.badgeColor || "bg-indigo-600"
-                      }`}
-                    >
-                      {(COURIER_MAP[manualCourier]?.shortName || "CP").slice(0, 3)}
-                    </span>
-                    <span className="truncate font-semibold">
-                      {COURIER_MAP[manualCourier]
-                        ? `${COURIER_MAP[manualCourier].name} (${COURIER_MAP[manualCourier].shortName})`
-                        : "Select Courier Partner"}
-                    </span>
-                  </div>
-                  <ChevronDown
-                    className={`h-4 w-4 text-slate-400 shrink-0 transition-transform ${
-                      isManualCourierDropdownOpen ? "rotate-180" : ""
-                    }`}
-                  />
-                </button>
-
-                {isManualCourierDropdownOpen && (
-                  <>
-                    <div
-                      className="fixed inset-0 z-40"
-                      onClick={() => setIsManualCourierDropdownOpen(false)}
-                    />
-                    <div className="absolute left-0 top-full mt-1.5 z-50 max-h-56 w-full overflow-y-auto rounded-xl border border-slate-200 bg-white p-1.5 shadow-2xl dark:border-slate-700 dark:bg-slate-800">
-                      {COURIER_LIST.map((c) => {
-                        const isSelected = manualCourier === c.id;
-                        return (
-                          <button
-                            key={c.id}
-                            type="button"
-                            onClick={() => {
-                              setManualCourier(c.id);
-                              setIsManualCourierDropdownOpen(false);
-                            }}
-                            className={`flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-xs font-medium transition-colors cursor-pointer ${
-                              isSelected
-                                ? "bg-indigo-50 text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300 font-bold"
-                                : "text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-700/60"
-                            }`}
-                          >
-                            <div className="flex items-center gap-2.5 min-w-0">
-                              <span
-                                className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[9px] font-black text-white ${c.badgeColor}`}
-                              >
-                                {c.shortName.slice(0, 3)}
-                              </span>
-                              <span className="truncate font-semibold">{c.name}</span>
-                              <span className="text-[10px] text-slate-400 font-mono">({c.shortName})</span>
-                            </div>
-                            {isSelected && (
-                              <Check className="h-4 w-4 text-indigo-600 dark:text-indigo-400 shrink-0" />
-                            )}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </>
-                )}
-              </div>
-
-              {/* Recipient & Destination Grid */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {/* Modal Header */}
+            <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 px-4 sm:px-6 py-3.5 sm:py-4 shrink-0">
+              <div className="flex items-center gap-2.5 sm:gap-3">
+                <span className="flex h-9 w-9 sm:h-10 sm:w-10 items-center justify-center rounded-2xl bg-indigo-50 text-indigo-600 dark:bg-indigo-950/70 dark:text-indigo-400 shadow-2xs shrink-0">
+                  <ScanLine className="h-5 w-5 stroke-[2.4]" />
+                </span>
                 <div>
-                  <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1">
-                    Recipient Name (Optional)
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="e.g. Rajesh Kumar"
-                    value={manualRecipient}
-                    onChange={(e) => setManualRecipient(e.target.value)}
-                    className="w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-900 focus:border-indigo-500 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
-                  />
-                </div>
-                <div>
-                  <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1">
-                    Destination City (Optional)
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="e.g. Coimbatore SO"
-                    value={manualDestination}
-                    onChange={(e) => setManualDestination(e.target.value)}
-                    className="w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-900 focus:border-indigo-500 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
-                  />
-                </div>
-              </div>
-
-              {/* Status Select (Including Returned/RTO option) */}
-              <div>
-                <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1">
-                  Shipment Status
-                </label>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                  {[
-                    { id: "in_transit", label: "In Transit" },
-                    { id: "out_for_delivery", label: "Out for Delivery" },
-                    { id: "delivered", label: "Delivered" },
-                    { id: "returned", label: "Returned (RTO)" },
-                  ].map((s) => (
-                    <button
-                      key={s.id}
-                      type="button"
-                      onClick={() => setManualStatus(s.id as "in_transit" | "out_for_delivery" | "delivered" | "returned")}
-                      className={`rounded-xl border py-2 px-2 text-center text-xs font-bold transition-all cursor-pointer ${
-                        manualStatus === s.id
-                          ? s.id === "returned"
-                            ? "border-rose-500 bg-rose-50 text-rose-700 dark:border-rose-600 dark:bg-rose-950/60 dark:text-rose-300"
-                            : "border-indigo-600 bg-indigo-50 text-indigo-700 dark:border-indigo-500 dark:bg-indigo-950/60 dark:text-indigo-300"
-                          : "border-slate-200 text-slate-600 hover:border-slate-300 dark:border-slate-800 dark:text-slate-300"
-                      }`}
-                    >
-                      {s.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* If Returned is selected, allow entering return reason */}
-              {manualStatus === "returned" && (
-                <div className="rounded-2xl border border-rose-200 bg-rose-50/60 p-3.5 dark:border-rose-900/50 dark:bg-rose-950/40">
-                  <label className="text-xs font-bold text-rose-800 dark:text-rose-300 block mb-1">
-                    Return Reason:
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="e.g. Addressee Moved / Customer Refused Delivery"
-                    value={manualReturnReason}
-                    onChange={(e) => setManualReturnReason(e.target.value)}
-                    className="w-full rounded-xl border border-rose-200 bg-white px-3.5 py-1.5 text-xs font-medium text-slate-900 focus:border-rose-500 focus:outline-none dark:border-rose-800 dark:bg-slate-900 dark:text-white"
-                  />
-                </div>
-              )}
-
-              {/* Error banner */}
-              {manualError && (
-                <div className="rounded-xl border border-rose-200 bg-rose-50 p-2.5 text-xs font-semibold text-rose-700">
-                  {manualError}
-                </div>
-              )}
-
-              <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-slate-100 dark:border-slate-800">
-                <button
-                  type="button"
-                  onClick={() => setIsManualAddOpen(false)}
-                  className="rounded-xl px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="rounded-xl bg-indigo-600 hover:bg-indigo-700 px-5 py-2 text-xs font-extrabold text-white shadow-xs"
-                >
-                  Add Consignment
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* ============================================================== */}
-      {/* 7. HIGH-SPEED CONTINUOUS BARCODE & QR SCANNER MODAL            */}
-      {/* ============================================================== */}
-      {isScannerModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-md animate-in fade-in">
-          <div className="fixed inset-0" onClick={() => setIsScannerModalOpen(false)} />
-          <div
-            className="relative z-10 w-full max-w-xl rounded-3xl border border-slate-200 bg-white p-6 shadow-2xl dark:border-slate-800 dark:bg-slate-900 text-left"
-            onClick={(e) => e.stopPropagation()}
-          >
-            {/* Header */}
-            <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-4">
-              <div className="flex items-center gap-2">
-                <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-indigo-50 text-indigo-600 dark:bg-indigo-950 dark:text-indigo-400">
-                  <ScanLine className="h-5 w-5" />
-                </div>
-                <div>
-                  <h3 className="text-base font-bold text-slate-900 dark:text-white">
-                    High-Speed Barcode & QR Scanner
+                  <h3 className="text-base sm:text-lg font-black tracking-tight text-slate-900 dark:text-white">
+                    Add & Scan Consignments
                   </h3>
-                  <p className="text-[11px] text-slate-500">
-                    Supports handheld laser scanners, camera targeting, and instant auto-next ID scanning.
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                    Type numbers manually, scan with barcode reader devices in the input field, or use camera scanning.
                   </p>
                 </div>
               </div>
               <button
                 type="button"
-                onClick={() => setIsScannerModalOpen(false)}
-                className="rounded-xl p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800"
+                onClick={handleCloseAddConsignmentsModal}
+                className="rounded-xl p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-slate-800 dark:hover:text-slate-200 transition-colors cursor-pointer"
               >
                 <X className="h-4 w-4" />
               </button>
             </div>
 
-            {/* Continuous Mode Indicator & Input */}
-            <div className="mt-4 space-y-4">
-              {/* Continuous multi-scan status banner */}
-              <div className="flex items-center justify-between rounded-2xl bg-indigo-50/70 dark:bg-indigo-950/50 p-3 border border-indigo-200/60 dark:border-indigo-900/60 text-xs">
-                <div className="flex items-center gap-2">
-                  <span className="flex h-2.5 w-2.5 rounded-full bg-emerald-500 animate-ping" />
-                  <span className="font-extrabold text-indigo-900 dark:text-indigo-200">
-                    Auto-Advance Scanner Active
-                  </span>
-                </div>
-                <span className="font-mono text-[11px] font-bold text-indigo-700 dark:text-indigo-300">
-                  {scannedBatch.length} scanned this session
-                </span>
-              </div>
-
-              {/* Hardware Scanner & Keyboard Wedge Input */}
-              <div className="rounded-2xl border-2 border-indigo-500/50 bg-slate-50 p-4 dark:border-indigo-500/40 dark:bg-slate-800/60">
-                <label className="text-xs font-extrabold text-slate-800 dark:text-slate-200 block mb-1.5">
-                  Point barcode scanning gun or type AWB (Press Enter to ingest):
-                </label>
-                <div className="flex items-center gap-2">
-                  <input
-                    ref={scannerInputRef}
-                    type="text"
-                    value={scannerInputVal}
-                    onChange={(e) => setScannerInputVal(e.target.value.toUpperCase())}
-                    onKeyDown={handleScannerInputKeyDown}
-                    placeholder="Scan barcode now..."
-                    className="flex-1 rounded-xl border border-slate-300 bg-white px-4 py-2.5 font-mono text-sm font-black text-slate-900 tracking-wider focus:border-indigo-600 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
-                    autoFocus
+            {/* Modal Body (Scrollable) */}
+            <div className="overflow-y-auto p-4 sm:p-6 space-y-4 sm:space-y-5 flex-1">
+              {/* Intake Toolbar: Auto-Next Toggle & Camera Mode Switch */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-2xl bg-slate-50 dark:bg-slate-800/60 p-3.5 border border-slate-200 dark:border-slate-700">
+                {/* Auto-Next Switch */}
+                <div className="flex items-center gap-2.5">
+                  <div
+                    className={`flex h-3 w-3 shrink-0 rounded-full ${
+                      isAutoNextEnabled
+                        ? "bg-emerald-500 ring-4 ring-emerald-500/20 animate-pulse"
+                        : "bg-amber-500 ring-4 ring-amber-500/20"
+                    }`}
                   />
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-bold text-slate-900 dark:text-white">
+                        Auto-Next Scan:
+                      </span>
+                      <span
+                        className={`rounded-md px-1.5 py-0.5 text-[10px] font-black uppercase tracking-wider ${
+                          isAutoNextEnabled
+                            ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300"
+                            : "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300"
+                        }`}
+                      >
+                        {isAutoNextEnabled ? "ON" : "OFF"}
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                      {isAutoNextEnabled
+                        ? "Auto-Next ON: Automatically stages each scanned barcode and clears input for next scan."
+                        : "Auto-Next OFF: Holds scanned ID in view to verify details before advancing."}
+                    </p>
+                  </div>
+                </div>
+
+                {/* Right controls: Camera toggle & Auto-Next Toggle switch */}
+                <div className="flex items-center gap-2.5 self-end sm:self-auto">
+                  {/* Camera Scanner Trigger Button with Modern Icon */}
                   <button
                     type="button"
-                    onClick={() => processBarcodeScan(scannerInputVal)}
-                    className="rounded-xl bg-indigo-600 hover:bg-indigo-700 px-4 py-2.5 text-xs font-bold text-white shadow-xs cursor-pointer"
+                    onClick={handleToggleCamera}
+                    className={`inline-flex items-center gap-2 rounded-xl px-3.5 py-1.5 text-xs font-bold transition-all cursor-pointer ${
+                      isCameraActive
+                        ? "bg-indigo-600 text-white shadow-xs"
+                        : "bg-white text-slate-700 hover:bg-slate-100 dark:bg-slate-800 dark:text-slate-200 border border-slate-200 dark:border-slate-700 shadow-2xs"
+                    }`}
                   >
-                    Add
+                    <div className="flex h-5 w-5 items-center justify-center rounded-md bg-indigo-100/80 dark:bg-indigo-900/60 text-indigo-600 dark:text-indigo-300">
+                      {isCameraActive ? <CameraOff className="h-3.5 w-3.5" /> : <ScanLine className="h-3.5 w-3.5 stroke-[2.5]" />}
+                    </div>
+                    <span>{isCameraActive ? "Hide Camera" : "Camera Scanner"}</span>
+                  </button>
+
+                  {/* Auto-Next Switch */}
+                  <button
+                    type="button"
+                    onClick={() => setIsAutoNextEnabled((prev) => !prev)}
+                    className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                      isAutoNextEnabled ? "bg-emerald-600" : "bg-slate-300 dark:bg-slate-600"
+                    }`}
+                    title={`Click to switch Auto-Next ${isAutoNextEnabled ? "OFF" : "ON"}`}
+                  >
+                    <span
+                      className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm ring-0 transition duration-200 ease-in-out ${
+                        isAutoNextEnabled ? "translate-x-5" : "translate-x-0"
+                      }`}
+                    />
                   </button>
                 </div>
+              </div>
 
-                {/* Instant Success Flash Notification */}
-                {scannerRecentSuccess && (
-                  <div className="mt-2.5 flex items-center gap-1.5 rounded-xl bg-emerald-100/90 px-3 py-1.5 text-xs font-bold text-emerald-800 dark:bg-emerald-950/80 dark:text-emerald-300 animate-in fade-in">
-                    <CheckCheck className="h-4 w-4 text-emerald-600" />
-                    <span>✓ Added: {scannerRecentSuccess} — Ready for next barcode!</span>
+              {/* Unified Typing & Hardware Barcode Reader Field */}
+              <div className="rounded-2xl border-2 border-indigo-500/60 bg-white p-4 sm:p-5 dark:border-indigo-500/50 dark:bg-slate-800/70 shadow-xs space-y-3.5">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1.5">
+                  <label className="text-xs font-black uppercase tracking-wider text-slate-700 dark:text-slate-200">
+                    Consignment / AWB Number (Type manually or scan barcode device):
+                  </label>
+                  {intakeAwb && (
+                    <div className="flex items-center gap-1.5 text-xs">
+                      <span className="text-[11px] text-slate-400">Detected Courier:</span>
+                      <span className="font-bold text-indigo-600 dark:text-indigo-400">
+                        {autoDetectCourier(intakeAwb)?.name || "Auto-Detecting"}
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5 w-full">
+                  <div className="relative w-full flex-1 min-w-0">
+                    <input
+                      ref={intakeInputRef}
+                      type="text"
+                      value={intakeAwb}
+                      onChange={(e) => {
+                        const val = e.target.value.toUpperCase();
+                        setIntakeAwb(val);
+                        setIntakeError("");
+                        const detected = autoDetectCourier(val);
+                        if (detected) setIntakeCourier(detected.id);
+                      }}
+                      onKeyDown={handleIntakeKeyDown}
+                      placeholder="Enter Consignment / AWB..."
+                      className="w-full rounded-xl border border-slate-300 bg-white px-4 py-2.5 font-mono text-sm font-black uppercase tracking-wider text-slate-900 focus:border-indigo-600 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+                      autoFocus
+                    />
+                  </div>
+
+                  {/* Stage / Add Button */}
+                  <div className="flex items-center gap-2 w-full sm:w-auto shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => handleStageConsignment(intakeAwb)}
+                      className="flex-1 sm:flex-initial inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-4 py-2.5 text-xs font-extrabold text-white shadow-xs transition-colors cursor-pointer"
+                    >
+                      <Plus className="h-4 w-4 stroke-[2.5]" />
+                      <span>Stage Consignment</span>
+                    </button>
+
+                    {!isAutoNextEnabled && recentStagedCode && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIntakeAwb("");
+                          setRecentStagedCode(null);
+                          intakeInputRef.current?.focus();
+                        }}
+                        className="inline-flex items-center justify-center gap-1 rounded-xl bg-emerald-600 hover:bg-emerald-700 px-3.5 py-2.5 text-xs font-bold text-white shadow-xs shrink-0 cursor-pointer animate-in fade-in"
+                      >
+                        <span>Next ID →</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Inline Options Strip: Carrier, Recipient, Destination, Status */}
+                <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5 pt-1 text-xs">
+                  {/* Courier Partner Selection */}
+                  <div className="relative">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsIntakeCourierDropdownOpen(!isIntakeCourierDropdownOpen);
+                        setIsIntakeStatusDropdownOpen(false);
+                      }}
+                      className="w-full flex items-center justify-between rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-800 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 cursor-pointer"
+                    >
+                      <span className="truncate">
+                        {COURIER_MAP[intakeCourier]?.shortName || "Carrier Partner"}
+                      </span>
+                      <ChevronDown className="h-3.5 w-3.5 text-slate-400 shrink-0 ml-1" />
+                    </button>
+
+                    {isIntakeCourierDropdownOpen && (
+                      <>
+                        <div
+                          className="fixed inset-0 z-40"
+                          onClick={() => setIsIntakeCourierDropdownOpen(false)}
+                        />
+                        <div className="absolute left-0 top-full mt-1 z-50 max-h-48 w-56 overflow-y-auto rounded-xl border border-slate-200 bg-white p-1 shadow-xl dark:border-slate-700 dark:bg-slate-800">
+                          {COURIER_LIST.map((c) => (
+                            <button
+                              key={c.id}
+                              type="button"
+                              onClick={() => {
+                                setIntakeCourier(c.id);
+                                setIsIntakeCourierDropdownOpen(false);
+                              }}
+                              className="w-full text-left rounded-lg px-2.5 py-1.5 text-xs font-medium hover:bg-slate-100 dark:hover:bg-slate-700 flex items-center justify-between cursor-pointer"
+                            >
+                              <span>{c.name}</span>
+                              <span className="text-[10px] text-slate-400 font-mono">({c.shortName})</span>
+                            </button>
+                          ))}
+                        </div>
+                      </>
+                    )}
+                  </div>
+
+                  {/* Recipient Name */}
+                  <input
+                    type="text"
+                    placeholder="Recipient Name (Optional)"
+                    value={intakeRecipient}
+                    onChange={(e) => setIntakeRecipient(e.target.value)}
+                    className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 focus:outline-none"
+                  />
+
+                  {/* Destination City */}
+                  <input
+                    type="text"
+                    placeholder="Destination Hub / City"
+                    value={intakeDestination}
+                    onChange={(e) => setIntakeDestination(e.target.value)}
+                    className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 focus:outline-none"
+                  />
+
+                  {/* Custom Styled Status Dropdown */}
+                  <div className="relative">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsIntakeStatusDropdownOpen(!isIntakeStatusDropdownOpen);
+                        setIsIntakeCourierDropdownOpen(false);
+                      }}
+                      className="w-full flex items-center justify-between rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-800 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 cursor-pointer"
+                    >
+                      <div className="flex items-center gap-2 truncate">
+                        <span
+                          className={`h-2 w-2 rounded-full shrink-0 ${
+                            intakeStatus === "delivered"
+                              ? "bg-emerald-500 ring-2 ring-emerald-500/20"
+                              : intakeStatus === "out_for_delivery"
+                              ? "bg-amber-500 ring-2 ring-amber-500/20"
+                              : intakeStatus === "returned"
+                              ? "bg-rose-500 ring-2 ring-rose-500/20"
+                              : "bg-sky-500 ring-2 ring-sky-500/20"
+                          }`}
+                        />
+                        <span className="truncate">
+                          {intakeStatus === "delivered"
+                            ? "Delivered"
+                            : intakeStatus === "out_for_delivery"
+                            ? "Out for Delivery"
+                            : intakeStatus === "returned"
+                            ? "Returned (RTO)"
+                            : "In Transit"}
+                        </span>
+                      </div>
+                      <ChevronDown className="h-3.5 w-3.5 text-slate-400 shrink-0 ml-1" />
+                    </button>
+
+                    {isIntakeStatusDropdownOpen && (
+                      <>
+                        <div
+                          className="fixed inset-0 z-40"
+                          onClick={() => setIsIntakeStatusDropdownOpen(false)}
+                        />
+                        <div className="absolute left-0 right-0 sm:right-auto top-full mt-1 z-50 sm:w-48 overflow-hidden rounded-xl border border-slate-200 bg-white p-1 shadow-xl dark:border-slate-700 dark:bg-slate-800">
+                          {[
+                            { value: "in_transit", label: "In Transit", dot: "bg-sky-500", desc: "Active dispatch" },
+                            { value: "out_for_delivery", label: "Out for Delivery", dot: "bg-amber-500", desc: "With delivery agent" },
+                            { value: "delivered", label: "Delivered", dot: "bg-emerald-500", desc: "Successfully delivered" },
+                            { value: "returned", label: "Returned (RTO)", dot: "bg-rose-500", desc: "Returned to shipper" },
+                          ].map((st) => (
+                            <button
+                              key={st.value}
+                              type="button"
+                              onClick={() => {
+                                setIntakeStatus(st.value as any);
+                                setIsIntakeStatusDropdownOpen(false);
+                              }}
+                              className={`w-full text-left rounded-lg px-2.5 py-1.5 text-xs font-medium hover:bg-slate-100 dark:hover:bg-slate-700 flex items-center justify-between cursor-pointer transition-colors ${
+                                intakeStatus === st.value
+                                  ? "bg-indigo-50/70 text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300 font-bold"
+                                  : "text-slate-700 dark:text-slate-300"
+                              }`}
+                            >
+                              <div className="flex items-center gap-2">
+                                <span className={`h-2 w-2 rounded-full ${st.dot}`} />
+                                <span>{st.label}</span>
+                              </div>
+                              {intakeStatus === st.value && (
+                                <Check className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" />
+                              )}
+                            </button>
+                          ))}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                </div>
+
+                {/* Instant Success Feedback Strip */}
+                {recentStagedCode && (
+                  <div className="flex items-center justify-between rounded-xl bg-emerald-100/90 dark:bg-emerald-950/80 px-3 py-1.5 text-xs font-bold text-emerald-800 dark:text-emerald-300 animate-in fade-in">
+                    <div className="flex items-center gap-1.5">
+                      <CheckCheck className="h-4 w-4 text-emerald-600" />
+                      <span>
+                        ✓ Staged: {recentStagedCode} —{" "}
+                        {isAutoNextEnabled
+                          ? "Added to review list! Ready for next scan."
+                          : "Saved to review list (Auto-Next OFF)."}
+                      </span>
+                    </div>
+                    <span className="text-[11px] font-mono text-emerald-700 dark:text-emerald-400">
+                      Total Staged: {stagedConsignments.length}
+                    </span>
+                  </div>
+                )}
+
+                {/* Error Banner */}
+                {intakeError && (
+                  <div className="rounded-xl border border-rose-200 bg-rose-50 p-2.5 text-xs font-semibold text-rose-700 dark:border-rose-900/60 dark:bg-rose-950/60 dark:text-rose-300">
+                    {intakeError}
                   </div>
                 )}
               </div>
 
-              {/* Interactive Camera Reticle Simulator */}
-              <div className="relative h-44 rounded-2xl bg-slate-950 overflow-hidden flex items-center justify-center border border-slate-800">
-                {/* Laser animation */}
-                <div className="absolute left-6 right-6 h-0.5 bg-red-500 shadow-[0_0_12px_#ef4444] animate-bounce" />
-
-                {/* Reticle brackets */}
-                <div className="absolute inset-8 border border-white/20 rounded-xl flex items-center justify-center">
-                  <div className="text-center text-white/50 text-xs">
-                    <QrCode className="h-10 w-10 mx-auto mb-1 opacity-70" />
-                    <span>Place QR code or Barcode in center</span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Instant Test Barcodes: Click to simulate rapid continuous scanning */}
-              <div>
-                <span className="text-[11px] font-bold text-slate-500 dark:text-slate-400 block mb-1.5">
-                  Click to simulate auto-scanning barcodes:
-                </span>
-                <div className="flex flex-wrap gap-2">
-                  {[
-                    { awb: "EL855948618IN", label: "India Post" },
-                    { awb: "B4000211866", label: "DTDC" },
-                    { awb: "FMPP4397267510", label: "Ekart" },
-                    { awb: "12345678901", label: "Blue Dart" },
-                    { awb: "RT855948618IN", label: "Returned (RTO)" },
-                  ].map((s) => (
-                    <button
-                      key={s.awb}
-                      type="button"
-                      onClick={() => processBarcodeScan(s.awb)}
-                      className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-mono font-bold text-slate-700 hover:border-indigo-500 hover:text-indigo-600 dark:border-slate-800 dark:bg-slate-800 dark:text-slate-300 shadow-2xs transition-colors cursor-pointer"
-                    >
-                      <span className="text-indigo-600 font-sans">{s.label}: </span>
-                      {s.awb}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Scanned in this session list */}
-              {scannedBatch.length > 0 && (
-                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-800/40">
-                  <div className="text-xs font-bold text-slate-700 dark:text-slate-300 mb-1.5">
-                    Scanned in this batch:
-                  </div>
-                  <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto">
-                    {scannedBatch.map((awb) => (
-                      <span
-                        key={awb}
-                        className="rounded-md bg-white border border-slate-200 px-2 py-0.5 font-mono text-[11px] font-bold text-slate-800 dark:bg-slate-900 dark:border-slate-700 dark:text-slate-200"
-                      >
-                        {awb}
+              {/* Camera Scanner Viewfinder (when active) */}
+              {isCameraActive && (
+                <div className="rounded-2xl border border-slate-200 bg-slate-900 p-4 text-white space-y-3.5 animate-in fade-in">
+                  {/* Viewfinder Header & Guideline Switcher */}
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 border-b border-slate-800 pb-3">
+                    <div className="flex items-center gap-2 text-xs font-bold text-indigo-400">
+                      <ScanLine className="h-4 w-4" />
+                      <span>Camera Scanner Viewfinder</span>
+                      <span className="rounded bg-indigo-950 px-1.5 py-0.5 text-[10px] font-mono text-indigo-300 border border-indigo-800/60">
+                        Auto-Detect Partner ON
                       </span>
-                    ))}
+                    </div>
+
+                    {/* Guideline Switch: Barcode (1D) | QR Code (2D) | Both */}
+                    <div className="flex items-center gap-1 self-start sm:self-auto rounded-xl bg-slate-800/90 p-1 border border-slate-700/80 text-[11px] font-bold">
+                      <span className="text-[10px] text-slate-400 px-1.5 hidden sm:inline">Guide:</span>
+                      <button
+                        type="button"
+                        onClick={() => setCameraGuideMode("barcode")}
+                        className={`px-2.5 py-1 rounded-lg transition-all cursor-pointer ${
+                          cameraGuideMode === "barcode"
+                            ? "bg-indigo-600 text-white shadow-xs"
+                            : "text-slate-400 hover:text-slate-200"
+                        }`}
+                      >
+                        Barcode (1D)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setCameraGuideMode("qr")}
+                        className={`px-2.5 py-1 rounded-lg transition-all cursor-pointer ${
+                          cameraGuideMode === "qr"
+                            ? "bg-indigo-600 text-white shadow-xs"
+                            : "text-slate-400 hover:text-slate-200"
+                        }`}
+                      >
+                        QR Code (2D)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setCameraGuideMode("both")}
+                        className={`px-2.5 py-1 rounded-lg transition-all cursor-pointer ${
+                          cameraGuideMode === "both"
+                            ? "bg-indigo-600 text-white shadow-xs"
+                            : "text-slate-400 hover:text-slate-200"
+                        }`}
+                      >
+                        Both
+                      </button>
+                    </div>
+                  </div>
+
+                  {cameraError && (
+                    <div className="text-[11px] text-amber-300 bg-amber-950/70 p-2 rounded-lg border border-amber-800/80">
+                      {cameraError}
+                    </div>
+                  )}
+
+                  {/* Adaptive Viewfinder Frame according to Guideline Switch */}
+                  <div className="relative h-48 sm:h-56 rounded-xl bg-slate-950 overflow-hidden flex items-center justify-center border border-slate-800">
+                    <video ref={videoRef} className="absolute inset-0 w-full h-full object-cover opacity-80" playsInline muted />
+
+                    {/* Laser Scan Beam */}
+                    <div className="absolute left-6 right-6 h-0.5 bg-red-500 shadow-[0_0_14px_#ef4444] animate-bounce z-10" />
+
+                    {/* Guideline Overlay: Barcode (1D) */}
+                    {cameraGuideMode === "barcode" && (
+                      <div className="relative z-10 w-4/5 max-w-sm h-24 rounded-xl border-2 border-dashed border-indigo-400/90 bg-indigo-500/10 flex flex-col items-center justify-center p-2 text-center pointer-events-none shadow-[0_0_20px_rgba(99,102,241,0.25)]">
+                        <ScanLine className="h-6 w-6 text-indigo-400 mb-1" />
+                        <span className="text-[11px] font-bold text-white tracking-wide">
+                          Align 1D Barcode horizontally within frame
+                        </span>
+                        <span className="text-[9px] text-indigo-200 mt-0.5">
+                          Carrier Partner will be auto-detected upon scan
+                        </span>
+                      </div>
+                    )}
+
+                    {/* Guideline Overlay: QR Code (2D) */}
+                    {cameraGuideMode === "qr" && (
+                      <div className="relative z-10 w-36 h-36 sm:w-40 sm:h-40 rounded-2xl border-2 border-emerald-400 bg-emerald-500/10 flex flex-col items-center justify-center p-2 text-center pointer-events-none shadow-[0_0_20px_rgba(16,185,129,0.25)]">
+                        <QrCode className="h-8 w-8 text-emerald-400 mb-1" />
+                        <span className="text-[11px] font-bold text-white tracking-wide">
+                          Position 2D QR Code inside box
+                        </span>
+                        <span className="text-[9px] text-emerald-200 mt-0.5">
+                          Target QR symbol
+                        </span>
+                      </div>
+                    )}
+
+                    {/* Guideline Overlay: Both (Universal Reticle) */}
+                    {cameraGuideMode === "both" && (
+                      <div className="relative z-10 w-5/6 max-w-md h-32 rounded-xl border border-white/30 bg-black/20 flex items-center justify-center pointer-events-none">
+                        {/* Outer 1D slot */}
+                        <div className="w-full h-20 border-2 border-dashed border-indigo-400/80 rounded-lg flex items-center justify-center">
+                          {/* Inner 2D QR Target */}
+                          <div className="w-20 h-20 border-2 border-emerald-400/80 rounded-lg flex flex-col items-center justify-center bg-black/40">
+                            <QrCode className="h-5 w-5 text-emerald-300" />
+                            <span className="text-[8px] font-bold text-white">QR / 1D</span>
+                          </div>
+                        </div>
+                        <div className="absolute bottom-1 text-[10px] text-slate-300 font-semibold text-center w-full">
+                          Universal Scanner: Auto-detects Barcode & QR Code
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
               )}
 
-              <div className="pt-2 border-t border-slate-100 dark:border-slate-800 flex justify-end">
+              {/* Full Review Before Add: Staged Consignments List */}
+              <div className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-5 dark:border-slate-800 dark:bg-slate-900 space-y-3">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 dark:border-slate-800 pb-3">
+                  <div className="flex items-center gap-2">
+                    <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300 font-bold text-xs">
+                      {stagedConsignments.length}
+                    </span>
+                    <h4 className="text-xs sm:text-sm font-bold text-slate-900 dark:text-white">
+                      Full Review Before Add: Staged Consignments
+                    </h4>
+                  </div>
+                  <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                    Inspect all items below. Nothing is added to dashboard until you click Confirm.
+                  </div>
+                </div>
+
+                {/* Staged Table / Empty State */}
+                {stagedConsignments.length === 0 ? (
+                  <div className="py-8 text-center text-slate-400">
+                    <Package className="mx-auto h-8 w-8 text-slate-300 dark:text-slate-600 mb-2" />
+                    <p className="text-xs font-semibold text-slate-600 dark:text-slate-300">
+                      No consignments staged for review yet
+                    </p>
+                    <p className="text-[11px] text-slate-400 mt-0.5">
+                      Type numbers in the field above, scan with a barcode reader device, or open the camera scanner.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto max-h-56 overflow-y-auto rounded-xl border border-slate-200 dark:border-slate-800">
+                    <table className="w-full text-left text-xs min-w-[550px]">
+                      <thead className="bg-slate-50 dark:bg-slate-800 text-[10px] uppercase font-bold text-slate-500 border-b border-slate-200 dark:border-slate-800 sticky top-0 z-10">
+                        <tr>
+                          <th className="py-2.5 px-3">AWB / Consignment</th>
+                          <th className="py-2.5 px-3">Carrier Partner</th>
+                          <th className="py-2.5 px-3">Destination / Addressee</th>
+                          <th className="py-2.5 px-3">Status</th>
+                          <th className="py-2.5 px-3 text-right">Remove</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 dark:divide-slate-800 font-mono text-[11px]">
+                        {stagedConsignments.map((item) => (
+                          <tr key={item.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
+                            {/* AWB */}
+                            <td className="py-2.5 px-3 font-bold text-indigo-600 dark:text-indigo-400">
+                              {item.trackingNumber}
+                            </td>
+
+                            {/* Carrier Selector */}
+                            <td className="py-2.5 px-3 font-sans">
+                              <select
+                                value={item.courierId}
+                                onChange={(e) => handleUpdateStagedCourier(item.id, e.target.value)}
+                                className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-semibold text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 cursor-pointer"
+                              >
+                                {COURIER_LIST.map((c) => (
+                                  <option key={c.id} value={c.id}>
+                                    {c.name}
+                                  </option>
+                                ))}
+                              </select>
+                            </td>
+
+                            {/* Destination */}
+                            <td className="py-2.5 px-3 font-sans text-slate-600 dark:text-slate-400 truncate max-w-[150px]">
+                              {item.destination}
+                            </td>
+
+                            {/* Status */}
+                            <td className="py-2.5 px-3">
+                              <span
+                                className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-sans font-bold ${
+                                  item.status === "delivered"
+                                    ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
+                                    : item.status === "returned"
+                                    ? "bg-rose-50 text-rose-700 dark:bg-rose-950 dark:text-rose-300"
+                                    : item.status === "out_for_delivery"
+                                    ? "bg-amber-50 text-amber-700 dark:bg-amber-950 dark:text-amber-300"
+                                    : "bg-sky-50 text-sky-700 dark:bg-sky-950 dark:text-sky-300"
+                                }`}
+                              >
+                                {item.status === "delivered"
+                                  ? "Delivered"
+                                  : item.status === "returned"
+                                  ? "Returned"
+                                  : item.status === "out_for_delivery"
+                                  ? "Out for Delivery"
+                                  : "In Transit"}
+                              </span>
+                            </td>
+
+                            {/* Remove button */}
+                            <td className="py-2.5 px-3 text-right">
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveStagedItem(item.id)}
+                                className="p-1 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/70 transition-colors cursor-pointer"
+                                title="Remove this item from staging list"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Modal Footer with Full Review Confirmation */}
+            <div className="border-t border-slate-100 dark:border-slate-800 px-5 sm:px-6 py-3.5 flex flex-wrap items-center justify-between gap-3 shrink-0">
+              <div>
+                {stagedConsignments.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setStagedConsignments([])}
+                    className="text-xs font-bold text-slate-500 hover:text-rose-600 dark:text-slate-400 dark:hover:text-rose-400 underline cursor-pointer"
+                  >
+                    Clear All Staged ({stagedConsignments.length})
+                  </button>
+                )}
+              </div>
+
+              <div className="flex items-center gap-2.5">
                 <button
                   type="button"
-                  onClick={() => setIsScannerModalOpen(false)}
-                  className="rounded-xl bg-slate-900 hover:bg-slate-800 px-5 py-2 text-xs font-bold text-white dark:bg-slate-100 dark:hover:bg-white dark:text-slate-900 cursor-pointer"
+                  onClick={handleCloseAddConsignmentsModal}
+                  className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800 cursor-pointer"
                 >
-                  Done Scanning
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleConfirmIngestStaged}
+                  disabled={stagedConsignments.length === 0}
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 px-5 py-2 text-xs font-extrabold text-white shadow-xs transition-colors cursor-pointer disabled:cursor-not-allowed"
+                >
+                  <Check className="h-4 w-4 stroke-[3]" />
+                  <span>
+                    Confirm & Ingest ({stagedConsignments.length} Consignments)
+                  </span>
                 </button>
               </div>
             </div>
@@ -2394,9 +3095,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                               <td className="py-2.5 px-3">
                                 <span className="inline-flex items-center gap-1.5 font-semibold text-slate-700 dark:text-slate-300">
                                   <span
-                                    className={`h-2 w-2 rounded-full ${
-                                      COURIER_MAP[p.courierId]?.badgeColor || "bg-indigo-500"
-                                    }`}
+                                    className="h-2 w-2 rounded-full bg-indigo-500 dark:bg-indigo-400"
                                   />
                                   {p.courierName}
                                 </span>
@@ -2541,6 +3240,415 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                   </div>
                 </div>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ============================================================== */}
+      {/* 9. DATA BACKUP & IMPORT BACKUP FOR SEPARATE REVIEW MODAL       */}
+      {/* ============================================================== */}
+      {isBackupModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/70 backdrop-blur-xs animate-in fade-in">
+          <div className="fixed inset-0" onClick={() => setIsBackupModalOpen(false)} />
+          <div
+            className="relative z-10 w-full max-w-3xl max-h-[92vh] flex flex-col rounded-3xl border border-slate-200 bg-white shadow-2xl dark:border-slate-800 dark:bg-slate-900 text-left overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Modal Header */}
+            <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 px-5 sm:px-6 py-4 shrink-0">
+              <div className="flex items-center gap-2.5">
+                <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-indigo-50 dark:bg-indigo-950/70 text-indigo-600 dark:text-indigo-400">
+                  <Database className="h-5 w-5 stroke-[2.2]" />
+                </span>
+                <div>
+                  <h3 className="text-base font-extrabold text-slate-900 dark:text-white">
+                    Data Backup & Recovery Center
+                  </h3>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                    Export entire logistics data or import saved backups to review separately
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsBackupModalOpen(false)}
+                className="rounded-xl p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800 dark:hover:text-slate-200 cursor-pointer"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            {/* Modal Scrollable Body */}
+            <div className="overflow-y-auto p-5 sm:p-6 space-y-5 flex-1">
+              {/* Alert Feedback */}
+              {backupSuccessMsg && (
+                <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-3.5 dark:border-emerald-900/60 dark:bg-emerald-950/60 flex items-start gap-2.5 text-xs text-emerald-800 dark:text-emerald-300">
+                  <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0 mt-0.5" />
+                  <div>
+                    <div className="font-bold">Success</div>
+                    <div>{backupSuccessMsg}</div>
+                  </div>
+                </div>
+              )}
+
+              {backupError && (
+                <div className="rounded-2xl border border-rose-200 bg-rose-50 p-3.5 dark:border-rose-900/60 dark:bg-rose-950/60 flex items-start gap-2.5 text-xs text-rose-800 dark:text-rose-300">
+                  <ShieldAlert className="h-4 w-4 text-rose-600 shrink-0 mt-0.5" />
+                  <div>
+                    <div className="font-bold">Backup Notice</div>
+                    <div>{backupError}</div>
+                  </div>
+                </div>
+              )}
+
+              {/* 1. Export Backup Section */}
+              <div className="rounded-2xl border border-slate-200 bg-slate-50/60 p-4 sm:p-5 dark:border-slate-800 dark:bg-slate-800/40">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <Download className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
+                      <h4 className="text-xs sm:text-sm font-bold text-slate-900 dark:text-white">
+                        Export Full Operational Backup (.json)
+                      </h4>
+                    </div>
+                    <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
+                      Archive all {shipments.length} consignments across {uniqueBatches.length} imported batches, SLAs, tracking history, and tags into an offline file.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleExportBackup}
+                    className="inline-flex items-center justify-center gap-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-4 py-2.5 text-xs font-extrabold text-white shadow-xs transition-colors shrink-0 cursor-pointer"
+                  >
+                    <Download className="h-3.5 w-3.5" />
+                    <span>Download JSON Backup</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* 2. Import Backup Section */}
+              <div className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-5 dark:border-slate-800 dark:bg-slate-900/80 space-y-4">
+                <div className="flex items-center gap-2">
+                  <FileJson className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
+                  <h4 className="text-xs sm:text-sm font-bold text-slate-900 dark:text-white">
+                    Import Backup Data for Review in Separate View
+                  </h4>
+                </div>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                  Select a previously downloaded backup JSON file. You can review all records separately without modifying your live shipments, or merge them as needed.
+                </p>
+
+                {/* File picker */}
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+                  <input
+                    ref={backupFileInputRef}
+                    type="file"
+                    accept=".json,application/json"
+                    onChange={handleBackupFileSelect}
+                    id="backup-file-input"
+                    className="hidden"
+                  />
+                  <label
+                    htmlFor="backup-file-input"
+                    className="inline-flex items-center justify-center gap-2 rounded-xl border border-dashed border-slate-300 hover:border-indigo-500 bg-slate-50 hover:bg-indigo-50/30 px-4 py-3 text-xs font-bold text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 cursor-pointer transition-colors"
+                  >
+                    <Upload className="h-4 w-4 text-indigo-600" />
+                    <span>Select Backup File (.json)</span>
+                  </label>
+                  {backupReviewData && (
+                    <div className="flex items-center gap-2 text-xs font-mono text-slate-500 dark:text-slate-400">
+                      <FileJson className="h-3.5 w-3.5 text-emerald-600" />
+                      <span className="font-bold text-slate-900 dark:text-white truncate max-w-xs">
+                        {backupReviewData.fileName}
+                      </span>
+                      <span>({backupReviewData.shipments.length} records)</span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Backup Loaded Review Studio */}
+                {backupReviewData && (
+                  <div className="mt-4 pt-4 border-t border-slate-100 dark:border-slate-800 space-y-3.5">
+                    {/* Status Breakdown Pills */}
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center text-xs">
+                      <div className="rounded-xl border border-emerald-200 bg-emerald-50/60 p-2 dark:border-emerald-900/60 dark:bg-emerald-950/40">
+                        <div className="text-[10px] uppercase font-bold text-emerald-600">Delivered</div>
+                        <div className="text-base font-black text-emerald-700 dark:text-emerald-300">
+                          {backupReviewData.shipments.filter((s) => s.status === "delivered").length}
+                        </div>
+                      </div>
+                      <div className="rounded-xl border border-amber-200 bg-amber-50/60 p-2 dark:border-amber-900/60 dark:bg-amber-950/40">
+                        <div className="text-[10px] uppercase font-bold text-amber-600">Out for Delivery</div>
+                        <div className="text-base font-black text-amber-700 dark:text-amber-300">
+                          {backupReviewData.shipments.filter((s) => s.status === "out_for_delivery").length}
+                        </div>
+                      </div>
+                      <div className="rounded-xl border border-sky-200 bg-sky-50/60 p-2 dark:border-sky-900/60 dark:bg-sky-950/40">
+                        <div className="text-[10px] uppercase font-bold text-sky-600">In Transit</div>
+                        <div className="text-base font-black text-sky-700 dark:text-sky-300">
+                          {backupReviewData.shipments.filter((s) => s.status === "in_transit").length}
+                        </div>
+                      </div>
+                      <div className="rounded-xl border border-rose-200 bg-rose-50/60 p-2 dark:border-rose-900/60 dark:bg-rose-950/40">
+                        <div className="text-[10px] uppercase font-bold text-rose-600">Returned (RTO)</div>
+                        <div className="text-base font-black text-rose-700 dark:text-rose-300">
+                          {backupReviewData.shipments.filter((s) => s.status === "returned").length}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Review In Separate Action Banner */}
+                    <div className="flex flex-wrap items-center justify-between gap-3 p-3 rounded-2xl bg-indigo-50/80 dark:bg-indigo-950/60 border border-indigo-200 dark:border-indigo-900">
+                      <div>
+                        <div className="text-xs font-bold text-indigo-950 dark:text-indigo-200">
+                          Review in Separate Dashboard Mode
+                        </div>
+                        <div className="text-[11px] text-indigo-800/80 dark:text-indigo-300/80">
+                          Inspect all {backupReviewData.shipments.length} consignments on the main dashboard table with zero impact on live data.
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsReviewingSeparately(true);
+                          setIsBackupModalOpen(false);
+                          setBackupSuccessMsg("Separate review mode enabled.");
+                        }}
+                        className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-4 py-2 text-xs font-extrabold text-white shadow-xs cursor-pointer"
+                      >
+                        <ExternalLink className="h-3.5 w-3.5" />
+                        <span>Open Separate Review</span>
+                      </button>
+                    </div>
+
+                    {/* Table Preview of Backup Records */}
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between text-xs font-bold text-slate-700 dark:text-slate-300">
+                        <span>Snapshot Consignments Preview:</span>
+                        <span className="text-[11px] text-slate-400 font-normal">
+                          Showing first 6 of {backupReviewData.shipments.length}
+                        </span>
+                      </div>
+                      <div className="max-h-48 overflow-y-auto rounded-xl border border-slate-200 dark:border-slate-800 overflow-x-auto">
+                        <table className="w-full text-left text-xs min-w-[500px]">
+                          <thead className="bg-slate-50 dark:bg-slate-800 text-[10px] uppercase font-bold text-slate-500">
+                            <tr>
+                              <th className="py-2 px-3">AWB</th>
+                              <th className="py-2 px-3">Courier</th>
+                              <th className="py-2 px-3">Destination</th>
+                              <th className="py-2 px-3">Status</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100 dark:divide-slate-800 font-mono text-[11px]">
+                            {backupReviewData.shipments.slice(0, 8).map((b) => (
+                              <tr key={b.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
+                                <td className="py-2 px-3 font-bold text-indigo-600 dark:text-indigo-400">
+                                  {b.trackingNumber}
+                                </td>
+                                <td className="py-2 px-3 font-sans text-slate-700 dark:text-slate-300">
+                                  {b.courierName}
+                                </td>
+                                <td className="py-2 px-3 font-sans text-slate-500 dark:text-slate-400 truncate max-w-[140px]">
+                                  {b.destination}
+                                </td>
+                                <td className="py-2 px-3">
+                                  <span
+                                    className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-sans font-bold ${
+                                      b.status === "delivered"
+                                        ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
+                                        : b.status === "returned"
+                                        ? "bg-rose-50 text-rose-700 dark:bg-rose-950 dark:text-rose-300"
+                                        : b.status === "out_for_delivery"
+                                        ? "bg-amber-50 text-amber-700 dark:bg-amber-950 dark:text-amber-300"
+                                        : "bg-sky-50 text-sky-700 dark:bg-sky-950 dark:text-sky-300"
+                                    }`}
+                                  >
+                                    {b.status}
+                                  </span>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+
+                    {/* Merge or Restore Action Buttons */}
+                    <div className="flex flex-wrap items-center justify-between gap-2.5 pt-2">
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={handleMergeBackupIntoLive}
+                          className="inline-flex items-center gap-1.5 rounded-xl border border-indigo-200 bg-white hover:bg-indigo-50 dark:border-indigo-800 dark:bg-slate-800 dark:hover:bg-indigo-950/60 px-3.5 py-2 text-xs font-bold text-indigo-700 dark:text-indigo-300 cursor-pointer shadow-2xs"
+                        >
+                          <Plus className="h-3.5 w-3.5" />
+                          <span>Merge into Live Dashboard</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleRestoreBackupOverwrite}
+                          className="inline-flex items-center gap-1.5 rounded-xl border border-rose-200 bg-white hover:bg-rose-50 dark:border-rose-900 dark:bg-slate-800 dark:hover:bg-rose-950/60 px-3.5 py-2 text-xs font-bold text-rose-700 dark:text-rose-300 cursor-pointer shadow-2xs"
+                        >
+                          <RotateCcw className="h-3.5 w-3.5" />
+                          <span>Replace Live Data</span>
+                        </button>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => setBackupReviewData(null)}
+                        className="text-xs font-semibold text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 underline cursor-pointer"
+                      >
+                        Clear Loaded Backup
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Modal Footer */}
+            <div className="border-t border-slate-100 dark:border-slate-800 px-5 sm:px-6 py-3 flex justify-end shrink-0">
+              <button
+                type="button"
+                onClick={() => setIsBackupModalOpen(false)}
+                className="rounded-xl px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800 cursor-pointer"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ============================================================== */}
+      {/* 9. BULK MULTIPLE DELETE CONFIRMATION MODAL                      */}
+      {/* ============================================================== */}
+      {isBulkDeleteModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-xs animate-in fade-in duration-150">
+          <div className="fixed inset-0" onClick={() => setIsBulkDeleteModalOpen(false)} />
+          <div
+            className="relative z-10 w-full max-w-md rounded-3xl border border-slate-200 bg-white p-6 shadow-2xl dark:border-slate-800 dark:bg-slate-900 text-left overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-3">
+              <span className="flex h-11 w-11 items-center justify-center rounded-2xl bg-rose-50 text-rose-600 dark:bg-rose-950/80 dark:text-rose-300 shrink-0">
+                <AlertCircle className="h-6 w-6 stroke-[2.2]" />
+              </span>
+              <div>
+                <h3 className="text-base font-extrabold text-slate-900 dark:text-white">
+                  Confirm Multiple Delete
+                </h3>
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  Prevent accidental deletion of selected consignments
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-4 space-y-3">
+              <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
+                Are you sure you want to permanently delete{" "}
+                <span className="font-extrabold text-rose-600 dark:text-rose-400">
+                  {selectedShipmentIds.length} selected consignment{selectedShipmentIds.length > 1 ? "s" : ""}
+                </span>
+                ? This action will remove their tracking histories and cannot be undone.
+              </p>
+
+              {/* Quick preview of selected consignments */}
+              <div className="max-h-32 overflow-y-auto rounded-xl border border-slate-100 bg-slate-50 p-2.5 dark:border-slate-800 dark:bg-slate-800/50 text-[11px] font-mono space-y-1">
+                {selectedShipmentIds.slice(0, 5).map((id) => {
+                  const s = shipments.find((item) => item.id === id);
+                  if (!s) return null;
+                  return (
+                    <div key={id} className="flex items-center justify-between text-slate-700 dark:text-slate-300">
+                      <span className="font-bold">{s.trackingNumber}</span>
+                      <span className="font-sans text-[10px] text-slate-500">{s.courierName}</span>
+                    </div>
+                  );
+                })}
+                {selectedShipmentIds.length > 5 && (
+                  <div className="pt-1 text-[10px] text-slate-400 font-sans italic">
+                    ...and {selectedShipmentIds.length - 5} more consignment(s)
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="mt-6 flex items-center justify-end gap-2.5">
+              <button
+                type="button"
+                onClick={() => setIsBulkDeleteModalOpen(false)}
+                className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300 cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmBulkDelete}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-rose-600 hover:bg-rose-700 px-4 py-2 text-xs font-extrabold text-white shadow-xs cursor-pointer transition-colors"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                <span>Delete {selectedShipmentIds.length} Consignment{selectedShipmentIds.length > 1 ? "s" : ""}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ============================================================== */}
+      {/* 10. QUICK DELETE EXPORTED DELIVERED DATA MODAL                  */}
+      {/* ============================================================== */}
+      {isDeleteExportedModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-xs animate-in fade-in duration-150">
+          <div className="fixed inset-0" onClick={() => setIsDeleteExportedModalOpen(false)} />
+          <div
+            className="relative z-10 w-full max-w-md rounded-3xl border border-slate-200 bg-white p-6 shadow-2xl dark:border-slate-800 dark:bg-slate-900 text-left overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-3">
+              <span className="flex h-11 w-11 items-center justify-center rounded-2xl bg-rose-50 text-rose-600 dark:bg-rose-950/80 dark:text-rose-300 shrink-0">
+                <Trash2 className="h-6 w-6 stroke-[2.2]" />
+              </span>
+              <div>
+                <h3 className="text-base font-extrabold text-slate-900 dark:text-white">
+                  Delete Exported Delivered Data
+                </h3>
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  Quick clean-up of completed shipments
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-4 space-y-3">
+              <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
+                You are about to delete{" "}
+                <span className="font-extrabold text-rose-600 dark:text-rose-400">
+                  {lastExportedDeliveredIds.length} delivered consignment{lastExportedDeliveredIds.length > 1 ? "s" : ""}
+                </span>{" "}
+                that were just exported to your Excel workbook.
+              </p>
+              <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-3 text-[11px] text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/50 dark:text-amber-200">
+                <span className="font-bold">Safe Guard:</span> Only delivered consignments from your recent export are removed. All active shipments (In Transit, Out for Delivery, Returned) remain completely safe and untouched.
+              </div>
+            </div>
+
+            <div className="mt-6 flex items-center justify-end gap-2.5">
+              <button
+                type="button"
+                onClick={() => setIsDeleteExportedModalOpen(false)}
+                className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300 cursor-pointer"
+              >
+                Keep Consignments
+              </button>
+              <button
+                type="button"
+                onClick={handleQuickDeleteExportedDelivered}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-rose-600 hover:bg-rose-700 px-4 py-2 text-xs font-extrabold text-white shadow-xs cursor-pointer transition-colors"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                <span>Confirm & Delete Delivered ({lastExportedDeliveredIds.length})</span>
+              </button>
             </div>
           </div>
         </div>

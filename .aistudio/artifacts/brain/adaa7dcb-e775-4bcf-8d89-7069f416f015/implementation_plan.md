@@ -345,4 +345,46 @@ To satisfy the requirement of using their service while never displaying or expo
      - Includes an instant **Open Batch in Dashboard Now →** action button for users who want to proceed immediately without waiting.
      - Handled clean timer disposal when closing manually or unmounting to prevent state leaks.
 
+---
 
+## Turn 14 & 15 Implementation
+
+1. **Mobile Viewport Overflow & Left-Right Scrolling Fixed**:
+   - Streamlined `components/Navbar.tsx`:
+     - Compacted brand wordmark on mobile screens (`text-base`, `h-8 w-8` icon).
+     - Compacted view switcher toggle (`px-2 py-1 text-[11px]`, hidden PRO badge on `<sm`).
+     - Optimized theme toggle and watchlist button (`p-2 rounded-lg` with tabular-nums badge).
+     - Added `w-full max-w-full overflow-hidden` to header.
+   - Enforced `overflow-x-hidden w-full max-w-full` on `<html>`, `<body>`, and root layout container in `app/page.tsx` and `app/layout.tsx`.
+   - Guaranteed zero left-right scrolling across all phone screen sizes (360px - 414px).
+
+2. **Honest Tracking States (No Fake Details or Assumptions)**:
+   - In `app/api/track/route.ts`:
+     - Eliminated synthetic fallback generation that previously assumed origins, destinations, checkpoints, and weights for arbitrary or unknown IDs.
+     - When carrier tracking data is not found or an invalid ID is entered, the API now returns `notTrackable: true` with code `NO_DATA_AVAILABLE` and an explicit, honest message indicating no manifest record is available.
+     - In `TrackingModalPopup.tsx` and `NotTrackableCard.tsx`: Displays the verified "Your Parcel is Not Trackable Yet" card with helpful instructions to verify the consignment ID, wait for carrier manifest indexing, or save to watchlist—without displaying any fabricated checkpoints or routes.
+
+3. **Add Consignment Popup Fullscreen on Mobile**:
+   - In `BulkDashboard.tsx`:
+     - Modal backdrop set to `p-0 sm:p-4`.
+     - Modal card set to `w-full h-full sm:h-auto sm:max-h-[92vh] sm:max-w-4xl rounded-none sm:rounded-3xl border-0 sm:border`.
+     - Provides a full-screen intake and scanning experience on mobile devices with smooth internal scrolling.
+
+4. **Add Consignment - Custom Styled Status Dropdown**:
+   - Replaced native unstyled `<select>` with a custom-styled status dropdown matching the Courier Partner selector.
+   - Features color-coded status indicator dots (In Transit: sky, Out for Delivery: amber, Delivered: emerald, Returned: rose), readable labels, `ChevronDown`, dark mode styling, and click-outside dismissal.
+
+5. **Auto-Detect Courier for Scanning Devices & Camera**:
+   - Integrated `autoDetectCourier` so that whenever a barcode scanner gun, QR scanner, camera, or keyboard inputs an AWB, the carrier partner is automatically identified and selected in the draft and staging list.
+
+6. **Camera Guideline Mode Switch (Barcode 1D | QR Code 2D | Both)**:
+   - Added `cameraGuideMode` state with a segmented toggle in the camera scanner toolbar:
+     - **Barcode (1D)**: Wide horizontal slot with corner brackets and red laser scanning line.
+     - **QR Code (2D)**: Square targeting reticle with corner brackets.
+     - **Both**: Smart universal reticle combining horizontal slot and central square target.
+
+7. **Camera Scanner Trigger Icon**:
+   - Redesigned camera button with a modern `ScanLine` icon, glowing container badge, and clean typography.
+
+8. **Removed Sample IDs from Camera Section**:
+   - Completely removed sample barcode test chips from the camera scanner panel for a clean, distraction-free scanning viewfinder.

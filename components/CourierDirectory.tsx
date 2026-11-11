@@ -5,10 +5,10 @@ import { Search, Globe, ArrowRight } from "lucide-react";
 import { COURIER_LIST, CourierConfig } from "@/lib/couriers";
 
 interface CourierDirectoryProps {
-  onSelectCourierSample: (trackingNumber: string, courierId: string) => void;
+  onSelectCourier: (courierId: string) => void;
 }
 
-export function CourierDirectory({ onSelectCourierSample }: CourierDirectoryProps) {
+export function CourierDirectory({ onSelectCourier }: CourierDirectoryProps) {
   const [searchTerm, setSearchTerm] = useState("");
   const [activeFilter, setActiveFilter] = useState<"all" | "india" | "ecommerce" | "global">("all");
 
@@ -117,15 +117,15 @@ export function CourierDirectory({ onSelectCourierSample }: CourierDirectoryProp
           {filtered.map((c: CourierConfig) => (
             <div
               key={c.id}
-              onClick={() => onSelectCourierSample(c.sampleNumber, c.id)}
-              className="group relative flex items-center justify-between gap-3 rounded-2xl border border-slate-200/90 bg-white p-3.5 shadow-2xs hover:border-indigo-400 hover:shadow-md dark:border-slate-800 dark:bg-slate-850 dark:hover:border-indigo-700 transition-all cursor-pointer"
+              onClick={() => onSelectCourier(c.id)}
+              className="group relative flex items-center justify-between gap-3 rounded-2xl border border-slate-200/90 bg-white/95 p-3.5 shadow-2xs hover:border-indigo-400 hover:shadow-md dark:border-slate-800/90 dark:bg-slate-900/90 dark:hover:border-indigo-700/80 dark:backdrop-blur-sm transition-all cursor-pointer"
             >
               {/* Logo Emblem & Names */}
               <div className="flex items-center gap-3 min-w-0">
                 <div
-                  className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-xl font-black text-xs text-white shadow-2xs ${c.badgeColor} transition-transform group-hover:scale-105`}
+                  className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-xl font-black text-xs shadow-2xs border ${c.badgeColor.bg} ${c.badgeColor.text} ${c.badgeColor.border} ${c.badgeColor.darkBg} ${c.badgeColor.darkText} ${c.badgeColor.darkBorder} dark:[mix-blend-mode:luminosity] dark:brightness-90 dark:contrast-110 transition-transform group-hover:scale-105`}
                 >
-                  {c.shortName.slice(0, 3)}
+                  <span>{c.shortName.slice(0, 3)}</span>
                 </div>
 
                 <div className="min-w-0">
@@ -134,22 +134,22 @@ export function CourierDirectory({ onSelectCourierSample }: CourierDirectoryProp
                       {c.name}
                     </h3>
                   </div>
-                  <div className="flex items-center gap-1 mt-0.5 text-[11px] text-slate-400 font-mono truncate">
-                    <span>{c.sampleNumber}</span>
+                  <div className="flex items-center gap-1 mt-0.5 text-[11px] text-slate-400 dark:text-slate-400 font-medium truncate">
+                    <span>{c.coverage}</span>
                   </div>
                 </div>
               </div>
 
-              {/* Direct Track Button */}
+              {/* Direct Select Carrier Button */}
               <button
                 type="button"
                 onClick={(e) => {
                   e.stopPropagation();
-                  onSelectCourierSample(c.sampleNumber, c.id);
+                  onSelectCourier(c.id);
                 }}
-                className="shrink-0 flex items-center justify-center h-8 w-8 rounded-xl bg-slate-100 hover:bg-indigo-600 hover:text-white text-slate-700 dark:bg-slate-800 dark:hover:bg-indigo-600 dark:text-slate-300 dark:hover:text-white transition-all cursor-pointer"
-                title={`Track sample ${c.sampleNumber} with ${c.name}`}
-                aria-label={`Track sample with ${c.name}`}
+                className="shrink-0 flex items-center justify-center h-8 w-8 rounded-xl bg-slate-100 hover:bg-indigo-600 hover:text-white text-slate-700 dark:bg-slate-800/90 dark:hover:bg-indigo-600 dark:text-slate-300 dark:hover:text-white dark:border dark:border-slate-700/60 transition-all cursor-pointer"
+                title={`Select ${c.name} to enter tracking code`}
+                aria-label={`Select ${c.name}`}
               >
                 <ArrowRight className="h-4 w-4 stroke-[2.2]" />
               </button>

@@ -268,7 +268,7 @@ export function generateRealisticTracking(
       rangeDays: courier.avgTransitDays,
       message: isDelivered
         ? `Consignment delivered to recipient at ${destLabel}.`
-        : `Consignment is moving on schedule across ${courier.name} logistics network.`,
+        : `${activities[0].statusText} at ${activities[0].facility}.`,
     },
     bookingDetails: {
       trackingNumber: cleanNum,

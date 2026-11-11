@@ -48,6 +48,19 @@ export function TrackerHero({
     }
   }
 
+  // Listen for carrier selection from directory
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const customEvent = e as CustomEvent<{ courierId: string }>;
+      if (customEvent.detail?.courierId) {
+        setSelectedCourierId(customEvent.detail.courierId);
+        setDetectedCourier(COURIER_MAP[customEvent.detail.courierId] || null);
+      }
+    };
+    window.addEventListener("trackflow:set-courier", handler);
+    return () => window.removeEventListener("trackflow:set-courier", handler);
+  }, []);
+
   // Handle tracking number typing
   const handleInputChange = (val: string) => {
     const cleaned = val.toUpperCase();
