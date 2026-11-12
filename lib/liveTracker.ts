@@ -1,7 +1,6 @@
 import { io } from "socket.io-client";
 import { CourierConfig } from "./couriers";
 import { TrackingResult, TrackingActivity, RouteMilestone } from "@/app/api/track/route";
-import { generateSecureTrackingToken } from "./security";
 
 function formatDate(dateString?: string): string {
   if (!dateString) return "N/A";
@@ -252,8 +251,6 @@ export function normalizeLiveTrackingData(
     },
     activities,
     routeMilestones,
-    payloadHash: Buffer.from(JSON.stringify({ t: trackingNumber, c: courier.id })).toString("base64"),
-    secureToken: generateSecureTrackingToken(trackingNumber, courier.id),
   };
 }
 

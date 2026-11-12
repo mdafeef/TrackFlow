@@ -1,7 +1,7 @@
 import crypto from "crypto";
 
-// Server secret for signing tracking tokens (fallback to stable local seed if env var is unset)
-const LINK_SIGNING_SECRET = process.env.LINK_SIGNING_SECRET || "trackflow_secure_parcel_seal_v1_2026_key";
+// Ephemeral runtime key generated automatically in memory on server startup
+const LINK_SIGNING_SECRET = crypto.randomBytes(32).toString("hex");
 
 /**
  * Creates a cryptographically signed, tamper-proof tracking token.

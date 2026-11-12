@@ -4,7 +4,6 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import {
   Check,
-  ArrowLeft,
   Trash2,
   ShieldAlert,
   Volume2,
@@ -131,6 +130,7 @@ export function CameraScanClient() {
   // Camera & Decoder state
   const [cameraGuideMode, setCameraGuideMode] = useState<"barcode" | "qr" | "both">("both");
   const [isAutoNextEnabled, setIsAutoNextEnabled] = useState<boolean>(true);
+  const [isPasteAnywayEnabled, setIsPasteAnywayEnabled] = useState<boolean>(false);
   const [isSoundEnabled, setIsSoundEnabled] = useState<boolean>(true);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [cameraScanSuccess, setCameraScanSuccess] = useState<{
@@ -138,6 +138,7 @@ export function CameraScanClient() {
     carrier: string;
     formatLabel: string;
     length: number;
+    pastedAnyway?: boolean;
     ts: number;
   } | null>(null);
 
@@ -150,9 +151,12 @@ export function CameraScanClient() {
     max: 1,
   });
 
-  // Consignment ID Format Error state
+  // Consignment ID Regex / Length Format Error state
   const [formatError, setFormatError] = useState<{
     code: string;
+    rawCode: string;
+    length: number;
+    formatLabel: string;
     message: string;
     ts: number;
   } | null>(null);
@@ -200,6 +204,7 @@ export function CameraScanClient() {
   const zoomLevelRef = useRef<number>(cameraZoomLevel);
   const defaultStatusRef = useRef<StatusOption>(defaultStatus);
   const isSoundEnabledRef = useRef<boolean>(isSoundEnabled);
+  const isPasteAnywayEnabledRef = useRef<boolean>(isPasteAnywayEnabled);
 
   useEffect(() => {
     guideModeRef.current = cameraGuideMode;
@@ -216,6 +221,10 @@ export function CameraScanClient() {
   useEffect(() => {
     isSoundEnabledRef.current = isSoundEnabled;
   }, [isSoundEnabled]);
+
+  useEffect(() => {
+    isPasteAnywayEnabledRef.current = isPasteAnywayEnabled;
+  }, [isPasteAnywayEnabled]);
 
   useEffect(() => {
     stagedItemsRef.current = stagedItems;
@@ -241,12 +250,12 @@ export function CameraScanClient() {
     return () => clearTimeout(timer);
   }, [cameraScanSuccess]);
 
-  // Guaranteed auto-clear for format error alert after 2200ms
+  // Guaranteed auto-clear for format error alert after 4500ms (gives time to tap Paste Anyway)
   useEffect(() => {
     if (!formatError) return;
     const timer = setTimeout(() => {
       setFormatError(null);
-    }, 2200);
+    }, 4500);
     return () => clearTimeout(timer);
   }, [formatError]);
 
@@ -442,33 +451,46 @@ export function CameraScanClient() {
     return map[status];
   };
 
-  // Stage a confirmed scanned consignment with logical format, length & carrier auto-identification
-  // (All side effects are executed outside setStagedItems so React never double-fires or traps cameraScanSuccess)
+  // Stage a scanned consignment using regex-based length & pattern identification against known couriers
+  // (Supports immediate invalid flagging AND fallback 'Paste Anyway' mode for unrecognized formats)
   const handleStageScannedCode = useCallback(
-    (candidateCode: string) => {
+    (candidateCode: string, forcePasteAnyway: boolean = false) => {
       const rawTrimmed = candidateCode.trim();
       if (!rawTrimmed) return;
 
       const identification = identifyAndValidateConsignment(rawTrimmed);
-      if (!identification.isValid) {
+      const allowUnrecognized = forcePasteAnyway || isPasteAnywayEnabledRef.current;
+
+      if (!identification.isValid && !allowUnrecognized) {
         playScanBeep(false);
+        const normalizedPreview = identification.normalized || rawTrimmed.toUpperCase();
         const previewCode =
-          rawTrimmed.length > 26 ? `${rawTrimmed.slice(0, 24)}...` : rawTrimmed.toUpperCase();
+          normalizedPreview.length > 24
+            ? `${normalizedPreview.slice(0, 22)}...`
+            : normalizedPreview;
         setFormatError({
           code: previewCode,
+          rawCode: normalizedPreview,
+          length: identification.length,
+          formatLabel: identification.formatLabel,
           message:
             identification.error ||
-            "Invalid Consignment ID format. Expected 8–20 alphanumeric characters (e.g. EK123456789IN).",
+            "Invalid Consignment ID format. Does not match India Post (13 chars), DTDC (8–14 chars), or known courier regex patterns.",
           ts: Date.now(),
         });
         return;
       }
 
-      const cleanNum = identification.normalized;
+      const cleanNum =
+        identification.normalized || rawTrimmed.toUpperCase().replace(/\s+/g, "");
+      if (!cleanNum) return;
+
       setFormatError(null);
 
-      // Logically auto-identify carrier from the Consignment ID format & length
-      const chosenCourier = identification.courier || COURIER_MAP.speedpost;
+      const isPastedAnywayFallback = !identification.isValid && allowUnrecognized;
+      // Logically auto-identify carrier from the Consignment ID regex & length, or fallback carrier when Paste Anyway is active
+      const chosenCourier =
+        identification.courier || COURIER_MAP.dtdc || COURIER_MAP.speedpost;
 
       // Check duplicate synchronously against current stagedItemsRef
       if (stagedItemsRef.current.some((s) => s.trackingNumber === cleanNum)) {
@@ -482,6 +504,9 @@ export function CameraScanClient() {
       const activeStatus = defaultStatusRef.current;
       const dest = "Destination Hub";
       const meta = getLogicalStatusMeta(activeStatus, dest);
+      const resolvedFormatLabel = isPastedAnywayFallback
+        ? `Pasted Anyway (${cleanNum.length} chars)`
+        : identification.formatLabel;
 
       const newItem: BulkShipment = {
         id: `staged-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
@@ -489,10 +514,14 @@ export function CameraScanClient() {
         courierId: chosenCourier.id,
         courierName: chosenCourier.name,
         status: activeStatus,
-        statusText: `${meta.statusText} • ${identification.formatLabel}`,
+        statusText: `${meta.statusText} • ${resolvedFormatLabel}`,
         origin: "Origin Booking Hub",
         destination: dest,
-        articleType: activeStatus === "booked" ? "Booked Consignment" : "Registered Consignment",
+        articleType: isPastedAnywayFallback
+          ? "Unrecognized Format (Pasted Anyway)"
+          : activeStatus === "booked"
+          ? "Booked Consignment"
+          : "Registered Consignment",
         weight: "250 g",
         lastUpdated: "Scanned Just Now",
         lastLocation: meta.lastLocation,
@@ -505,9 +534,12 @@ export function CameraScanClient() {
       playScanBeep(true);
       setCameraScanSuccess({
         code: cleanNum,
-        carrier: chosenCourier.name,
-        formatLabel: identification.formatLabel,
-        length: identification.length,
+        carrier: isPastedAnywayFallback
+          ? `${chosenCourier.shortName} • Pasted Anyway`
+          : chosenCourier.name,
+        formatLabel: resolvedFormatLabel,
+        length: cleanNum.length,
+        pastedAnyway: isPastedAnywayFallback,
         ts: Date.now(),
       });
     },
@@ -618,25 +650,51 @@ export function CameraScanClient() {
         return true;
       }
 
-      // 3. Check format & length validity
+      // 3. Regex-based evaluation of string length & pattern against known courier formats (India Post, DTDC, etc.)
       const identification = identifyAndValidateConsignment(candidate);
 
       if (!identification.isValid) {
-        const inv = invalidCandidateRef.current;
-        if (inv.code === candidate && now - inv.lastSeen < 900) {
-          inv.count += 1;
-          inv.lastSeen = now;
-        } else {
+        // When Paste Anyway is OFF, immediately flag invalid/unrecognized codes on first detection
+        if (!isPasteAnywayEnabledRef.current) {
+          if (
+            invalidCandidateRef.current.code === candidate &&
+            now - invalidCandidateRef.current.lastSeen < 1800
+          ) {
+            return true;
+          }
           invalidCandidateRef.current = { code: candidate, count: 1, lastSeen: now };
-        }
-
-        if (invalidCandidateRef.current.count >= 2) {
-          invalidCandidateRef.current.count = 0;
-          scanCooldownUntilRef.current = now + 950;
-          handleStageScannedCode(candidate);
+          scanCooldownUntilRef.current = now + 900;
+          handleStageScannedCode(candidate, false);
           return true;
         }
-        return false;
+
+        // When Paste Anyway is ON, require 2 consistent frame reads for 1D barcodes before pasting unrecognized code
+        const fallbackCode = identification.normalized || candidate;
+        if (!is2DQr) {
+          const pending = pendingCandidateRef.current;
+          if (pending.code === fallbackCode && now - pending.lastSeen < 850) {
+            pending.count += 1;
+            pending.lastSeen = now;
+          } else {
+            pendingCandidateRef.current = {
+              code: fallbackCode,
+              count: 1,
+              firstSeen: now,
+              lastSeen: now,
+            };
+            return false;
+          }
+          if (pendingCandidateRef.current.count < 2) {
+            return false;
+          }
+        }
+
+        pendingCandidateRef.current = { code: "", count: 0, firstSeen: 0, lastSeen: 0 };
+        invalidCandidateRef.current = { code: "", count: 0, lastSeen: 0 };
+        lastScannedRef.current = { code: fallbackCode, timestamp: now };
+        scanCooldownUntilRef.current = now + 1250;
+        handleStageScannedCode(fallbackCode, true);
+        return true;
       }
 
       const normalizedCode = identification.normalized;
@@ -668,7 +726,7 @@ export function CameraScanClient() {
       lastScannedRef.current = { code: normalizedCode, timestamp: now };
       scanCooldownUntilRef.current = now + 1250;
 
-      handleStageScannedCode(normalizedCode);
+      handleStageScannedCode(normalizedCode, false);
       return true;
     };
 
@@ -1075,26 +1133,14 @@ export function CameraScanClient() {
       {/* ================================================================= */}
       <header className="border-b border-slate-800/90 bg-slate-900/95 px-3.5 sm:px-6 py-2.5 shrink-0">
         <div className="mx-auto max-w-2xl flex items-center justify-between gap-2">
-          {/* Left: Back to Bulk Dashboard + Title */}
-          <div className="flex items-center gap-2.5 min-w-0">
-            <button
-              type="button"
-              onClick={handleRequestCancel}
-              className="inline-flex items-center gap-1.5 rounded-xl border border-slate-700/90 bg-slate-800/90 hover:bg-slate-700 px-2.5 py-1.5 text-xs font-bold text-slate-200 transition-colors cursor-pointer shrink-0"
-              title="Back to Bulk Data Dashboard"
-            >
-              <ArrowLeft className="h-4 w-4" />
-              <span>Dashboard</span>
-            </button>
-
-            <div className="flex items-center gap-2 min-w-0">
-              <span className="hidden xs:flex h-7 w-7 items-center justify-center rounded-lg bg-indigo-500/20 text-indigo-400 border border-indigo-500/30 shrink-0">
-                <ScanLine className="h-3.5 w-3.5" />
-              </span>
-              <h1 className="text-xs sm:text-sm font-extrabold text-white tracking-tight truncate">
-                Barcode &amp; QR Scanner
-              </h1>
-            </div>
+          {/* Left: Title */}
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-indigo-500/20 text-indigo-400 border border-indigo-500/30 shrink-0">
+              <ScanLine className="h-3.5 w-3.5" />
+            </span>
+            <h1 className="text-xs sm:text-sm font-extrabold text-white tracking-tight truncate">
+              Barcode &amp; QR Scanner
+            </h1>
           </div>
 
           {/* Right: Scanned Count Badge + Sound Toggle */}
@@ -1213,6 +1259,37 @@ export function CameraScanClient() {
               <ZoomIn className="h-3.5 w-3.5" />
             </button>
           </div>
+
+          {/* Fallback 'No Rule' ON/OFF Toggle Button for Unrecognized Formats */}
+          <button
+            type="button"
+            onClick={() => {
+              setIsPasteAnywayEnabled((prev) => {
+                const next = !prev;
+                if (next && formatError) {
+                  setFormatError(null);
+                }
+                return next;
+              });
+            }}
+            className={`inline-flex items-center gap-2 rounded-xl border px-2.5 py-1.5 text-[11px] font-extrabold transition-all cursor-pointer ${
+              isPasteAnywayEnabled
+                ? "border-amber-500/60 bg-amber-500/15 text-amber-300 shadow-2xs"
+                : "border-slate-800 bg-slate-900 text-slate-300 hover:border-slate-700"
+            }`}
+            title="Toggle No Rule mode for unrecognized barcode/QR formats"
+          >
+            <span>No Rule:</span>
+            <span
+              className={`rounded px-1.5 py-0.5 text-[10px] font-black uppercase ${
+                isPasteAnywayEnabled
+                  ? "bg-amber-500 text-slate-950"
+                  : "bg-slate-800 text-slate-400"
+              }`}
+            >
+              {isPasteAnywayEnabled ? "ON" : "OFF"}
+            </span>
+          </button>
         </div>
 
         {/* Fixed Square Camera Space (No Focus Option) */}
@@ -1318,18 +1395,18 @@ export function CameraScanClient() {
               </div>
             )}
 
-            {/* Invalid Consignment ID Format Overlay inside Square Camera */}
+            {/* Invalid / Unrecognized Consignment ID Format Flagged Overlay with Fallback 'No Rule' */}
             {formatError && (
               <div
                 key={formatError.ts}
-                className="absolute inset-x-3 bottom-3 z-30 rounded-2xl border border-rose-500/90 bg-rose-950/95 p-3 text-white shadow-2xl backdrop-blur-md"
+                className="absolute inset-x-3 bottom-3 z-30 rounded-2xl border border-rose-500/90 bg-rose-950/95 p-3 text-white shadow-2xl backdrop-blur-md space-y-2"
               >
                 <div className="flex items-start gap-2">
                   <AlertTriangle className="h-4 w-4 text-rose-400 shrink-0 mt-0.5" />
                   <div className="min-w-0 flex-1 text-left">
                     <div className="flex items-center justify-between gap-1">
                       <span className="text-[11px] font-black uppercase tracking-wider text-rose-300">
-                        Invalid Format Rejected
+                        Invalid Format Flagged ({formatError.length} chars)
                       </span>
                       <span className="rounded bg-rose-900/80 px-1.5 py-0.5 font-mono text-[10px] font-bold text-rose-200 truncate max-w-[120px]">
                         {formatError.code}
@@ -1339,6 +1416,42 @@ export function CameraScanClient() {
                       {formatError.message}
                     </p>
                   </div>
+                </div>
+
+                {/* Fallback Action Row: One-Tap No Rule or Toggle No Rule ON/OFF */}
+                <div className="flex flex-wrap items-center justify-between gap-1.5 pt-1.5 border-t border-rose-800/80">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const codeToPaste = formatError.rawCode;
+                      setFormatError(null);
+                      handleStageScannedCode(codeToPaste, true);
+                    }}
+                    className="inline-flex items-center gap-1.5 rounded-xl bg-amber-500 hover:bg-amber-400 px-3 py-1.5 text-[11px] font-black text-slate-950 shadow-xs cursor-pointer transition-colors"
+                  >
+                    <Check className="h-3.5 w-3.5 stroke-[3]" />
+                    <span>No Rule ({formatError.code})</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const nextState = !isPasteAnywayEnabled;
+                      setIsPasteAnywayEnabled(nextState);
+                      if (nextState) {
+                        const codeToPaste = formatError.rawCode;
+                        setFormatError(null);
+                        handleStageScannedCode(codeToPaste, true);
+                      }
+                    }}
+                    className={`inline-flex items-center gap-1 rounded-xl border px-2.5 py-1.5 text-[10px] font-extrabold cursor-pointer transition-colors ${
+                      isPasteAnywayEnabled
+                        ? "border-amber-400 bg-amber-500/20 text-amber-200"
+                        : "border-rose-700 bg-rose-900/70 text-rose-200 hover:bg-rose-800"
+                    }`}
+                  >
+                    <span>No Rule: {isPasteAnywayEnabled ? "ON" : "OFF"}</span>
+                  </button>
                 </div>
               </div>
             )}
@@ -1421,31 +1534,37 @@ export function CameraScanClient() {
                   </div>
 
                   <div className="flex items-center gap-1.5 shrink-0">
-                    <select
-                      value={item.courierId}
-                      onChange={(e) => handleUpdateItemCarrier(item.id, e.target.value)}
-                      className="rounded-lg border border-slate-700 bg-slate-900 px-2 py-1 text-[10px] font-semibold text-slate-200 cursor-pointer"
-                    >
-                      {COURIER_LIST.map((c) => (
-                        <option key={c.id} value={c.id}>
-                          {c.shortName}
-                        </option>
-                      ))}
-                    </select>
+                    <div className="relative inline-flex items-center">
+                      <select
+                        value={item.courierId}
+                        onChange={(e) => handleUpdateItemCarrier(item.id, e.target.value)}
+                        className="appearance-none rounded-lg border border-slate-700 bg-slate-900 hover:border-indigo-500/60 pl-2 pr-6 py-1 text-[10px] font-semibold text-slate-200 focus:border-indigo-500 focus:outline-none cursor-pointer"
+                      >
+                        {COURIER_LIST.map((c) => (
+                          <option key={c.id} value={c.id}>
+                            {c.shortName}
+                          </option>
+                        ))}
+                      </select>
+                      <ChevronDown className="pointer-events-none absolute right-1.5 h-3 w-3 text-slate-400" />
+                    </div>
 
-                    <select
-                      value={item.status}
-                      onChange={(e) =>
-                        handleUpdateItemStatus(item.id, e.target.value as StatusOption)
-                      }
-                      className="rounded-lg border border-slate-700 bg-slate-900 px-2 py-1 text-[10px] font-bold text-slate-200 cursor-pointer"
-                    >
-                      <option value="booked">Booked</option>
-                      <option value="in_transit">In Transit</option>
-                      <option value="out_for_delivery">Out for Del</option>
-                      <option value="delivered">Delivered</option>
-                      <option value="returned">Returned</option>
-                    </select>
+                    <div className="relative inline-flex items-center">
+                      <select
+                        value={item.status}
+                        onChange={(e) =>
+                          handleUpdateItemStatus(item.id, e.target.value as StatusOption)
+                        }
+                        className="appearance-none rounded-lg border border-slate-700 bg-slate-900 hover:border-indigo-500/60 pl-2 pr-6 py-1 text-[10px] font-semibold text-slate-200 focus:border-indigo-500 focus:outline-none cursor-pointer"
+                      >
+                        <option value="booked">Booked</option>
+                        <option value="in_transit">In Transit</option>
+                        <option value="out_for_delivery">Out for Del</option>
+                        <option value="delivered">Delivered</option>
+                        <option value="returned">Returned</option>
+                      </select>
+                      <ChevronDown className="pointer-events-none absolute right-1.5 h-3 w-3 text-slate-400" />
+                    </div>
 
                     <button
                       type="button"
@@ -1476,7 +1595,7 @@ export function CameraScanClient() {
                   onClick={handleRequestCancel}
                   className="rounded-xl border border-slate-700 bg-slate-800 hover:bg-slate-700 px-4 py-2.5 text-xs font-bold text-slate-200 transition-colors cursor-pointer text-center"
                 >
-                  Cancel
+                  Back
                 </button>
                 <button
                   type="button"
@@ -1493,7 +1612,7 @@ export function CameraScanClient() {
                 className="order-1 sm:order-2 w-full sm:w-auto inline-flex items-center justify-center gap-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 px-5 py-2.5 text-xs font-extrabold text-white shadow-lg shadow-indigo-950/50 transition-all cursor-pointer"
               >
                 <Check className="h-4 w-4 stroke-[3]" />
-                <span>Confirm &amp; Add ({stagedItems.length})</span>
+                <span>Save &amp; Add ({stagedItems.length})</span>
               </button>
             </div>
           ) : (
@@ -1501,9 +1620,9 @@ export function CameraScanClient() {
               <button
                 type="button"
                 onClick={handleRequestCancel}
-                className="flex-1 sm:flex-none rounded-xl border border-slate-700 bg-slate-800 hover:bg-slate-700 px-5 py-2.5 text-xs font-bold text-slate-200 transition-colors cursor-pointer text-center"
+                className="rounded-xl border border-slate-700 bg-slate-800 hover:bg-slate-700 px-5 py-2.5 text-xs font-bold text-slate-200 transition-colors cursor-pointer text-center"
               >
-                Cancel &amp; Back to Dashboard
+                Back
               </button>
 
               <button

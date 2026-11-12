@@ -191,7 +191,7 @@ export function TrackerHero({
         </div>
 
         {/* Headline */}
-        <h1 className="text-3xl font-extrabold tracking-tight text-slate-900 sm:text-5xl dark:text-white max-w-3xl mx-auto text-balance">
+        <h1 className="text-3xl font-bold tracking-tight text-slate-900 sm:text-5xl dark:text-white max-w-3xl mx-auto text-balance">
           Track Any Shipment, Courier, or Post in One Place
         </h1>
 
@@ -327,8 +327,8 @@ export function TrackerHero({
                 type="text"
                 value={trackingNumber}
                 onChange={(e) => handleInputChange(e.target.value)}
-                placeholder="Enter Consignment or AWB Number..."
-                className="w-full bg-transparent py-2 text-sm sm:text-base font-mono tracking-wider font-medium text-slate-900 placeholder:font-sans placeholder:text-slate-400 focus:outline-none dark:text-white"
+                placeholder="Enter Tracking Number"
+                className="w-full bg-transparent py-2 text-sm sm:text-base font-mono tracking-wider font-semibold text-slate-900 placeholder:font-sans placeholder:font-normal placeholder:tracking-normal placeholder:text-slate-400 focus:outline-none dark:text-white"
                 autoComplete="off"
                 spellCheck="false"
               />

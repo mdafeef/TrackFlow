@@ -483,15 +483,19 @@ export interface ConsignmentIdentification {
   courier: CourierConfig | null;
   formatLabel: string;
   length: number;
+  matchedRegex?: string;
+  canPasteAnyway?: boolean;
   formatName?: string;
   lengthLabel?: string;
   error?: string;
 }
 
 /**
- * Logical Consignment ID Format, Length & Carrier Auto-Identification Engine:
- * Evaluates structure, prefix, suffix, total length, and numeric digit count
- * for both Manual Entry and Camera Barcode/QR Scanning.
+ * Regex-Based Consignment ID Format, Length & Carrier Identification Engine:
+ * Evaluates the scanned or typed string length and pattern against known courier ID regexes
+ * (such as India Post Speed Post /^[A-Z]{2}\d{9}[A-Z]{2}$/i [13 chars],
+ * DTDC /^[A-Z]{1,2}\d{7,12}$/i [8–14 chars], BlueDart, Ekart, Delhivery, etc.)
+ * to immediately flag invalid or unrecognized codes while supporting "Paste Anyway" fallback.
  */
 export function identifyAndValidateConsignment(rawCode: string): ConsignmentIdentification {
   if (!rawCode || typeof rawCode !== "string") {
@@ -501,6 +505,7 @@ export function identifyAndValidateConsignment(rawCode: string): ConsignmentIden
       courier: null,
       formatLabel: "Empty ID",
       length: 0,
+      canPasteAnyway: false,
       error: "Consignment ID cannot be empty.",
     };
   }
@@ -513,11 +518,16 @@ export function identifyAndValidateConsignment(rawCode: string): ConsignmentIden
       courier: null,
       formatLabel: "Empty ID",
       length: 0,
+      canPasteAnyway: false,
       error: "Consignment ID cannot be empty.",
     };
   }
 
-  // 1. Check for illegal characters (only letters, digits, and optional single hyphens)
+  // Strip optional single hyphens for structural & length evaluation
+  const compact = clean.replace(/-/g, "");
+  const len = compact.length;
+
+  // 1. Check for illegal characters (only letters, digits, and optional single hyphens are valid in standard AWBs)
   if (/[^A-Z0-9-]/.test(clean) || clean.startsWith("-") || clean.endsWith("-") || clean.includes("--")) {
     return {
       isValid: false,
@@ -525,24 +535,42 @@ export function identifyAndValidateConsignment(rawCode: string): ConsignmentIden
       courier: null,
       formatLabel: "Invalid Characters",
       length: clean.length,
-      error: "Invalid format: Only letters and digits are allowed in Consignment IDs.",
+      canPasteAnyway: clean.length >= 3,
+      error: `Invalid characters in "${clean.slice(0, 20)}" (${clean.length} chars). Known courier IDs only contain letters and digits (e.g. India Post EL855948618IN or DTDC B4000211866).`,
     };
   }
 
-  // Strip optional hyphens for structural analysis
-  const compact = clean.replace(/-/g, "");
-  const len = compact.length;
-
-  // 2. Check specific prefix/suffix partial errors BEFORE general length check so user gets exact logical feedback
-  // Postal UPU S10 candidate (starts with 2 letters and ends with IN, AE, OM, PH)
-  if (/^[A-Z]{2}\d+(?:IN|AE|OM|PH)$/.test(compact) && len !== 13) {
+  // 2. Check specific courier prefix/suffix regex partial errors BEFORE general length check
+  // India Post / UPU S10 candidate (starts with 2 letters and ends with IN, AE, OM, PH) -> must match /^[A-Z]{2}\d{9}[A-Z]{2}$/ (13 chars)
+  if (/^[A-Z]{2}\d+[A-Z]{2}$/.test(compact) && !/^[A-Z]{2}\d{9}[A-Z]{2}$/.test(compact)) {
     return {
       isValid: false,
       normalized: compact,
       courier: null,
-      formatLabel: "Postal S10 (Requires 13 chars)",
+      formatLabel: "India Post / EMS (Requires 13 chars)",
       length: len,
-      error: `Invalid Postal ID length (${len} chars). Postal Consignment IDs must be exactly 13 characters: 2 letters + 9 digits + 2 country letters (e.g. EL855948618IN).`,
+      matchedRegex: "^[A-Z]{2}\\d{9}[A-Z]{2}$",
+      canPasteAnyway: len >= 3,
+      error: `Invalid India Post / EMS length (${len} chars). Must be 13 chars matching /^[A-Z]{2}\\d{9}[A-Z]{2}$/ (2 letters + 9 digits + 2 letters, e.g. EL855948618IN).`,
+    };
+  }
+
+  // DTDC candidate with 1-2 letter prefix + digits but wrong length (outside 8–14 chars / 7–12 digits)
+  if (
+    /^[A-Z]{1,2}\d+$/.test(compact) &&
+    !/^(?:VL|SM|SF|MY)\d+$/i.test(compact) &&
+    !/^P\d{12,14}$/i.test(compact) &&
+    !/^[A-Z]{1,2}\d{7,12}$/.test(compact)
+  ) {
+    return {
+      isValid: false,
+      normalized: compact,
+      courier: null,
+      formatLabel: "DTDC Format (Requires 8–14 chars)",
+      length: len,
+      matchedRegex: "^[A-Z]{1,2}\\d{7,12}$",
+      canPasteAnyway: len >= 3,
+      error: `Invalid DTDC ID length (${len} chars). Must be 8–14 chars matching /^[A-Z]{1,2}\\d{7,12}$/ (1–2 letters + 7–12 digits, e.g. B4000211866).`,
     };
   }
 
@@ -554,6 +582,8 @@ export function identifyAndValidateConsignment(rawCode: string): ConsignmentIden
       courier: null,
       formatLabel: "Valmo AWB (Requires 14–16 chars)",
       length: len,
+      matchedRegex: "^VL\\d{12,14}$",
+      canPasteAnyway: len >= 3,
       error: `Invalid Valmo ID length (${len} chars). Expected VL followed by 12–14 digits (14–16 chars, e.g. VL9384729104821).`,
     };
   }
@@ -566,6 +596,8 @@ export function identifyAndValidateConsignment(rawCode: string): ConsignmentIden
       courier: null,
       formatLabel: "Ekart/Flipkart (Requires 14 chars)",
       length: len,
+      matchedRegex: "^[A-Z]{4}\\d{10}$",
+      canPasteAnyway: len >= 3,
       error: `Invalid Ekart/Flipkart ID length (${len} chars). Expected 4 letters + 10 digits (14 chars, e.g. FMPP4397267510).`,
     };
   }
@@ -578,6 +610,8 @@ export function identifyAndValidateConsignment(rawCode: string): ConsignmentIden
       courier: null,
       formatLabel: "Myntra AWB (Requires 14 chars)",
       length: len,
+      matchedRegex: "^MY[A-Z]{2}\\d{10}$",
+      canPasteAnyway: len >= 3,
       error: `Invalid Myntra ID length (${len} chars). Expected MY + 2 letters + 10 digits (14 chars, e.g. MYEX8492019482).`,
     };
   }
@@ -590,33 +624,37 @@ export function identifyAndValidateConsignment(rawCode: string): ConsignmentIden
       courier: null,
       formatLabel: "Saudi Post (Requires 16 chars)",
       length: len,
+      matchedRegex: "^ABSEPS\\d{10}$",
+      canPasteAnyway: len >= 3,
       error: `Invalid Saudi Post ID (${len} chars). Expected ABSEPS + 10 digits (16 chars).`,
     };
   }
 
-  // 3. General Length Boundaries (8 to 20 characters)
+  // 3. General Length Boundaries against known courier formats (8 to 19 characters)
   if (len < 8) {
     return {
       isValid: false,
       normalized: compact,
       courier: null,
-      formatLabel: "Need 8–20 chars",
+      formatLabel: `Too Short (${len} chars)`,
       length: len,
-      error: `Too short (${len} chars). Valid Consignment IDs require 8 to 20 characters (e.g. EL855948618IN or B4000211866).`,
+      canPasteAnyway: len >= 3,
+      error: `Too short (${len} chars). Known courier formats require 8–19 chars (e.g. India Post 13 chars: EL855948618IN, DTDC 8–14 chars: B4000211866).`,
     };
   }
-  if (len > 20) {
+  if (len > 19) {
     return {
       isValid: false,
       normalized: compact,
       courier: null,
-      formatLabel: "Exceeds 20 chars",
+      formatLabel: `Too Long (${len} chars)`,
       length: len,
-      error: `Too long (${len} chars). Valid Consignment IDs are between 8 and 20 characters.`,
+      canPasteAnyway: true,
+      error: `Too long (${len} chars). Known courier ID formats are 8–19 chars (e.g. India Post 13 chars, DTDC 8–14 chars).`,
     };
   }
 
-  // 4. Digit Count & Anti-Gibberish Check: Every real Consignment ID has at least 7 numeric digits
+  // 4. Digit Count & Anti-Gibberish Check: Known courier IDs require at least 7 numeric digits
   const digitMatches = compact.match(/\d/g);
   const digitCount = digitMatches ? digitMatches.length : 0;
   if (digitCount < 7) {
@@ -624,9 +662,10 @@ export function identifyAndValidateConsignment(rawCode: string): ConsignmentIden
       isValid: false,
       normalized: compact,
       courier: null,
-      formatLabel: "Need at least 7 digits",
+      formatLabel: "Unrecognized Pattern (<7 digits)",
       length: len,
-      error: `Invalid Consignment ID: Contains only ${digitCount} digit${digitCount === 1 ? "" : "s"}. A valid tracking ID requires at least 7 digits.`,
+      canPasteAnyway: len >= 3,
+      error: `Unrecognized format (${len} chars, ${digitCount} digits). Known courier formats require at least 7 digits (e.g. India Post EL855948618IN, DTDC B4000211866).`,
     };
   }
 
@@ -639,59 +678,52 @@ export function identifyAndValidateConsignment(rawCode: string): ConsignmentIden
       courier: null,
       formatLabel: "Invalid Repeating Digits",
       length: len,
-      error: "Invalid Consignment ID: Repetitive placeholder digits are not allowed.",
+      canPasteAnyway: true,
+      error: "Invalid Consignment ID: Repetitive placeholder digits do not match a valid courier format.",
     };
   }
 
-  // 5. Match against Priority-Ordered Carrier Formats
+  // 5. Evaluate against Priority-Ordered Known Courier Regex Patterns (India Post, Ekart, BlueDart, Delhivery, etc.)
   for (const c of DETECTION_PRIORITY_ORDER) {
     if (c.regex.test(compact)) {
       return {
         isValid: true,
         normalized: compact,
         courier: c,
-        formatLabel: `${c.shortName} Format`,
+        formatLabel: `${c.shortName} (${len} chars)`,
         length: len,
+        matchedRegex: c.regex.source,
+        canPasteAnyway: true,
         formatName: `${c.shortName} Format`,
         lengthLabel: `${len} chars`,
       };
     }
   }
 
-  // 6. Match DTDC (1–2 letters + 7–12 digits, 8–14 chars total)
+  // 6. Evaluate against DTDC Regex Pattern (/^[A-Z]{1,2}\d{7,12}$/i — 8 to 14 chars)
   if (DETECTION_FALLBACK && DETECTION_FALLBACK.regex.test(compact)) {
     return {
       isValid: true,
       normalized: compact,
       courier: DETECTION_FALLBACK,
-      formatLabel: "DTDC Alphanumeric AWB",
+      formatLabel: `DTDC (${len} chars)`,
       length: len,
+      matchedRegex: DETECTION_FALLBACK.regex.source,
+      canPasteAnyway: true,
       formatName: "DTDC Alphanumeric AWB",
       lengthLabel: `${len} chars`,
     };
   }
 
-  // 7. Standard Courier Alphanumeric Prefix + Digits + Optional Country/Hub Suffix (e.g. 1–4 letters + 7–14 digits + 0–2 letters)
-  if (/^[A-Z]{1,4}\d{7,14}[A-Z]{0,2}$/.test(compact)) {
-    const fallbackCarrier = DETECTION_FALLBACK || COURIER_LIST[0];
-    return {
-      isValid: true,
-      normalized: compact,
-      courier: fallbackCarrier,
-      formatLabel: "Standard Express AWB",
-      length: len,
-      formatName: "Standard Express AWB",
-      lengthLabel: `${len} chars`,
-    };
-  }
-
+  // 7. Unrecognized Format: Does not match any known courier regex pattern
   return {
     isValid: false,
     normalized: compact,
     courier: null,
-    formatLabel: "Unrecognized Structure",
+    formatLabel: `Unrecognized Format (${len} chars)`,
     length: len,
-    error: `Unrecognized Consignment ID structure (${len} chars). Use a valid format like EL855948618IN (13 chars), B4000211866 (11 chars), or 8–18 digit AWB.`,
+    canPasteAnyway: len >= 3,
+    error: `Unrecognized courier format (${len} chars). Does not match India Post (13 chars: EL855948618IN), DTDC (8–14 chars: B4000211866), or other known courier regex patterns.`,
   };
 }
 
@@ -722,6 +754,7 @@ export function validateConsignmentFormat(code: string): {
   courier?: CourierConfig | null;
   formatName?: string;
   lengthLabel?: string;
+  canPasteAnyway?: boolean;
   error?: string;
 } {
   return identifyAndValidateConsignment(code);

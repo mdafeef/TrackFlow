@@ -43,6 +43,26 @@ import {
   ZoomOut,
   FileText,
   FileCode,
+  LayoutDashboard,
+  User,
+  Phone,
+  MapPin,
+  FolderKanban,
+  Building2,
+  Mail,
+  BadgeCheck,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Menu,
+  Minus,
+  Filter,
+  Sparkles,
+  Layers,
+  Calendar,
+  LayoutGrid,
+  UserCheck,
+  AlertTriangle,
+  ArrowUpRight,
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import {
@@ -77,11 +97,32 @@ export interface BulkShipment {
   lastLocation: string;
   returnReason?: string;
   recipientName?: string;
+  customerPhone?: string;
+  pincode?: string;
   isImported?: boolean;
   batchId?: string;
   batchName?: string;
   importedAt?: string;
+  importedDate?: string;
 }
+
+const getTodayIso = () => new Date().toISOString().split("T")[0];
+const getYesterdayIso = () => {
+  const d = new Date();
+  d.setDate(d.getDate() - 1);
+  return d.toISOString().split("T")[0];
+};
+
+const resolveShipmentIsoDate = (s: BulkShipment): string => {
+  if (s.importedDate && /^\d{4}-\d{2}-\d{2}$/.test(s.importedDate)) {
+    return s.importedDate;
+  }
+  const combined = `${s.importedAt || ""} ${s.lastUpdated || ""}`.toLowerCase();
+  if (combined.includes("yesterday")) return getYesterdayIso();
+  const isoMatch = combined.match(/\b(\d{4}-\d{2}-\d{2})\b/);
+  if (isoMatch) return isoMatch[1];
+  return getTodayIso();
+};
 
 const DEFAULT_SHIPMENTS: BulkShipment[] = [
   {
@@ -92,12 +133,15 @@ const DEFAULT_SHIPMENTS: BulkShipment[] = [
     status: "delivered",
     statusText: "Delivered to Recipient",
     origin: "Ayyanthole SO (680003)",
-    destination: "Nedumkunnam SO (686542)",
+    destination: "Nedumkunnam SO",
+    pincode: "686542",
     articleType: "Speed Post Doc",
     weight: "45 g",
     lastUpdated: "Today, 01:44 PM",
     lastLocation: "Nedumkunnam SO",
     recipientName: "Dr. K. R. Nair",
+    customerPhone: "9847011223",
+    importedDate: getTodayIso(),
   },
   {
     id: "bulk-2",
@@ -108,11 +152,14 @@ const DEFAULT_SHIPMENTS: BulkShipment[] = [
     statusText: "Out for Delivery Today",
     origin: "Bangalore Main Hub",
     destination: "Kottakkal SO",
+    pincode: "676503",
     articleType: "Express Cargo",
     weight: "1.2 kg",
     lastUpdated: "Today, 10:30 AM",
     lastLocation: "Kottakkal Hub",
     recipientName: "Ananya Sharma",
+    customerPhone: "9895122334",
+    importedDate: getTodayIso(),
   },
   {
     id: "bulk-3",
@@ -123,11 +170,14 @@ const DEFAULT_SHIPMENTS: BulkShipment[] = [
     statusText: "In Transit to Sort Hub",
     origin: "Bhiwandi Fulfillment Hub",
     destination: "Lucknow Central Delivery",
+    pincode: "226001",
     articleType: "E-Commerce Parcel",
     weight: "450 g",
     lastUpdated: "Today, 08:15 AM",
     lastLocation: "Kanpur Transit Hub",
     recipientName: "Vikram Patel",
+    customerPhone: "9415033445",
+    importedDate: getTodayIso(),
   },
   {
     id: "bulk-4",
@@ -138,12 +188,15 @@ const DEFAULT_SHIPMENTS: BulkShipment[] = [
     statusText: "Returned to Shipper (RTO)",
     origin: "Chennai Central GPO",
     destination: "Coimbatore South",
+    pincode: "641001",
     articleType: "Registered Article",
     weight: "110 g",
     lastUpdated: "Today, 11:20 AM",
     lastLocation: "Chennai Central Hub",
     returnReason: "Addressee Moved / Incomplete Address",
     recipientName: "R. Ramanathan",
+    customerPhone: "9840144556",
+    importedDate: getTodayIso(),
   },
   {
     id: "bulk-5",
@@ -154,16 +207,19 @@ const DEFAULT_SHIPMENTS: BulkShipment[] = [
     statusText: "RTO Delivered: Customer Refused",
     origin: "Bangalore Whitefield",
     destination: "Kochi Delivery Hub",
+    pincode: "682001",
     articleType: "Commercial Sample",
     weight: "850 g",
     lastUpdated: "Yesterday, 04:45 PM",
     lastLocation: "Bangalore Return Hub",
     returnReason: "Consignee Refused Acceptance",
     recipientName: "Mathews Thomas",
+    customerPhone: "9447255667",
     isImported: true,
     batchId: "batch-demo-1",
     batchName: "Batch #1 • sample_records.xlsx",
     importedAt: "Yesterday, 04:45 PM",
+    importedDate: getYesterdayIso(),
   },
   {
     id: "bulk-6",
@@ -174,17 +230,22 @@ const DEFAULT_SHIPMENTS: BulkShipment[] = [
     statusText: "Dispatched from Airport Hub",
     origin: "Mumbai Cargo Terminal",
     destination: "Chennai Guindy Hub",
+    pincode: "600032",
     articleType: "Air Express Document",
     weight: "180 g",
     lastUpdated: "Today, 06:40 AM",
     lastLocation: "Chennai Air Hub",
     recipientName: "Pooja Verma",
+    customerPhone: "9820366778",
     isImported: true,
     batchId: "batch-demo-1",
     batchName: "Batch #1 • sample_records.xlsx",
     importedAt: "Yesterday, 04:45 PM",
+    importedDate: getYesterdayIso(),
   },
 ];
+
+export type SidebarMenuId = "dashboard" | "data" | "batches" | "analytics" | "settings" | "profile";
 
 interface BulkDashboardProps {
   onOpenTrackingResult: (trackingNumber: string, courierId: string) => void;
@@ -200,15 +261,23 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
         if (stored) {
           const list: BulkShipment[] = JSON.parse(stored);
           return list.map((s) => {
+            const extractedPin = s.pincode || (s.destination.match(/\b\d{6}\b/)?.[0] ?? "");
+            const resolvedIso = resolveShipmentIsoDate(s);
             if (s.isImported && !s.batchId) {
               return {
                 ...s,
+                pincode: extractedPin || undefined,
                 batchId: "batch-demo-1",
                 batchName: "Batch #1 • sample_records.xlsx",
                 importedAt: s.lastUpdated || "Earlier Ingestion",
+                importedDate: resolvedIso,
               };
             }
-            return s;
+            return {
+              ...s,
+              pincode: extractedPin || undefined,
+              importedDate: resolvedIso,
+            };
           });
         }
       } catch (e) {
@@ -220,13 +289,107 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
 
   const [searchFilter, setSearchFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | "delivered" | "in_transit" | "out_for_delivery" | "returned" | "booked">("all");
-  const [activeSideTab, setActiveSideTab] = useState<"filters" | "analytics" | "settings">("filters");
+  const [activeMenu, setActiveMenu] = useState<SidebarMenuId>("dashboard");
+
+  // Collapsible Left Sidebar & Mobile Drawer State
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => {
+    if (typeof window !== "undefined") {
+      try {
+        return localStorage.getItem("trackflow_sidebar_collapsed") === "true";
+      } catch {}
+    }
+    return false;
+  });
+  const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState<boolean>(false);
+
+  // Listen for mobile menu button click from top Navbar when in Workspace view
+  useEffect(() => {
+    const handleToggleDrawer = () => {
+      setIsMobileSidebarOpen((prev) => !prev);
+    };
+    window.addEventListener("trackflow:toggle-workspace-drawer", handleToggleDrawer);
+    return () => window.removeEventListener("trackflow:toggle-workspace-drawer", handleToggleDrawer);
+  }, []);
+
+  const toggleSidebarCollapse = () => {
+    setIsSidebarCollapsed((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem("trackflow_sidebar_collapsed", String(next));
+      } catch {}
+      return next;
+    });
+  };
+
+  // Custom Styled Dropdown States
+  const [isFilterBatchDropdownOpen, setIsFilterBatchDropdownOpen] = useState<boolean>(false);
+  const [isFilterStatusDropdownOpen, setIsFilterStatusDropdownOpen] = useState<boolean>(false);
+  const [isExportBatchDropdownOpen, setIsExportBatchDropdownOpen] = useState<boolean>(false);
+  const [isExportFormatDropdownOpen, setIsExportFormatDropdownOpen] = useState<boolean>(false);
+  const [isExportDateDropdownOpen, setIsExportDateDropdownOpen] = useState<boolean>(false);
+  const [isExportStatusDropdownOpen, setIsExportStatusDropdownOpen] = useState<boolean>(false);
+  const [isEditStatusDropdownOpen, setIsEditStatusDropdownOpen] = useState<boolean>(false);
+  const [openRowDropdown, setOpenRowDropdown] = useState<{
+    id: string;
+    field: "courier" | "status";
+  } | null>(null);
+
+  // Customer & Consignment Full Details Modal (triggered on clicking any row in Dashboard/Consignments table)
+  const [selectedDetailShipment, setSelectedDetailShipment] = useState<BulkShipment | null>(null);
+
+  // Batch Manager Search & Filter State
+  const [batchSearchQuery, setBatchSearchQuery] = useState<string>("");
+
+  // Date-Wise Analysis & Export States (in Analytics Tab)
+  const [analyticsDateFilter, setAnalyticsDateFilter] = useState<
+    "all" | "today" | "yesterday" | "last_7_days" | "custom"
+  >("all");
+  const [customStartDate, setCustomStartDate] = useState<string>(() => getYesterdayIso());
+  const [customEndDate, setCustomEndDate] = useState<string>(() => getTodayIso());
+  const [exportStatusTarget, setExportStatusTarget] = useState<
+    "all" | "booked" | "in_transit" | "out_for_delivery" | "delivered" | "returned"
+  >("all");
+
+  // User Profile & Account State
+  const [userProfile, setUserProfile] = useState<{
+    fullName: string;
+    email: string;
+    phone: string;
+    companyName: string;
+    role: string;
+    hubCity: string;
+    hubPincode: string;
+  }>(() => {
+    if (typeof window !== "undefined") {
+      try {
+        const raw = localStorage.getItem("trackflow_user_profile");
+        if (raw) return JSON.parse(raw);
+      } catch {}
+    }
+    return {
+      fullName: "Mhd Afeef",
+      email: "mhdafeef@gmail.com",
+      phone: "9847011223",
+      companyName: "TrackFlow Logistics Operations",
+      role: "Operations Admin",
+      hubCity: "Kochi Central Hub",
+      hubPincode: "682001",
+    };
+  });
+  const [profileSavedMsg, setProfileSavedMsg] = useState<string | null>(null);
+
+  // Inline Customer & Consignment Edit Modal State
+  const [editingShipment, setEditingShipment] = useState<BulkShipment | null>(null);
+  const [editCustomerName, setEditCustomerName] = useState("");
+  const [editCustomerPhone, setEditCustomerPhone] = useState("");
+  const [editPincode, setEditPincode] = useState("");
+  const [editDestination, setEditDestination] = useState("");
+  const [editStatus, setEditStatus] = useState<BulkShipment["status"]>("booked");
+
   const [exportBatchTargetId, setExportBatchTargetId] = useState<string>("all");
   const [exportFileExtension, setExportFileExtension] = useState<
     "csv" | "xlsx" | "xls" | "json" | "txt"
-  >("csv");
-  const [isExportBatchDropdownOpen, setIsExportBatchDropdownOpen] = useState<boolean>(false);
-  const [isExportFormatDropdownOpen, setIsExportFormatDropdownOpen] = useState<boolean>(false);
+  >("xlsx");
   const [isModalExportBatchDropdownOpen, setIsModalExportBatchDropdownOpen] = useState<boolean>(false);
   const [isModalExportFormatDropdownOpen, setIsModalExportFormatDropdownOpen] = useState<boolean>(false);
   const [batchCsvExportMsg, setBatchCsvExportMsg] = useState<string | null>(null);
@@ -343,12 +506,17 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
   const [intakeCourierSearch, setIntakeCourierSearch] = useState("");
   const intakeCourierSearchRef = useRef<HTMLInputElement | null>(null);
   const [intakeRecipient, setIntakeRecipient] = useState("");
+  const [intakePhone, setIntakePhone] = useState("");
+  const [intakePincode, setIntakePincode] = useState("");
   const [intakeDestination, setIntakeDestination] = useState("");
   const [intakeStatus, setIntakeStatus] = useState<"booked" | "in_transit" | "out_for_delivery" | "delivered" | "returned">("booked");
   const [isIntakeStatusDropdownOpen, setIsIntakeStatusDropdownOpen] = useState(false);
   const [intakeReturnReason, setIntakeReturnReason] = useState("");
   const [intakeError, setIntakeError] = useState("");
+  const [flaggedInvalidCode, setFlaggedInvalidCode] = useState<string | null>(null);
   const [isAutoNextEnabled, setIsAutoNextEnabled] = useState(true);
+  const [isPasteAnywayEnabled, setIsPasteAnywayEnabled] = useState<boolean>(false);
+  const isPasteAnywayEnabledRef = useRef<boolean>(false);
   const [recentStagedCode, setRecentStagedCode] = useState<string | null>(null);
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [cameraGuideMode, setCameraGuideMode] = useState<"barcode" | "qr" | "both">("both");
@@ -381,6 +549,10 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
     }, 750);
     return () => clearTimeout(timer);
   }, [cameraScanSuccess]);
+
+  useEffect(() => {
+    isPasteAnywayEnabledRef.current = isPasteAnywayEnabled;
+  }, [isPasteAnywayEnabled]);
 
   // Auto-filter when typing any letters while Add Consignments carrier dropdown is open
   useEffect(() => {
@@ -474,7 +646,11 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
     isUploadModalOpen ||
     isBackupModalOpen ||
     isBulkDeleteModalOpen ||
-    isDeleteExportedModalOpen;
+    isDeleteExportedModalOpen ||
+    isMobileSidebarOpen ||
+    Boolean(editingShipment) ||
+    Boolean(selectedDetailShipment) ||
+    Boolean(batchPendingDeleteId);
 
   useEffect(() => {
     if (isAnyModalOpen) {
@@ -673,26 +849,39 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
     destinationOverride?: string,
     statusOverride?: "booked" | "in_transit" | "out_for_delivery" | "delivered" | "returned",
     returnReasonOverride?: string,
-    scanSource: "manual" | "camera" = "manual"
+    scanSource: "manual" | "camera" = "manual",
+    forcePasteAnyway: boolean = false
   ) => {
-    const identification = identifyAndValidateConsignment(awbToStage);
-    if (!identification.isValid) {
+    const rawTrimmed = awbToStage.trim();
+    if (!rawTrimmed) {
+      setIntakeError("Consignment ID cannot be empty.");
+      playChime(false);
+      return;
+    }
+
+    const identification = identifyAndValidateConsignment(rawTrimmed);
+    const allowUnrecognized = forcePasteAnyway || isPasteAnywayEnabledRef.current;
+
+    if (!identification.isValid && !allowUnrecognized) {
+      setFlaggedInvalidCode(identification.normalized || rawTrimmed.toUpperCase());
       setIntakeError(
         identification.error ||
-          "Invalid Consignment ID format. Expected 8–22 alphanumeric characters (e.g. EK123456789IN)."
+          "Invalid Consignment ID format. Expected India Post (13 chars: EL855948618IN), DTDC (8–14 chars: B4000211866), or known courier regex."
       );
       playChime(false);
       return;
     }
 
-    const cleanNum = identification.normalized;
+    const cleanNum = identification.normalized || rawTrimmed.toUpperCase().replace(/\s+/g, "");
 
     // Check duplicate in currently staged list
     if (stagedConsignments.some((s) => s.trackingNumber === cleanNum)) {
+      setFlaggedInvalidCode(null);
       setIntakeError(`AWB ${cleanNum} is already in your staged review list.`);
       return;
     }
 
+    setFlaggedInvalidCode(null);
     setIntakeError("");
 
     const detected = identification.courier || autoDetectCourier(cleanNum);
@@ -711,8 +900,14 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
       statusOverride ||
       (scanSource === "camera" && isReturnedSim ? "returned" : intakeStatus);
 
-    const resolvedDest = destinationOverride?.trim() || intakeDestination.trim() || "Destination Center";
-    const resolvedOrigin = "Origin Booking Facility";
+    const resolvedPin = intakePincode.trim();
+    const resolvedDest =
+      destinationOverride?.trim() ||
+      intakeDestination.trim() ||
+      (resolvedPin ? `Pin ${resolvedPin}` : "Destination Center");
+    const resolvedOrigin = userProfile.hubCity
+      ? `${userProfile.hubCity}${userProfile.hubPincode ? ` (${userProfile.hubPincode})` : ""}`
+      : "Origin Booking Facility";
 
     const statusMetaMap: Record<
       BulkShipment["status"],
@@ -751,11 +946,13 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
       statusText: meta.statusText,
       origin: resolvedOrigin,
       destination: resolvedDest,
+      pincode: resolvedPin || undefined,
       articleType: finalStatus === "booked" ? "Booked Consignment" : "Registered Consignment",
       weight: "250 g",
       lastUpdated: "Staged Just Now",
       lastLocation: meta.lastLocation,
       recipientName: recipientOverride?.trim() || intakeRecipient.trim() || undefined,
+      customerPhone: intakePhone.trim() || undefined,
       returnReason: finalStatus === "returned" ? (returnReasonOverride || intakeReturnReason.trim() || "Delivery Attempt Failed") : undefined,
     };
 
@@ -779,6 +976,8 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
     if (isAutoNextEnabled) {
       setIntakeAwb("");
       setIntakeRecipient("");
+      setIntakePhone("");
+      setIntakePincode("");
       setIntakeDestination("");
       setIntakeReturnReason("");
       if (intakeInputRef.current) {
@@ -789,7 +988,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
         intakeInputRef.current.select();
       }
     }
-  }, [stagedConsignments, intakeCourier, intakeStatus, intakeDestination, intakeRecipient, intakeReturnReason, isAutoNextEnabled, isCameraActive, playChime]);
+  }, [stagedConsignments, intakeCourier, intakeStatus, intakeDestination, intakeRecipient, intakePhone, intakePincode, intakeReturnReason, userProfile.hubCity, userProfile.hubPincode, isAutoNextEnabled, isCameraActive, playChime]);
 
   // Handle hardware scanner or manual Enter in input
   const handleIntakeKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -820,6 +1019,68 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
         item.id === id ? { ...item, courierId: courierMeta.id, courierName: courierMeta.name } : item
       )
     );
+  };
+
+  // Update customer fields (Name, Number, Pincode, Destination) for a staged item
+  const handleUpdateStagedCustomerField = (
+    id: string,
+    field: "recipientName" | "customerPhone" | "pincode" | "destination",
+    value: string
+  ) => {
+    setStagedConsignments((prev) =>
+      prev.map((item) => (item.id === id ? { ...item, [field]: value } : item))
+    );
+  };
+
+  // Open Edit Consignment & Customer Details Modal
+  const handleOpenEditShipment = (item: BulkShipment) => {
+    setEditingShipment(item);
+    setEditCustomerName(item.recipientName || "");
+    setEditCustomerPhone(item.customerPhone || "");
+    setEditPincode(item.pincode || "");
+    setEditDestination(item.destination || "");
+    setEditStatus(item.status);
+  };
+
+  // Save Edited Consignment & Customer Details
+  const handleSaveEditShipment = () => {
+    if (!editingShipment) return;
+    const updated = shipments.map((s) => {
+      if (s.id !== editingShipment.id) return s;
+      const statusText =
+        editStatus === "booked"
+          ? "Consignment Booked at Origin"
+          : editStatus === "delivered"
+          ? "Delivered to Recipient"
+          : editStatus === "out_for_delivery"
+          ? "Out for Delivery Today"
+          : editStatus === "returned"
+          ? "Returned to Shipper (RTO)"
+          : "Active In-Transit Scan";
+      return {
+        ...s,
+        recipientName: editCustomerName.trim() || undefined,
+        customerPhone: editCustomerPhone.trim() || undefined,
+        pincode: editPincode.trim() || undefined,
+        destination: editDestination.trim() || s.destination,
+        status: editStatus,
+        statusText: editStatus !== s.status ? statusText : s.statusText,
+      };
+    });
+    saveShipments(updated);
+    setEditingShipment(null);
+    playChime(false);
+  };
+
+  // Save User Profile & Account Details
+  const handleSaveProfile = (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      localStorage.setItem("trackflow_user_profile", JSON.stringify(userProfile));
+    } catch {}
+    setProfileSavedMsg("Profile and hub settings saved.");
+    playChime(false);
+    setTimeout(() => setProfileSavedMsg(null), 4000);
   };
 
   // Update status for a staged item in review list
@@ -1474,7 +1735,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
     stopCameraStreamOnly();
   };
 
-  // Platform-Aware File Format Validation & Intelligent Column Analyzer for CSV / Excel / Google Sheets
+  // Platform-Aware File Format Validation & Intelligent Column Analyzer for Excel (.xlsx, .xls)
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setUploadError(null);
     setUploadSuccessMsg(null);
@@ -1482,10 +1743,9 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    // Security Check 1: File Extension Verification (.xlsx, .xls, .csv)
+    // Security Check 1: File Extension Verification (.xlsx, .xls only — CSV removed per user request)
     const fileName = file.name.toLowerCase();
-    const isValidExtension =
-      fileName.endsWith(".xlsx") || fileName.endsWith(".xls") || fileName.endsWith(".csv");
+    const isValidExtension = fileName.endsWith(".xlsx") || fileName.endsWith(".xls");
 
     // Reject dangerous file formats (executables, scripts, archives)
     const dangerousExtensions = [".exe", ".bat", ".cmd", ".sh", ".vbs", ".js", ".zip", ".tar", ".gz", ".pdf", ".py", ".bin"];
@@ -1493,7 +1753,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
 
     if (!isValidExtension || isDangerous) {
       setUploadError(
-        "Invalid file format: Please upload a CSV (.csv), Microsoft Excel (.xlsx, .xls), or exported Google Sheets file."
+        "Invalid file format: Please upload a Microsoft Excel (.xlsx, .xls) workbook file."
       );
       if (fileInputRef.current) fileInputRef.current.value = "";
       return;
@@ -1501,7 +1761,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
 
     // Security Check 2: File Size Limit (Max 5MB)
     if (file.size > 5 * 1024 * 1024) {
-      setUploadError("File size exceeds 5MB limit. Please upload a CSV or spreadsheet under 5MB.");
+      setUploadError("File size exceeds 5MB limit. Please upload an Excel spreadsheet under 5MB.");
       if (fileInputRef.current) fileInputRef.current.value = "";
       return;
     }
@@ -1516,7 +1776,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
 
         const firstSheetName = workbook.SheetNames[0];
         if (!firstSheetName) {
-          throw new Error("No worksheets or CSV rows found in this file.");
+          throw new Error("No worksheets found in this Excel file.");
         }
 
         const worksheet = workbook.Sheets[firstSheetName];
@@ -1526,7 +1786,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
           throw new Error("The file contains no rows. Please add tracking numbers.");
         }
 
-        // Intelligent Platform Header Analysis (supports TrackFlow Bulk CSV Export, custom CSVs, and Excel sheets)
+        // Intelligent Platform Header Analysis for Excel sheets
         const firstRow = (rows[0] || []) as unknown[];
         const headerRow = firstRow.map((h) =>
           String(h || "")
@@ -1566,7 +1826,9 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
         );
         const originColIdx = headerRow.findIndex((h) => h.includes("origin") || h.includes("source") || h.includes("from"));
         const destColIdx = headerRow.findIndex((h) => h.includes("dest") || h.includes("city") || h.includes("address") || h.includes("to"));
-        const recipientColIdx = headerRow.findIndex((h) => h.includes("recipient") || h.includes("customer") || h.includes("addressee") || h.includes("name"));
+        const recipientColIdx = headerRow.findIndex((h) => h.includes("recipient") || h.includes("customer name") || h.includes("addressee") || h === "name" || h === "customer");
+        const phoneColIdx = headerRow.findIndex((h) => h.includes("phone") || h.includes("mobile") || h.includes("contact") || h.includes("customer number"));
+        const pincodeColIdx = headerRow.findIndex((h) => h.includes("pin") || h.includes("zip") || h.includes("postal"));
         const articleTypeColIdx = headerRow.findIndex((h) => h.includes("article") || h.includes("type") || h.includes("service"));
         const weightColIdx = headerRow.findIndex((h) => h.includes("weight"));
         const returnReasonColIdx = headerRow.findIndex((h) => h.includes("return") || h.includes("rto"));
@@ -1574,7 +1836,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
 
         const startIdx = hasHeader ? 1 : 0;
         const parsedItems: BulkShipment[] = [];
-        let detectedBatchNameFromCsv = "";
+        let detectedBatchNameFromSheet = "";
 
         for (let i = startIdx; i < rows.length; i++) {
           const row = rows[i] as unknown[];
@@ -1608,6 +1870,8 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
           const detected = matchedCourierFromList || autoDetectCourier(rawAwb) || COURIER_LIST[0];
 
           const rawRecipient = recipientColIdx !== -1 ? String(row[recipientColIdx] || "").trim() : "";
+          const rawPhone = phoneColIdx !== -1 ? String(row[phoneColIdx] || "").trim() : "";
+          const rawPincode = pincodeColIdx !== -1 ? String(row[pincodeColIdx] || "").trim() : "";
           const rawOrigin = originColIdx !== -1 ? String(row[originColIdx] || "").trim() : "";
           const rawDest = destColIdx !== -1 ? String(row[destColIdx] || "").trim() : "";
           const rawArticle = articleTypeColIdx !== -1 ? String(row[articleTypeColIdx] || "").trim() : "";
@@ -1616,28 +1880,24 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
           const rawStatusText = statusTextColIdx !== -1 ? String(row[statusTextColIdx] || "").trim() : "";
           const rawReturnReason = returnReasonColIdx !== -1 ? String(row[returnReasonColIdx] || "").trim() : "";
           const rawBatchName = batchNameColIdx !== -1 ? String(row[batchNameColIdx] || "").trim() : "";
-          if (rawBatchName && !detectedBatchNameFromCsv && rawBatchName.toLowerCase() !== "standard") {
-            detectedBatchNameFromCsv = rawBatchName;
+          if (rawBatchName && !detectedBatchNameFromSheet && rawBatchName.toLowerCase() !== "standard") {
+            detectedBatchNameFromSheet = rawBatchName;
           }
 
-          // Platform-aware Status Normalization
-          let normalizedStatus: BulkShipment["status"] = "in_transit";
+          // Default status on import is "booked" unless explicitly specified otherwise in the sheet
+          let normalizedStatus: BulkShipment["status"] = "booked";
           if (rawStatus) {
-            if (rawStatus.includes("book") || rawStatus.includes("manifest") || rawStatus.includes("picked")) {
-              normalizedStatus = "booked";
-            } else if (rawStatus.includes("deliver") && !rawStatus.includes("out") && !rawStatus.includes("undeliver")) {
+            if (rawStatus.includes("deliver") && !rawStatus.includes("out") && !rawStatus.includes("undeliver")) {
               normalizedStatus = "delivered";
             } else if (rawStatus.includes("out") || rawStatus.includes("ofd") || rawStatus.includes("agent")) {
               normalizedStatus = "out_for_delivery";
             } else if (rawStatus.includes("return") || rawStatus.includes("rto") || rawStatus.includes("refused")) {
               normalizedStatus = "returned";
-            } else {
+            } else if (rawStatus.includes("transit") || rawStatus.includes("dispatch")) {
               normalizedStatus = "in_transit";
+            } else {
+              normalizedStatus = "booked";
             }
-          } else {
-            const isReturnedSim = rawAwb.includes("RT") || rawAwb.includes("RETURN");
-            const isDeliveredSim = rawAwb.endsWith("IN") && !isReturnedSim;
-            normalizedStatus = isReturnedSim ? "returned" : isDeliveredSim ? "delivered" : "in_transit";
           }
 
           const defaultStatusText =
@@ -1659,8 +1919,9 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
             status: normalizedStatus,
             statusText: rawStatusText || defaultStatusText,
             origin: rawOrigin || "Origin Logistics Facility",
-            destination: rawDest || "Destination Center",
-            articleType: rawArticle || (fileName.endsWith(".csv") ? "CSV Import" : "Bulk Import"),
+            destination: rawDest || (rawPincode ? `Pin ${rawPincode}` : "Destination Center"),
+            pincode: rawPincode || undefined,
+            articleType: rawArticle || "Bulk Import",
             weight: rawWeight || "320 g",
             lastUpdated: "Staged for Review",
             lastLocation:
@@ -1671,12 +1932,14 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                 : normalizedStatus === "delivered"
                 ? rawDest || "Destination Center"
                 : "Regional Sort Facility",
-            recipientName: rawRecipient && rawRecipient !== "N/A" ? rawRecipient : "Recipient",
+            recipientName: rawRecipient && rawRecipient !== "N/A" ? rawRecipient : undefined,
+            customerPhone: rawPhone || undefined,
             returnReason:
               normalizedStatus === "returned"
                 ? rawReturnReason || "Customer Refused / RTO"
                 : undefined,
             isImported: true,
+            importedDate: getTodayIso(),
           });
         }
 
@@ -1685,29 +1948,29 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
         }
 
         // SHOW REVIEW BEFORE IMPORT (DO NOT IMPORT DIRECTLY)
-        const cleanFile = file.name.replace(/\.(xlsx|xls|csv)$/i, "");
+        const cleanFile = file.name.replace(/\.(xlsx|xls)$/i, "");
         setPreviewFileName(file.name);
         setPreviewBatchName(
-          detectedBatchNameFromCsv || `Batch #${uniqueBatches.length + 1} • ${cleanFile || "Bulk Import"}`
+          detectedBatchNameFromSheet || `Batch #${uniqueBatches.length + 1} • ${cleanFile || "Bulk Import"}`
         );
         setPreviewShipments(parsedItems);
         if (fileInputRef.current) fileInputRef.current.value = "";
       } catch (err: unknown) {
-        setUploadError((err as Error)?.message || "Failed to parse file. Please verify the CSV/Excel format.");
+        setUploadError((err as Error)?.message || "Failed to parse file. Please verify the Excel format.");
       } finally {
         setIsUploading(false);
       }
     };
 
     reader.onerror = () => {
-      setUploadError("Could not read the uploaded file. Please verify it is a valid CSV or Excel file.");
+      setUploadError("Could not read the uploaded file. Please verify it is a valid Excel (.xlsx, .xls) file.");
       setIsUploading(false);
     };
 
     reader.readAsArrayBuffer(file);
   };
 
-  // Parse bulk pasted AWB numbers into the Review Before Import screen
+  // Parse bulk pasted AWB numbers into the Review Before Import screen (Booked default status)
   const handleParseBulkPasteForReview = () => {
     setUploadError(null);
     setUploadSuccessMsg(null);
@@ -1724,29 +1987,23 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
     const uniqueTokens = Array.from(new Set(rawTokens));
     const parsedItems: BulkShipment[] = uniqueTokens.map((rawAwb, idx) => {
       const detected = autoDetectCourier(rawAwb) || COURIER_LIST[0];
-      const isReturnedSim = rawAwb.includes("RT") || rawAwb.includes("RETURN");
-      const isDeliveredSim = rawAwb.endsWith("IN") && !isReturnedSim;
 
       return {
         id: `bulk-paste-${Date.now()}-${idx}`,
         trackingNumber: rawAwb,
         courierId: detected.id,
         courierName: detected.name,
-        status: isReturnedSim ? "returned" : isDeliveredSim ? "delivered" : "in_transit",
-        statusText: isReturnedSim
-          ? "Returned to Origin Hub (RTO)"
-          : isDeliveredSim
-          ? "Delivered to Recipient"
-          : "Active In-Transit Scan",
+        status: "booked",
+        statusText: "Consignment Booked at Origin",
         origin: "Origin Logistics Facility",
         destination: "Destination Center",
         articleType: "Bulk Paste",
         weight: "250 g",
         lastUpdated: "Staged for Review",
-        lastLocation: isReturnedSim ? "Return Hub" : "Regional Sort Facility",
-        recipientName: "Recipient",
-        returnReason: isReturnedSim ? "Delivery Attempt Failed" : undefined,
+        lastLocation: "Origin Booking Facility",
+        recipientName: undefined,
         isImported: true,
+        importedDate: getTodayIso(),
       };
     });
 
@@ -1810,7 +2067,9 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
       id: string;
       name: string;
       importedAt: string;
+      importedDate: string;
       count: number;
+      booked: number;
       delivered: number;
       inTransit: number;
       returned: number;
@@ -1824,15 +2083,19 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
         existing.count++;
         if (s.status === "delivered") existing.delivered++;
         else if (s.status === "returned") existing.returned++;
+        else if (s.status === "booked") existing.booked++;
         else existing.inTransit++;
       } else {
         batchMap.set(s.batchId, {
           id: s.batchId,
           name: s.batchName || `Batch ${s.batchId}`,
           importedAt: s.importedAt || "Imported Batch",
+          importedDate: resolveShipmentIsoDate(s),
           count: 1,
+          booked: s.status === "booked" ? 1 : 0,
           delivered: s.status === "delivered" ? 1 : 0,
-          inTransit: s.status !== "delivered" && s.status !== "returned" ? 1 : 0,
+          inTransit:
+            s.status !== "delivered" && s.status !== "returned" && s.status !== "booked" ? 1 : 0,
           returned: s.status === "returned" ? 1 : 0,
         });
       }
@@ -1858,11 +2121,12 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
     const nextBatchNum = uniqueBatches.length + 1;
     const now = new Date();
     const timeStr = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    const cleanFileName = previewFileName.replace(/\.(xlsx|xls|csv)$/i, "");
+    const cleanFileName = previewFileName.replace(/\.(xlsx|xls)$/i, "");
     const newBatchId = `batch-${Date.now()}`;
     const finalBatchName =
       previewBatchName.trim() || `Batch #${nextBatchNum} • ${cleanFileName || "Bulk Import"}`;
     const importedAtStr = `Today, ${timeStr}`;
+    const todayIso = getTodayIso();
 
     const taggedItems: BulkShipment[] = newItems.map((item) => ({
       ...item,
@@ -1871,6 +2135,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
       batchId: newBatchId,
       batchName: finalBatchName,
       importedAt: importedAtStr,
+      importedDate: todayIso,
     }));
 
     const updated = [...taggedItems, ...shipments];
@@ -2030,6 +2295,8 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
             lastLocation: String(item.lastLocation || "Hub"),
             returnReason: item.returnReason ? String(item.returnReason) : undefined,
             recipientName: item.recipientName ? String(item.recipientName) : undefined,
+            customerPhone: item.customerPhone ? String(item.customerPhone) : undefined,
+            pincode: item.pincode ? String(item.pincode) : undefined,
             isImported: item.isImported !== undefined ? Boolean(item.isImported) : true,
             batchId: item.batchId ? String(item.batchId) : undefined,
             batchName: item.batchName ? String(item.batchName) : undefined,
@@ -2084,16 +2351,15 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
     setIsReviewingSeparately(false);
   };
 
-  // Generate & Download Verified Sample Excel Template (.xlsx)
+  // Generate & Download Verified Sample Excel Template (.xlsx) with Booked default status
   const handleDownloadSampleTemplate = () => {
     try {
       const templateData = [
-        ["Tracking_Number", "Courier_Code", "Status", "Recipient_Name", "Origin", "Destination_City", "Weight", "Status_Text"],
-        ["EL855948618IN", "speedpost", "in_transit", "Dr. Rajesh Kumar", "Kochi, Kerala", "Thrissur, Kerala", "45 g", "Standard Speed Post Document"],
-        ["B4000211866", "dtdc", "booked", "Ananya Sharma", "Hyderabad, TS", "Bangalore, Karnataka", "1.2 kg", "Consignment Booked at Origin"],
-        ["FMPP4397267510", "ekart", "out_for_delivery", "Vikram Patel", "Surat, Gujarat", "Ahmedabad, Gujarat", "500 g", "Out for Delivery Today"],
-        ["12345678901", "bluedart", "delivered", "Pooja Verma", "Delhi Hub", "Mumbai, Maharashtra", "200 g", "Delivered to Recipient"],
-        ["RT855948618IN", "speedpost", "returned", "K. Ramanathan", "Madurai", "Chennai, Tamil Nadu", "110 g", "Returned to Shipper (RTO)"],
+        ["Tracking_Number", "Courier_Code", "Status", "Customer_Name", "Customer_Number", "Pincode", "Origin", "Destination_City", "Weight", "Status_Text"],
+        ["EL855948618IN", "speedpost", "booked", "Dr. Rajesh Kumar", "9847011223", "680003", "Kochi, Kerala", "Thrissur, Kerala", "45 g", "Consignment Booked at Origin"],
+        ["B4000211866", "dtdc", "booked", "Ananya Sharma", "9895122334", "560001", "Hyderabad, TS", "Bangalore, Karnataka", "1.2 kg", "Consignment Booked at Origin"],
+        ["FMPP4397267510", "ekart", "booked", "Vikram Patel", "9415033445", "380001", "Surat, Gujarat", "Ahmedabad, Gujarat", "500 g", "Consignment Booked at Origin"],
+        ["12345678901", "bluedart", "booked", "Pooja Verma", "9820366778", "400001", "Delhi Hub", "Mumbai, Maharashtra", "200 g", "Consignment Booked at Origin"],
       ];
 
       const ws = XLSX.utils.aoa_to_sheet(templateData);
@@ -2103,6 +2369,8 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
         { wch: 14 },
         { wch: 16 },
         { wch: 20 },
+        { wch: 16 },
+        { wch: 12 },
         { wch: 18 },
         { wch: 22 },
         { wch: 12 },
@@ -2118,105 +2386,106 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
     }
   };
 
-  // Generate & Download Platform-Ready Sample CSV Template (.csv)
-  const handleDownloadSampleCsvTemplate = () => {
-    try {
-      const headers = [
-        "Tracking_Number",
-        "Courier_Code",
-        "Courier_Name",
-        "Status",
-        "Status_Text",
-        "Origin",
-        "Destination",
-        "Recipient_Name",
-        "Article_Type",
-        "Weight",
-      ];
-      const sampleRows = [
-        ["EL855948618IN", "speedpost", "India Post Speed Post", "in_transit", "Active In-Transit Scan", "Kochi Hub", "Thrissur, Kerala", "Dr. Rajesh Kumar", "Speed Post Parcel", "45 g"],
-        ["B4000211866", "dtdc", "DTDC Express", "booked", "Consignment Booked at Origin", "Hyderabad Hub", "Bangalore, Karnataka", "Ananya Sharma", "Express Cargo", "1.2 kg"],
-        ["FMPP4397267510", "ekart", "Ekart Logistics", "out_for_delivery", "Out for Delivery Today", "Surat Facility", "Ahmedabad, Gujarat", "Vikram Patel", "E-Commerce Parcel", "500 g"],
-        ["12345678901", "bluedart", "Blue Dart Express", "delivered", "Delivered to Recipient", "New Delhi", "Mumbai, Maharashtra", "Pooja Verma", "Priority Air", "200 g"],
-      ];
+  // Helper to check if a shipment matches the active Date-Wise filter
+  const matchesDateFilter = useCallback(
+    (s: BulkShipment) => {
+      if (analyticsDateFilter === "all") return true;
+      const iso = resolveShipmentIsoDate(s);
+      const today = getTodayIso();
+      const yesterday = getYesterdayIso();
+      if (analyticsDateFilter === "today") return iso === today;
+      if (analyticsDateFilter === "yesterday") return iso === yesterday;
+      if (analyticsDateFilter === "last_7_days") {
+        const d7 = new Date();
+        d7.setDate(d7.getDate() - 7);
+        const minIso = d7.toISOString().split("T")[0];
+        return iso >= minIso && iso <= today;
+      }
+      if (analyticsDateFilter === "custom") {
+        const start = customStartDate || "1970-01-01";
+        const end = customEndDate || "2999-12-31";
+        return iso >= start && iso <= end;
+      }
+      return true;
+    },
+    [analyticsDateFilter, customStartDate, customEndDate]
+  );
 
-      const escapeCsvVal = (val: string) => {
-        const str = String(val ?? "");
-        if (str.includes(",") || str.includes('"') || str.includes("\n")) {
-          return `"${str.replace(/"/g, '""')}"`;
-        }
-        return str;
-      };
-
-      const csvString = [
-        headers.join(","),
-        ...sampleRows.map((r) => r.map(escapeCsvVal).join(",")),
-      ].join("\n");
-
-      const blob = new Blob([csvString], { type: "text/csv;charset=utf-8;" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "TrackFlow_Platform_Sample.csv";
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-      playChime(false);
-    } catch (e) {
-      console.error("Failed to generate sample CSV:", e);
-    }
-  };
-
-  // Bulk Export Feature: Download all tracked shipment data within a selected batch in chosen file extension (.csv, .xlsx, .xls, .json, or .txt)
+  // Advanced Date-Wise, Batch-Wise & Status-Wise Export Feature
   const handleExportBatchCsv = (overrideBatchId?: string, overrideFormat?: string) => {
-    const targetId = overrideBatchId || exportBatchTargetId || selectedBatchId || "all";
+    const targetId = overrideBatchId || exportBatchTargetId || "all";
     const listToExport = activeShipments.filter((item) => {
-      if (targetId === "all") return true;
-      if (targetId === "imported_all") return !!item.isImported;
-      if (targetId === "direct_only") return !item.isImported;
-      return item.batchId === targetId;
+      // 1. Batch filter
+      if (targetId === "imported_all" && !item.isImported) return false;
+      if (targetId === "direct_only" && item.isImported) return false;
+      if (
+        targetId !== "all" &&
+        targetId !== "imported_all" &&
+        targetId !== "direct_only" &&
+        item.batchId !== targetId
+      ) {
+        return false;
+      }
+      // 2. Date-wise filter
+      if (!matchesDateFilter(item)) return false;
+      // 3. Status filter
+      if (exportStatusTarget !== "all" && item.status !== exportStatusTarget) return false;
+      return true;
     });
 
     if (listToExport.length === 0) {
-      setBatchCsvExportMsg("No consignments found in the selected batch scope to export.");
+      setBatchCsvExportMsg("No consignments match the selected date, batch, and status filters.");
       setTimeout(() => setBatchCsvExportMsg(null), 5000);
       return;
     }
 
-    const rawChosenExt = overrideFormat || exportFileExtension || "csv";
-    const cleanExt = rawChosenExt.trim().replace(/^\.+/, "").toLowerCase() || "csv";
+    const rawChosenExt = overrideFormat || exportFileExtension || "xlsx";
+    const cleanExt = rawChosenExt.trim().replace(/^\.+/, "").toLowerCase() || "xlsx";
 
     const exportedAtIso = new Date().toISOString();
     const dateStr = exportedAtIso.split("T")[0];
 
     const batchObj = uniqueBatches.find((b) => b.id === targetId);
     const safeBatchSlug = batchObj
-      ? batchObj.name.replace(/[^a-zA-Z0-9_-]+/g, "_").slice(0, 32)
+      ? batchObj.name.replace(/[^a-zA-Z0-9_-]+/g, "_").slice(0, 28)
       : targetId === "imported_all"
       ? "All_Imported_Batches"
       : targetId === "direct_only"
       ? "Direct_Entries"
       : "All_Shipments";
 
-    const fileBaseName = `TrackFlow_Bulk_Export_${safeBatchSlug}_${dateStr}`;
+    const dateSlug =
+      analyticsDateFilter === "today"
+        ? `Today_${getTodayIso()}`
+        : analyticsDateFilter === "yesterday"
+        ? `Yesterday_${getYesterdayIso()}`
+        : analyticsDateFilter === "last_7_days"
+        ? "Last_7_Days"
+        : analyticsDateFilter === "custom"
+        ? `${customStartDate}_to_${customEndDate}`
+        : dateStr;
+
+    const fileBaseName = `TrackFlow_Export_${safeBatchSlug}_${dateSlug}`;
 
     const structuredRows = listToExport.map((s) => ({
+      Date: resolveShipmentIsoDate(s),
       Tracking_Number: s.trackingNumber,
       Courier_Code: s.courierId,
       Courier_Name: s.courierName,
       Status: s.status,
       Status_Text: s.statusText,
+      Customer_Name: s.recipientName || "",
+      Customer_Number: s.customerPhone || "",
+      Pincode: s.pincode || "",
       Origin: s.origin,
       Destination: s.destination,
-      Recipient_Name: s.recipientName || "",
       Article_Type: s.articleType,
       Weight: s.weight,
       Last_Updated: s.lastUpdated,
       Last_Location: s.lastLocation,
       Return_Reason: s.returnReason || "",
       Batch_ID: s.batchId || "direct",
-      Batch_Name: s.batchName || "Direct Dashboard Entry",
+      Batch_Name: s.batchName || "Direct Entry",
       Imported_At: s.importedAt || "Direct",
       Exported_At: exportedAtIso,
     }));
@@ -2347,10 +2616,12 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
       "Courier Network": s.courierName,
       "Status": "Delivered",
       "Status Text": s.statusText,
+      "Customer Name": s.recipientName || "N/A",
+      "Customer Number": s.customerPhone || "N/A",
+      "Pincode": s.pincode || "N/A",
       "Origin": s.origin,
       "Destination": s.destination,
       "Article Type": s.articleType,
-      "Recipient Name": s.recipientName || "N/A",
       "Last Updated": s.lastUpdated,
       "Batch Name": s.batchName || "Standard",
       "Exported At": new Date().toLocaleString(),
@@ -2398,12 +2669,15 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
 
   // Step 2: Apply Search + Delivery Status Filter on top of the selected Batch Scope
   const filteredShipments = batchScopedShipments.filter((item) => {
+    const q = searchFilter.toLowerCase();
     const matchesSearch =
-      item.trackingNumber.toLowerCase().includes(searchFilter.toLowerCase()) ||
-      item.courierName.toLowerCase().includes(searchFilter.toLowerCase()) ||
-      item.destination.toLowerCase().includes(searchFilter.toLowerCase()) ||
-      (item.recipientName && item.recipientName.toLowerCase().includes(searchFilter.toLowerCase())) ||
-      (item.batchName && item.batchName.toLowerCase().includes(searchFilter.toLowerCase()));
+      item.trackingNumber.toLowerCase().includes(q) ||
+      item.courierName.toLowerCase().includes(q) ||
+      item.destination.toLowerCase().includes(q) ||
+      (item.recipientName && item.recipientName.toLowerCase().includes(q)) ||
+      (item.customerPhone && item.customerPhone.toLowerCase().includes(q)) ||
+      (item.pincode && item.pincode.toLowerCase().includes(q)) ||
+      (item.batchName && item.batchName.toLowerCase().includes(q));
 
     if (!matchesSearch) return false;
 
@@ -2491,61 +2765,84 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
     };
   }, [activeShipments, importedCount, uniqueBatches.length]);
 
+  // Date-Wise & Batch-Wise Filtered Analytics for Analytics Tab
+  const dateWiseAnalytics = useMemo(() => {
+    const matchingShipments = activeShipments.filter((item) => {
+      if (exportBatchTargetId === "imported_all" && !item.isImported) return false;
+      if (exportBatchTargetId === "direct_only" && item.isImported) return false;
+      if (
+        exportBatchTargetId !== "all" &&
+        exportBatchTargetId !== "imported_all" &&
+        exportBatchTargetId !== "direct_only" &&
+        item.batchId !== exportBatchTargetId
+      ) {
+        return false;
+      }
+      if (!matchesDateFilter(item)) return false;
+      if (exportStatusTarget !== "all" && item.status !== exportStatusTarget) return false;
+      return true;
+    });
+
+    const bucketsMap = new Map<
+      string,
+      {
+        date: string;
+        total: number;
+        booked: number;
+        in_transit: number;
+        out_for_delivery: number;
+        delivered: number;
+        returned: number;
+      }
+    >();
+
+    matchingShipments.forEach((s) => {
+      const iso = resolveShipmentIsoDate(s);
+      const existing = bucketsMap.get(iso) || {
+        date: iso,
+        total: 0,
+        booked: 0,
+        in_transit: 0,
+        out_for_delivery: 0,
+        delivered: 0,
+        returned: 0,
+      };
+      existing.total++;
+      if (s.status === "booked") existing.booked++;
+      else if (s.status === "in_transit") existing.in_transit++;
+      else if (s.status === "out_for_delivery") existing.out_for_delivery++;
+      else if (s.status === "delivered") existing.delivered++;
+      else if (s.status === "returned") existing.returned++;
+      bucketsMap.set(iso, existing);
+    });
+
+    const dailyBuckets = Array.from(bucketsMap.values()).sort((a, b) =>
+      b.date.localeCompare(a.date)
+    );
+
+    const filteredTotal = matchingShipments.length;
+    const filteredDelivered = matchingShipments.filter((s) => s.status === "delivered").length;
+    const filteredBooked = matchingShipments.filter((s) => s.status === "booked").length;
+    const filteredInTransit = matchingShipments.filter((s) => s.status === "in_transit").length;
+    const filteredOut = matchingShipments.filter((s) => s.status === "out_for_delivery").length;
+    const filteredReturned = matchingShipments.filter((s) => s.status === "returned").length;
+    const deliveryRate = filteredTotal > 0 ? Math.round((filteredDelivered / filteredTotal) * 100) : 0;
+
+    return {
+      filteredTotal,
+      filteredBooked,
+      filteredInTransit,
+      filteredOut,
+      filteredDelivered,
+      filteredReturned,
+      deliveryRate,
+      dailyBuckets,
+    };
+  }, [activeShipments, exportBatchTargetId, exportStatusTarget, matchesDateFilter]);
+
   return (
-    /* Dashboard Page Container with comfortable side margin gaps */
-    <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 xl:px-10 py-8 space-y-6">
-      {/* SEPARATE BACKUP REVIEW MODE BANNER */}
-      {isReviewingSeparately && backupReviewData && (
-        <div className="rounded-3xl border-2 border-indigo-500 bg-indigo-50/90 dark:border-indigo-600 dark:bg-indigo-950/80 p-4 sm:p-5 shadow-md flex flex-col md:flex-row items-start md:items-center justify-between gap-4 animate-in fade-in">
-          <div className="flex items-start gap-3">
-            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-indigo-600 text-white shadow-xs">
-              <Database className="h-5 w-5" />
-            </span>
-            <div>
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="rounded-md bg-indigo-600 px-2 py-0.5 text-[10px] font-black uppercase text-white tracking-wider">
-                  Separate Review Mode Active
-                </span>
-                <span className="text-xs font-bold text-slate-900 dark:text-white font-mono">
-                  {backupReviewData.fileName}
-                </span>
-              </div>
-              <p className="text-xs text-indigo-950/80 dark:text-indigo-200/90 mt-1">
-                Viewing isolated backup snapshot with {backupReviewData.shipments.length} consignments (Exported: {backupReviewData.backupDate}). Live operational data is safe and unchanged.
-              </p>
-            </div>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2 w-full md:w-auto">
-            <button
-              type="button"
-              onClick={handleMergeBackupIntoLive}
-              className="flex-1 md:flex-initial inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-3.5 py-2 text-xs font-bold text-white shadow-xs transition-colors cursor-pointer"
-              title="Add non-duplicate records from this backup to your live dashboard"
-            >
-              <Plus className="h-3.5 w-3.5" />
-              <span>Merge into Live</span>
-            </button>
-            <button
-              type="button"
-              onClick={handleRestoreBackupOverwrite}
-              className="flex-1 md:flex-initial inline-flex items-center justify-center gap-1.5 rounded-xl border border-rose-300 bg-rose-50 hover:bg-rose-100 text-rose-700 dark:border-rose-800 dark:bg-rose-950/70 dark:text-rose-300 px-3.5 py-2 text-xs font-bold transition-colors cursor-pointer"
-              title="Overwrite live consignments with this backup"
-            >
-              <span>Replace Live</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setIsReviewingSeparately(false)}
-              className="flex-1 md:flex-initial inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 px-3.5 py-2 text-xs font-bold transition-colors cursor-pointer"
-            >
-              <X className="h-3.5 w-3.5" />
-              <span>Exit Review</span>
-            </button>
-          </div>
-        </div>
-      )}
-
+    /* Full-Screen SaaS Platform Shell with Left-Side End Menu Bar */
+    <div className="w-full min-h-[calc(100vh-3.5rem)] sm:min-h-[calc(100vh-4rem)] flex flex-col bg-slate-50/70 dark:bg-slate-950">
       {/* ============================================================== */}
       {/* TOP-RIGHT STACKED AUTO-HIDING DELIVERED NOTIFICATION CARDS     */}
       {/* ============================================================== */}
@@ -2604,777 +2901,874 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
       )}
 
       {/* ============================================================== */}
-      {/* 1. UNIFIED RESPONSIVE TOP OPERATIONS CARD (MOBILE & WEBVIEW)   */}
+      {/* FULL-SCREEN SAAS SHELL: LEFT-END MENU BAR + MAIN WORKSPACE     */}
       {/* ============================================================== */}
-      <div className="rounded-3xl border border-slate-200/90 bg-white/95 p-4 sm:p-6 shadow-xs dark:border-slate-800 dark:bg-slate-900/90 backdrop-blur-md space-y-4">
-        {/* Top Row: Brand Kicker + Title on Left, Live Sync Status + Primary Actions on Right */}
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-          {/* Title & Live Sync Pill Row (Mobile puts Sync pill top-right alongside title) */}
-          <div className="flex items-start justify-between gap-3">
-            <div className="min-w-0">
-              <div className="flex items-center gap-2 mb-1">
-                <span className="flex h-2 w-2 rounded-full bg-emerald-500 animate-pulse shrink-0" />
-                <span className="text-[10px] sm:text-[11px] font-extrabold uppercase tracking-wider text-indigo-600 dark:text-indigo-400 truncate">
-                  Enterprise Logistics Hub
-                </span>
-              </div>
-              <h1 className="text-lg sm:text-2xl font-black tracking-tight text-slate-900 dark:text-white leading-tight">
-                Bulk Shipment Operations
-              </h1>
-            </div>
-
-            {/* Mobile-First Compact Sync Timer Pill (visible on mobile/tablet right beside title) */}
-            <div className="flex lg:hidden items-center gap-1.5 bg-slate-50 dark:bg-slate-800/90 px-2.5 py-1.5 rounded-xl border border-slate-200/80 dark:border-slate-700 shrink-0">
-              <span
-                className={`h-2 w-2 rounded-full shrink-0 ${
-                  isAutoCheckEnabled ? "bg-emerald-500 animate-pulse" : "bg-slate-400"
-                }`}
-              />
-              <span className="font-mono text-[11px] font-black text-slate-900 dark:text-white tabular-nums">
-                {isAutoCheckEnabled ? formatTimer(secondsRemaining) : "Paused"}
-              </span>
-              <button
-                type="button"
-                onClick={handleRunAutoCheck}
-                disabled={isRefreshing}
-                className="p-1 rounded-lg bg-white text-slate-700 hover:text-indigo-600 dark:bg-slate-700 dark:text-slate-200 shadow-2xs cursor-pointer disabled:opacity-50"
-                title="Trigger immediate sync check"
-              >
-                <RefreshCw className={`h-3 w-3 ${isRefreshing ? "animate-spin text-indigo-600" : ""}`} />
-              </button>
-            </div>
-          </div>
-
-          {/* Action Toolbar: Symmetrical 2+1 Grid on Mobile, Crisp Horizontal Bar on WebView */}
-          <div className="grid grid-cols-2 sm:flex sm:flex-wrap items-center gap-2 sm:gap-2.5">
-            {/* Desktop Live Sync Timer Pill */}
-            <div className="hidden lg:flex items-center gap-2 bg-slate-50 dark:bg-slate-800/80 px-3 py-2 rounded-xl border border-slate-200/80 dark:border-slate-700 shadow-2xs">
-              <div className="relative flex h-2.5 w-2.5 shrink-0">
-                {isAutoCheckEnabled ? (
-                  <>
-                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
-                    <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500" />
-                  </>
-                ) : (
-                  <span className="inline-flex rounded-full h-2.5 w-2.5 bg-slate-400" />
-                )}
-              </div>
-              <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">
-                {isAutoCheckEnabled ? "Sync:" : "Paused"}
-              </span>
-              {isAutoCheckEnabled && (
-                <span className="font-mono text-xs font-black text-slate-900 dark:text-white tabular-nums">
-                  {formatTimer(secondsRemaining)}
-                </span>
-              )}
-              <button
-                type="button"
-                onClick={handleRunAutoCheck}
-                disabled={isRefreshing}
-                className="ml-1 flex items-center gap-1 rounded-lg bg-white px-2 py-1 text-[10px] font-bold text-slate-700 hover:text-indigo-600 dark:bg-slate-700 dark:text-slate-200 shadow-2xs transition-colors cursor-pointer disabled:opacity-50"
-                title="Trigger immediate sync check"
-              >
-                <RefreshCw className={`h-3 w-3 ${isRefreshing ? "animate-spin text-indigo-600" : ""}`} />
-                <span>Check Now</span>
-              </button>
-            </div>
-
-            {/* Unified All-in-One Add Consignments */}
-            <button
-              type="button"
-              onClick={() => {
-                setIntakeError("");
-                setIntakeAwb("");
-                setIntakeStatus("booked");
-                setRecentStagedCode(null);
-                setIsCancelIntakeConfirmOpen(false);
-                setIsCameraActive(false);
-                setIsAddConsignmentsModalOpen(true);
-              }}
-              className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-xs font-bold text-slate-800 hover:border-indigo-400 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 shadow-2xs transition-all cursor-pointer"
-              title="Add consignments manually, with barcode scanning devices, or via camera QR / barcode scanning"
-            >
-              <Plus className="h-4 w-4 text-indigo-600 dark:text-indigo-400 stroke-[2.5] shrink-0" />
-              <span className="truncate">Add Consignments</span>
-            </button>
-
-            {/* Bulk Import */}
-            <button
-              type="button"
-              onClick={() => {
-                if (autoCloseTimerRef.current) clearTimeout(autoCloseTimerRef.current);
-                setUploadError(null);
-                setUploadSuccessMsg(null);
-                setPreviewShipments(null);
-                setImportSuccessState(null);
-                setIsUploadModalOpen(true);
-              }}
-              className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-4 py-2.5 text-xs font-extrabold text-white shadow-xs transition-all cursor-pointer"
-            >
-              <FileSpreadsheet className="h-4 w-4 stroke-[2.4] shrink-0" />
-              <span className="truncate">Bulk Import</span>
-            </button>
-          </div>
-        </div>
-
-        {/* Bottom Row of Top Card: Integrated Interactive KPI Status Grid (3x2 on Mobile, 6-Col on WebView) */}
-        <div className="pt-3.5 border-t border-slate-100 dark:border-slate-800/80 grid grid-cols-3 lg:grid-cols-6 gap-2 sm:gap-2.5">
-          {/* Total Tracked */}
-          <button
-            type="button"
-            onClick={() => setStatusFilter("all")}
-            className={`text-left rounded-2xl border p-2.5 sm:p-3 transition-all cursor-pointer ${
-              statusFilter === "all"
-                ? "border-indigo-500 bg-indigo-50/70 shadow-2xs dark:border-indigo-500 dark:bg-indigo-950/50"
-                : "border-slate-200/80 bg-slate-50/50 hover:border-slate-300 dark:border-slate-800 dark:bg-slate-800/40"
-            }`}
-          >
-            <div className="flex items-center justify-between gap-1 text-[10px] sm:text-xs font-bold text-slate-600 dark:text-slate-300">
-              <span className="truncate">Total</span>
-              <Package className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400 shrink-0" />
-            </div>
-            <div className="mt-1 text-lg sm:text-2xl font-black text-slate-900 dark:text-white tabular-nums leading-none">
-              {totalCount}
-            </div>
-          </button>
-
-          {/* Booked */}
-          <button
-            type="button"
-            onClick={() => setStatusFilter("booked")}
-            className={`text-left rounded-2xl border p-2.5 sm:p-3 transition-all cursor-pointer ${
-              statusFilter === "booked"
-                ? "border-violet-500 bg-violet-50/70 shadow-2xs dark:border-violet-500 dark:bg-violet-950/50"
-                : "border-slate-200/80 bg-slate-50/50 hover:border-slate-300 dark:border-slate-800 dark:bg-slate-800/40"
-            }`}
-          >
-            <div className="flex items-center justify-between gap-1 text-[10px] sm:text-xs font-bold text-violet-600 dark:text-violet-400">
-              <span className="truncate">Booked</span>
-              <Package className="h-3.5 w-3.5 shrink-0" />
-            </div>
-            <div className="mt-1 text-lg sm:text-2xl font-black text-violet-600 dark:text-violet-400 tabular-nums leading-none">
-              {bookedCount}
-            </div>
-          </button>
-
-          {/* In Transit */}
-          <button
-            type="button"
-            onClick={() => setStatusFilter("in_transit")}
-            className={`text-left rounded-2xl border p-2.5 sm:p-3 transition-all cursor-pointer ${
-              statusFilter === "in_transit"
-                ? "border-sky-500 bg-sky-50/70 shadow-2xs dark:border-sky-500 dark:bg-sky-950/50"
-                : "border-slate-200/80 bg-slate-50/50 hover:border-slate-300 dark:border-slate-800 dark:bg-slate-800/40"
-            }`}
-          >
-            <div className="flex items-center justify-between gap-1 text-[10px] sm:text-xs font-bold text-sky-600 dark:text-sky-400">
-              <span className="truncate">In Transit</span>
-              <Clock className="h-3.5 w-3.5 shrink-0" />
-            </div>
-            <div className="mt-1 text-lg sm:text-2xl font-black text-sky-600 dark:text-sky-400 tabular-nums leading-none">
-              {inTransitCount}
-            </div>
-          </button>
-
-          {/* Out for Delivery */}
-          <button
-            type="button"
-            onClick={() => setStatusFilter("out_for_delivery")}
-            className={`text-left rounded-2xl border p-2.5 sm:p-3 transition-all cursor-pointer ${
-              statusFilter === "out_for_delivery"
-                ? "border-amber-500 bg-amber-50/70 shadow-2xs dark:border-amber-500 dark:bg-amber-950/50"
-                : "border-slate-200/80 bg-slate-50/50 hover:border-slate-300 dark:border-slate-800 dark:bg-slate-800/40"
-            }`}
-          >
-            <div className="flex items-center justify-between gap-1 text-[10px] sm:text-xs font-bold text-amber-600 dark:text-amber-400">
-              <span className="truncate">Out Deliv.</span>
-              <Truck className="h-3.5 w-3.5 shrink-0" />
-            </div>
-            <div className="mt-1 text-lg sm:text-2xl font-black text-amber-600 dark:text-amber-400 tabular-nums leading-none">
-              {outCount}
-            </div>
-          </button>
-
-          {/* Delivered */}
-          <button
-            type="button"
-            onClick={() => setStatusFilter("delivered")}
-            className={`text-left rounded-2xl border p-2.5 sm:p-3 transition-all cursor-pointer ${
-              statusFilter === "delivered"
-                ? "border-emerald-500 bg-emerald-50/70 shadow-2xs dark:border-emerald-500 dark:bg-emerald-950/50"
-                : "border-slate-200/80 bg-slate-50/50 hover:border-slate-300 dark:border-slate-800 dark:bg-slate-800/40"
-            }`}
-          >
-            <div className="flex items-center justify-between gap-1 text-[10px] sm:text-xs font-bold text-emerald-600 dark:text-emerald-400">
-              <span className="truncate">Delivered</span>
-              <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
-            </div>
-            <div className="mt-1 text-lg sm:text-2xl font-black text-emerald-600 dark:text-emerald-400 tabular-nums leading-none">
-              {deliveredCount}
-            </div>
-          </button>
-
-          {/* Returned / RTO */}
-          <button
-            type="button"
-            onClick={() => setStatusFilter("returned")}
-            className={`text-left rounded-2xl border p-2.5 sm:p-3 transition-all cursor-pointer ${
-              statusFilter === "returned"
-                ? "border-rose-500 bg-rose-50/70 shadow-2xs dark:border-rose-500 dark:bg-rose-950/50"
-                : "border-slate-200/80 bg-slate-50/50 hover:border-slate-300 dark:border-slate-800 dark:bg-slate-800/40"
-            }`}
-          >
-            <div className="flex items-center justify-between gap-1 text-[10px] sm:text-xs font-bold text-rose-600 dark:text-rose-400">
-              <span className="truncate">Returned</span>
-              <RotateCcw className="h-3.5 w-3.5 shrink-0" />
-            </div>
-            <div className="mt-1 text-lg sm:text-2xl font-black text-rose-600 dark:text-rose-400 tabular-nums leading-none">
-              {returnedCount}
-            </div>
-          </button>
-        </div>
-      </div>
-
-      {/* ============================================================== */}
-      {/* 3. MODERN SIDE SECTION + MAIN SHIPMENTS WORKSPACE              */}
-      {/* ============================================================== */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-        {/* LEFT / SIDE SECTION: Modern Tabbed Control Panel (Filters, Data Analytics, Settings & Bulk Export) */}
-        <aside className="lg:col-span-4 xl:col-span-4 lg:sticky lg:top-20 rounded-3xl border border-slate-200/90 bg-white shadow-xs dark:border-slate-800 dark:bg-slate-900 overflow-hidden">
-          {/* Segmented Modern Side Navigation */}
-          <div className="border-b border-slate-100 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/50 p-2">
-            <div className="grid grid-cols-3 gap-1 rounded-2xl bg-slate-200/70 dark:bg-slate-900 p-1">
-              <button
-                type="button"
-                onClick={() => setActiveSideTab("filters")}
-                className={`flex items-center justify-center gap-1.5 rounded-xl py-2 px-2 text-xs font-extrabold transition-all cursor-pointer ${
-                  activeSideTab === "filters"
-                    ? "bg-white text-indigo-600 shadow-xs dark:bg-slate-800 dark:text-indigo-400"
-                    : "text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200"
-                }`}
-              >
-                <SlidersHorizontal className="h-3.5 w-3.5 shrink-0" />
-                <span>Filters</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setActiveSideTab("analytics")}
-                className={`flex items-center justify-center gap-1.5 rounded-xl py-2 px-2 text-xs font-extrabold transition-all cursor-pointer ${
-                  activeSideTab === "analytics"
-                    ? "bg-white text-indigo-600 shadow-xs dark:bg-slate-800 dark:text-indigo-400"
-                    : "text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200"
-                }`}
-              >
-                <BarChart3 className="h-3.5 w-3.5 shrink-0" />
-                <span>Analytics</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setActiveSideTab("settings")}
-                className={`flex items-center justify-center gap-1.5 rounded-xl py-2 px-2 text-xs font-extrabold transition-all cursor-pointer ${
-                  activeSideTab === "settings"
-                    ? "bg-white text-indigo-600 shadow-xs dark:bg-slate-800 dark:text-indigo-400"
-                    : "text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200"
-                }`}
-              >
-                <Settings className="h-3.5 w-3.5 shrink-0" />
-                <span>Settings</span>
-              </button>
-            </div>
-          </div>
-
-          {/* SIDE SECTION BODY */}
-          <div className="p-4 sm:p-5 space-y-4">
-            {/* TAB 1: FILTERS & BATCH MANAGEMENT */}
-            {activeSideTab === "filters" && (
-              <div className="space-y-4 animate-in fade-in duration-150">
-                {/* Search Input */}
-                <div>
-                  <label className="text-[11px] font-extrabold uppercase tracking-wider text-slate-400 dark:text-slate-500 block mb-1.5">
-                    Quick Search
-                  </label>
-                  <div className="relative">
-                    <Search className="absolute left-3.5 top-3 h-4 w-4 text-slate-400" />
-                    <input
-                      type="text"
-                      value={searchFilter}
-                      onChange={(e) => setSearchFilter(e.target.value)}
-                      placeholder="Search AWB, Courier, City..."
-                      className="w-full rounded-2xl border border-slate-200 bg-slate-50/70 pl-10 pr-9 py-2.5 text-xs font-semibold text-slate-900 placeholder:text-slate-400 focus:border-indigo-500 focus:bg-white focus:outline-none dark:border-slate-800 dark:bg-slate-800/60 dark:text-white dark:focus:bg-slate-900 transition-colors"
-                    />
-                    {searchFilter && (
-                      <button
-                        type="button"
-                        onClick={() => setSearchFilter("")}
-                        className="absolute right-3 top-2.5 rounded-lg p-0.5 text-slate-400 hover:bg-slate-200/70 hover:text-slate-600 dark:hover:bg-slate-700"
-                        title="Clear search"
-                      >
-                        <X className="h-3.5 w-3.5" />
-                      </button>
-                    )}
+      <div className="flex flex-col lg:flex-row flex-1 min-h-[calc(100vh-3.5rem)] sm:min-h-[calc(100vh-4rem)] w-full items-stretch">
+        {/* ============================================================ */}
+        {/* MOBILE SLIDE-OVER LEFT-END SIDEBAR DRAWER                    */}
+        {/* ============================================================ */}
+        {isMobileSidebarOpen && (
+          <div className="fixed inset-0 z-50 lg:hidden flex">
+            <div
+              className="fixed inset-0 bg-slate-950/70 backdrop-blur-xs animate-in fade-in duration-150"
+              onClick={() => setIsMobileSidebarOpen(false)}
+              aria-hidden="true"
+            />
+            <aside className="relative z-10 w-72 max-w-[82vw] h-full bg-white dark:bg-slate-900 border-r border-slate-200/90 dark:border-slate-800 shadow-2xl flex flex-col justify-between overflow-y-auto animate-in slide-in-from-left duration-200">
+              <div className="p-4 space-y-5">
+                {/* Mobile Drawer Header */}
+                <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
+                  <div className="flex items-center gap-2.5">
+                    <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-600 to-violet-600 text-white shadow-xs">
+                      <Layers className="h-4 w-4" />
+                    </span>
+                    <div>
+                      <div className="text-xs font-black tracking-tight text-slate-900 dark:text-white">
+                        Workspace
+                      </div>
+                      <div className="text-[10px] font-medium text-slate-500 dark:text-slate-400">
+                        {userProfile.hubCity}
+                      </div>
+                    </div>
                   </div>
+                  <button
+                    type="button"
+                    onClick={() => setIsMobileSidebarOpen(false)}
+                    className="rounded-xl p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-slate-800 cursor-pointer"
+                    aria-label="Close menu"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
                 </div>
 
-                {/* Delivery Status Filter Stack */}
-                <div>
-                  <div className="flex items-center justify-between mb-1.5">
-                    <label className="text-[11px] font-extrabold uppercase tracking-wider text-slate-400 dark:text-slate-500">
-                      Shipment Status
-                    </label>
+                {/* Mobile Drawer Navigation Items (Clean Single-Word Logical Menu Names) */}
+                <div className="space-y-1">
+                  <div className="px-2.5 pb-1 text-[10px] font-extrabold uppercase tracking-wider text-slate-400 dark:text-slate-500">
+                    Menu
+                  </div>
+                  {(
+                    [
+                      {
+                        id: "dashboard",
+                        label: "Dashboard",
+                        icon: LayoutDashboard,
+                        badge: totalCount,
+                      },
+                      {
+                        id: "data",
+                        label: "Consignments",
+                        icon: Package,
+                        badge: filteredShipments.length,
+                      },
+                      {
+                        id: "batches",
+                        label: "Batches",
+                        icon: FolderKanban,
+                        badge: uniqueBatches.length,
+                      },
+                      {
+                        id: "analytics",
+                        label: "Analytics",
+                        icon: BarChart3,
+                        badge: dataAnalytics.formattedSize,
+                      },
+                      {
+                        id: "settings",
+                        label: "Settings",
+                        icon: Settings,
+                        badge: `${Math.round(checkIntervalSec / 60)}m`,
+                      },
+                    ] as const
+                  ).map((nav) => {
+                    const Icon = nav.icon;
+                    const isActive = activeMenu === nav.id;
+                    return (
+                      <button
+                        key={nav.id}
+                        type="button"
+                        onClick={() => {
+                          setActiveMenu(nav.id);
+                          setIsMobileSidebarOpen(false);
+                        }}
+                        className={`w-full flex items-center justify-between gap-2.5 rounded-xl px-3 py-2.5 text-xs font-bold transition-all cursor-pointer ${
+                          isActive
+                            ? "bg-gradient-to-r from-indigo-600 to-violet-600 text-white shadow-sm shadow-indigo-500/20"
+                            : "text-slate-700 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800/70"
+                        }`}
+                      >
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <Icon
+                            className={`h-4 w-4 shrink-0 ${
+                              isActive ? "text-white" : "text-indigo-600 dark:text-indigo-400"
+                            }`}
+                          />
+                          <span className="truncate">{nav.label}</span>
+                        </div>
+                        <span
+                          className={`rounded-lg px-2 py-0.5 font-mono text-[10px] font-black tabular-nums shrink-0 ${
+                            isActive
+                              ? "bg-white/20 text-white"
+                              : "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400"
+                          }`}
+                        >
+                          {nav.badge}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Status Filter inside Mobile Drawer */}
+                <div className="pt-3 border-t border-slate-100 dark:border-slate-800 space-y-2">
+                  <div className="flex items-center justify-between px-2">
+                    <span className="text-[10px] font-extrabold uppercase tracking-wider text-slate-400 dark:text-slate-500">
+                      Status Filter
+                    </span>
                     {statusFilter !== "all" && (
                       <button
                         type="button"
                         onClick={() => setStatusFilter("all")}
-                        className="text-[11px] font-bold text-indigo-600 hover:underline dark:text-indigo-400 cursor-pointer"
+                        className="text-[10px] font-bold text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer"
                       >
                         Reset
                       </button>
                     )}
                   </div>
-                  <div className="grid grid-cols-2 gap-2">
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {(
+                      [
+                        { id: "all", label: "All", count: scopedTotalCount },
+                        { id: "booked", label: "Booked", count: scopedBookedCount },
+                        { id: "in_transit", label: "In Transit", count: scopedInTransitCount },
+                        { id: "out_for_delivery", label: "Out Deliv.", count: scopedOutCount },
+                        { id: "delivered", label: "Delivered", count: scopedDeliveredCount },
+                        { id: "returned", label: "Returned", count: scopedReturnedCount },
+                      ] as const
+                    ).map((st) => (
+                      <button
+                        key={st.id}
+                        type="button"
+                        onClick={() => {
+                          setStatusFilter(st.id);
+                          if (activeMenu !== "dashboard" && activeMenu !== "data") {
+                            setActiveMenu("data");
+                          }
+                          setIsMobileSidebarOpen(false);
+                        }}
+                        className={`flex items-center justify-between rounded-xl border px-2.5 py-1.5 text-[11px] font-bold transition-all cursor-pointer ${
+                          statusFilter === st.id
+                            ? "border-indigo-600 bg-indigo-50 text-indigo-700 dark:border-indigo-500 dark:bg-indigo-950/70 dark:text-indigo-300"
+                            : "border-slate-200/80 bg-slate-50/60 text-slate-600 hover:bg-slate-100 dark:border-slate-800 dark:bg-slate-800/40 dark:text-slate-300"
+                        }`}
+                      >
+                        <span className="truncate">{st.label}</span>
+                        <span className="font-mono text-[10px] font-black tabular-nums ml-1">
+                          {st.count}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {/* Single Unified Operator Account Card in Mobile Drawer Footer */}
+              <div className="p-3.5 border-t border-slate-100 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-900">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveMenu("profile");
+                    setIsMobileSidebarOpen(false);
+                  }}
+                  className={`w-full flex items-center gap-2.5 rounded-xl border p-2.5 text-left transition-all cursor-pointer ${
+                    activeMenu === "profile"
+                      ? "border-indigo-600 bg-indigo-50/80 dark:border-indigo-500 dark:bg-indigo-950/60"
+                      : "border-slate-200/80 bg-white hover:border-indigo-400 dark:border-slate-800 dark:bg-slate-800/70"
+                  }`}
+                >
+                  <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-600 to-violet-600 text-white font-black text-xs shadow-xs">
+                    {userProfile.fullName
+                      .split(" ")
+                      .map((n) => n[0])
+                      .join("")
+                      .slice(0, 2)
+                      .toUpperCase() || "TF"}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-1">
+                      <span className="text-xs font-extrabold text-slate-900 dark:text-white truncate">
+                        {userProfile.fullName}
+                      </span>
+                      <BadgeCheck className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400 shrink-0" />
+                    </div>
+                    <div className="text-[10px] text-slate-500 dark:text-slate-400 truncate">
+                      Account · {userProfile.hubPincode}
+                    </div>
+                  </div>
+                </button>
+              </div>
+            </aside>
+          </div>
+        )}
+
+        {/* ============================================================ */}
+        {/* DESKTOP FULL-SCREEN LEFT-SIDE END MENU BAR                   */}
+        {/* ============================================================ */}
+        <aside
+          className={`hidden lg:flex lg:sticky lg:top-14 sm:lg:top-16 lg:h-[calc(100vh-3.5rem)] sm:lg:h-[calc(100vh-4rem)] self-start flex-col justify-between border-r border-slate-200/90 bg-white dark:border-slate-800/90 dark:bg-slate-900 transition-all duration-200 shrink-0 overflow-y-auto select-none ${
+            isSidebarCollapsed ? "w-[72px]" : "w-60 xl:w-64"
+          }`}
+        >
+          {/* Top Section: Sidebar Header & Navigation */}
+          <div>
+            <div
+              className={`flex items-center border-b border-slate-100 dark:border-slate-800/80 px-3.5 py-3 ${
+                isSidebarCollapsed ? "justify-center" : "justify-between"
+              }`}
+            >
+              {!isSidebarCollapsed && (
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-600 to-violet-600 text-white shadow-2xs">
+                    <Layers className="h-3.5 w-3.5" />
+                  </span>
+                  <span className="text-xs font-extrabold tracking-tight text-slate-900 dark:text-white truncate">
+                    Menu
+                  </span>
+                </div>
+              )}
+              <button
+                type="button"
+                onClick={toggleSidebarCollapse}
+                title={isSidebarCollapsed ? "Expand menu bar" : "Collapse menu bar"}
+                className="flex h-8 w-8 items-center justify-center rounded-xl border border-slate-200/80 bg-slate-50 text-slate-600 hover:border-indigo-300 hover:bg-indigo-50 hover:text-indigo-600 dark:border-slate-800 dark:bg-slate-800/80 dark:text-slate-300 dark:hover:bg-slate-800 transition-colors cursor-pointer shrink-0"
+              >
+                {isSidebarCollapsed ? (
+                  <PanelLeftOpen className="h-4 w-4" />
+                ) : (
+                  <PanelLeftClose className="h-4 w-4" />
+                )}
+              </button>
+            </div>
+
+            {/* Sidebar Section 1: Clean Single-Word Menu Items */}
+            <div className="p-2.5 space-y-1">
+              {(
+                [
+                  {
+                    id: "dashboard",
+                    label: "Dashboard",
+                    icon: LayoutDashboard,
+                    count: totalCount,
+                  },
+                  {
+                    id: "data",
+                    label: "Consignments",
+                    icon: Package,
+                    count: filteredShipments.length,
+                  },
+                  {
+                    id: "batches",
+                    label: "Batches",
+                    icon: FolderKanban,
+                    count: uniqueBatches.length,
+                  },
+                  {
+                    id: "analytics",
+                    label: "Analytics",
+                    icon: BarChart3,
+                    count: dataAnalytics.formattedSize,
+                  },
+                  {
+                    id: "settings",
+                    label: "Settings",
+                    icon: Settings,
+                    count: `${Math.round(checkIntervalSec / 60)}m`,
+                  },
+                ] as const
+              ).map((item) => {
+                const Icon = item.icon;
+                const isActive = activeMenu === item.id;
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => setActiveMenu(item.id)}
+                    title={isSidebarCollapsed ? `${item.label} (${item.count})` : undefined}
+                    className={`w-full flex items-center rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                      isSidebarCollapsed
+                        ? "justify-center p-2.5"
+                        : "justify-between gap-2.5 px-3 py-2.5"
+                    } ${
+                      isActive
+                        ? "bg-gradient-to-r from-indigo-600 to-violet-600 text-white shadow-sm shadow-indigo-500/20"
+                        : "text-slate-700 hover:bg-slate-100/90 dark:text-slate-300 dark:hover:bg-slate-800/70"
+                    }`}
+                  >
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <Icon
+                        className={`h-4 w-4 shrink-0 ${
+                          isActive ? "text-white" : "text-indigo-600 dark:text-indigo-400"
+                        }`}
+                      />
+                      {!isSidebarCollapsed && <span className="truncate">{item.label}</span>}
+                    </div>
+                    {!isSidebarCollapsed && (
+                      <span
+                        className={`rounded-lg px-2 py-0.5 font-mono text-[10px] font-black tabular-nums shrink-0 ${
+                          isActive
+                            ? "bg-white/20 text-white"
+                            : "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400"
+                        }`}
+                      >
+                        {item.count}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Sidebar Section 2: Status Filter Matrix (Only shown when expanded) */}
+            {!isSidebarCollapsed && (
+              <div className="p-2.5 pt-2 border-t border-slate-100 dark:border-slate-800/80 space-y-2">
+                <div className="flex items-center justify-between px-2">
+                  <span className="text-[10px] font-extrabold uppercase tracking-wider text-slate-400 dark:text-slate-500">
+                    Status Filter
+                  </span>
+                  {statusFilter !== "all" && (
                     <button
                       type="button"
                       onClick={() => setStatusFilter("all")}
-                      className={`flex items-center justify-between rounded-xl border px-3 py-2 text-xs font-bold transition-all cursor-pointer ${
-                        statusFilter === "all"
-                          ? "border-indigo-600 bg-indigo-600 text-white shadow-2xs"
-                          : "border-slate-200/90 bg-slate-50/70 text-slate-700 hover:bg-slate-100 dark:border-slate-800 dark:bg-slate-800/50 dark:text-slate-300"
-                      }`}
+                      className="text-[10px] font-bold text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer"
                     >
-                      <span className="truncate">All</span>
-                      <span className={`ml-1 rounded-md px-1.5 py-0.5 font-mono text-[10px] font-black tabular-nums ${
-                        statusFilter === "all" ? "bg-white/20 text-white" : "bg-slate-200/80 text-slate-700 dark:bg-slate-700 dark:text-slate-300"
-                      }`}>
-                        {scopedTotalCount}
-                      </span>
+                      Reset
                     </button>
-
-                    <button
-                      type="button"
-                      onClick={() => setStatusFilter("booked")}
-                      className={`flex items-center justify-between rounded-xl border px-3 py-2 text-xs font-bold transition-all cursor-pointer ${
-                        statusFilter === "booked"
-                          ? "border-violet-600 bg-violet-600 text-white shadow-2xs"
-                          : "border-slate-200/90 bg-slate-50/70 text-slate-700 hover:bg-violet-50/60 dark:border-slate-800 dark:bg-slate-800/50 dark:text-slate-300"
-                      }`}
-                    >
-                      <span className="truncate">Booked</span>
-                      <span className={`ml-1 rounded-md px-1.5 py-0.5 font-mono text-[10px] font-black tabular-nums ${
-                        statusFilter === "booked" ? "bg-white/20 text-white" : "bg-violet-100 text-violet-800 dark:bg-violet-950/80 dark:text-violet-300"
-                      }`}>
-                        {scopedBookedCount}
-                      </span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => setStatusFilter("in_transit")}
-                      className={`flex items-center justify-between rounded-xl border px-3 py-2 text-xs font-bold transition-all cursor-pointer ${
-                        statusFilter === "in_transit"
-                          ? "border-sky-600 bg-sky-600 text-white shadow-2xs"
-                          : "border-slate-200/90 bg-slate-50/70 text-slate-700 hover:bg-sky-50/60 dark:border-slate-800 dark:bg-slate-800/50 dark:text-slate-300"
-                      }`}
-                    >
-                      <span className="truncate">In Transit</span>
-                      <span className={`ml-1 rounded-md px-1.5 py-0.5 font-mono text-[10px] font-black tabular-nums ${
-                        statusFilter === "in_transit" ? "bg-white/20 text-white" : "bg-sky-100 text-sky-800 dark:bg-sky-950/80 dark:text-sky-300"
-                      }`}>
-                        {scopedInTransitCount}
-                      </span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => setStatusFilter("out_for_delivery")}
-                      className={`flex items-center justify-between rounded-xl border px-3 py-2 text-xs font-bold transition-all cursor-pointer ${
-                        statusFilter === "out_for_delivery"
-                          ? "border-amber-500 bg-amber-500 text-white shadow-2xs"
-                          : "border-slate-200/90 bg-slate-50/70 text-slate-700 hover:bg-amber-50/60 dark:border-slate-800 dark:bg-slate-800/50 dark:text-slate-300"
-                      }`}
-                    >
-                      <span className="truncate">Out for Deliv.</span>
-                      <span className={`ml-1 rounded-md px-1.5 py-0.5 font-mono text-[10px] font-black tabular-nums ${
-                        statusFilter === "out_for_delivery" ? "bg-white/20 text-white" : "bg-amber-100 text-amber-800 dark:bg-amber-950/80 dark:text-amber-300"
-                      }`}>
-                        {scopedOutCount}
-                      </span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => setStatusFilter("delivered")}
-                      className={`flex items-center justify-between rounded-xl border px-3 py-2 text-xs font-bold transition-all cursor-pointer ${
-                        statusFilter === "delivered"
-                          ? "border-emerald-600 bg-emerald-600 text-white shadow-2xs"
-                          : "border-slate-200/90 bg-slate-50/70 text-slate-700 hover:bg-emerald-50/60 dark:border-slate-800 dark:bg-slate-800/50 dark:text-slate-300"
-                      }`}
-                    >
-                      <span className="truncate">Delivered</span>
-                      <span className={`ml-1 rounded-md px-1.5 py-0.5 font-mono text-[10px] font-black tabular-nums ${
-                        statusFilter === "delivered" ? "bg-white/20 text-white" : "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/80 dark:text-emerald-300"
-                      }`}>
-                        {scopedDeliveredCount}
-                      </span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => setStatusFilter("returned")}
-                      className={`flex items-center justify-between rounded-xl border px-3 py-2 text-xs font-bold transition-all cursor-pointer ${
-                        statusFilter === "returned"
-                          ? "border-rose-600 bg-rose-600 text-white shadow-2xs"
-                          : "border-slate-200/90 bg-slate-50/70 text-slate-700 hover:bg-rose-50/60 dark:border-slate-800 dark:bg-slate-800/50 dark:text-slate-300"
-                      }`}
-                    >
-                      <span className="truncate">Returned</span>
-                      <span className={`ml-1 rounded-md px-1.5 py-0.5 font-mono text-[10px] font-black tabular-nums ${
-                        statusFilter === "returned" ? "bg-white/20 text-white" : "bg-rose-100 text-rose-800 dark:bg-rose-950/80 dark:text-rose-300"
-                      }`}>
-                        {scopedReturnedCount}
-                      </span>
-                    </button>
-                  </div>
-                </div>
-
-                {/* Batch Scope & Manager inside Side Section */}
-                <div className="pt-3 border-t border-slate-100 dark:border-slate-800 space-y-2.5">
-                  <div className="flex items-center justify-between">
-                    <label className="text-[11px] font-extrabold uppercase tracking-wider text-slate-400 dark:text-slate-500">
-                      Batch Scope ({uniqueBatches.length})
-                    </label>
-                    {selectedBatchId !== "all" && (
-                      <button
-                        type="button"
-                        onClick={() => setSelectedBatchId("all")}
-                        className="text-[11px] font-bold text-emerald-600 hover:underline dark:text-emerald-400 cursor-pointer"
-                      >
-                        Show All ({totalCount})
-                      </button>
-                    )}
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-1.5">
-                    <button
-                      type="button"
-                      onClick={() => setSelectedBatchId("all")}
-                      className={`rounded-xl px-2.5 py-2 text-[11px] font-bold transition-all cursor-pointer ${
-                        selectedBatchId === "all"
-                          ? "bg-indigo-600 text-white shadow-2xs"
-                          : "bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300"
-                      }`}
-                    >
-                      All Shipments ({totalCount})
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setSelectedBatchId("imported_all")}
-                      className={`rounded-xl px-2.5 py-2 text-[11px] font-bold transition-all cursor-pointer ${
-                        selectedBatchId === "imported_all"
-                          ? "bg-emerald-600 text-white shadow-2xs"
-                          : "bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300"
-                      }`}
-                    >
-                      All Imported ({importedCount})
-                    </button>
-                  </div>
-
-                  {uniqueBatches.length > 0 && (
-                    <div className="space-y-2 max-h-72 overflow-y-auto pr-1 pt-1">
-                      {uniqueBatches.map((batch) => {
-                        const isSelected = selectedBatchId === batch.id;
-                        const isEditing = editingBatchId === batch.id;
-                        const isPendingDelete = batchPendingDeleteId === batch.id;
-
-                        return (
-                          <div
-                            key={batch.id}
-                            onClick={() => {
-                              if (!isEditing && !isPendingDelete) {
-                                setSelectedBatchId(isSelected ? "all" : batch.id);
-                              }
-                            }}
-                            className={`rounded-2xl border p-3 transition-all flex flex-col gap-2 cursor-pointer ${
-                              isSelected
-                                ? "border-emerald-500 bg-emerald-50/70 dark:border-emerald-500/80 dark:bg-emerald-950/40 shadow-2xs"
-                                : "border-slate-200/90 bg-slate-50/60 hover:border-emerald-300 dark:border-slate-800 dark:bg-slate-800/40"
-                            }`}
-                          >
-                            <div className="flex items-start justify-between gap-2">
-                              {isEditing ? (
-                                <div
-                                  onClick={(e) => e.stopPropagation()}
-                                  className="flex items-center gap-1 flex-1 bg-white dark:bg-slate-900 px-2 py-1 rounded-xl border border-emerald-500"
-                                >
-                                  <input
-                                    type="text"
-                                    value={editingBatchName}
-                                    onChange={(e) => setEditingBatchName(e.target.value)}
-                                    onKeyDown={(e) => {
-                                      if (e.key === "Enter") handleSaveBatchName(batch.id);
-                                      if (e.key === "Escape") handleCancelEditBatch();
-                                    }}
-                                    autoFocus
-                                    className="text-xs font-bold text-slate-900 dark:text-white bg-transparent outline-none flex-1 min-w-0"
-                                  />
-                                  <button
-                                    type="button"
-                                    onClick={() => handleSaveBatchName(batch.id)}
-                                    className="p-1 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 cursor-pointer shrink-0"
-                                  >
-                                    <Check className="h-3 w-3" />
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={handleCancelEditBatch}
-                                    className="p-1 rounded-lg bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-300 cursor-pointer shrink-0"
-                                  >
-                                    <X className="h-3 w-3" />
-                                  </button>
-                                </div>
-                              ) : (
-                                <div className="flex-1 min-w-0">
-                                  <div className="flex items-center gap-1.5">
-                                    <span className="text-xs font-extrabold text-slate-900 dark:text-white truncate">
-                                      {batch.name}
-                                    </span>
-                                  </div>
-                                  <div className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5">
-                                    {batch.count} item{batch.count > 1 ? "s" : ""} • {batch.delivered} delivered
-                                  </div>
-                                </div>
-                              )}
-
-                              {!isEditing && (
-                                <div
-                                  onClick={(e) => e.stopPropagation()}
-                                  className="flex items-center gap-1 shrink-0"
-                                >
-                                  {isPendingDelete ? (
-                                    <div className="flex items-center gap-1 bg-rose-50 dark:bg-rose-950/90 border border-rose-200 dark:border-rose-800 rounded-lg px-1.5 py-0.5">
-                                      <button
-                                        type="button"
-                                        onClick={() => handleDeleteBatch(batch.id)}
-                                        className="rounded bg-rose-600 text-white px-1.5 py-0.5 text-[10px] font-bold cursor-pointer"
-                                      >
-                                        Del
-                                      </button>
-                                      <button
-                                        type="button"
-                                        onClick={() => setBatchPendingDeleteId(null)}
-                                        className="rounded bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 px-1.5 py-0.5 text-[10px] font-bold cursor-pointer"
-                                      >
-                                        No
-                                      </button>
-                                    </div>
-                                  ) : (
-                                    <>
-                                      <button
-                                        type="button"
-                                        onClick={() => handleExportBatchCsv(batch.id)}
-                                        className="p-1.5 rounded-lg border border-slate-200 bg-white hover:bg-indigo-50 text-indigo-600 dark:border-slate-700 dark:bg-slate-800 dark:text-indigo-400 cursor-pointer"
-                                        title="Export this batch as CSV"
-                                      >
-                                        <Download className="h-3 w-3" />
-                                      </button>
-                                      <button
-                                        type="button"
-                                        onClick={() => handleStartEditBatch(batch.id, batch.name)}
-                                        className="p-1.5 rounded-lg border border-slate-200 bg-white hover:bg-emerald-50 text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300 cursor-pointer"
-                                        title="Rename batch"
-                                      >
-                                        <Pencil className="h-3 w-3" />
-                                      </button>
-                                      <button
-                                        type="button"
-                                        onClick={() => setBatchPendingDeleteId(batch.id)}
-                                        className="p-1.5 rounded-lg border border-rose-200 bg-rose-50/70 hover:bg-rose-100 text-rose-600 dark:border-rose-900/60 dark:bg-rose-950/60 dark:text-rose-300 cursor-pointer"
-                                        title="Delete batch"
-                                      >
-                                        <Trash2 className="h-3 w-3" />
-                                      </button>
-                                    </>
-                                  )}
-                                </div>
-                              )}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
                   )}
                 </div>
-              </div>
-            )}
-
-            {/* TAB 2: DATA SIZE & VOLUME ANALYTICS */}
-            {activeSideTab === "analytics" && (
-              <div className="space-y-3.5 animate-in fade-in duration-150">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h3 className="text-xs font-extrabold text-slate-900 dark:text-white">
-                      Data Size & Volume Analytics
-                    </h3>
-                  </div>
-                  <span className="rounded-lg bg-indigo-100 dark:bg-indigo-950 px-2 py-0.5 font-mono text-[10px] font-black text-indigo-700 dark:text-indigo-300">
-                    {dataAnalytics.formattedSize}
-                  </span>
-                </div>
-
-                <div className="grid grid-cols-2 gap-2.5">
-                  <div className="rounded-2xl border border-slate-200/90 bg-slate-50/70 p-3 dark:border-slate-800 dark:bg-slate-800/50">
-                    <div className="text-[10px] font-bold uppercase text-slate-400">Total Datas Added</div>
-                    <div className="mt-1 text-xl font-black text-slate-900 dark:text-white tabular-nums">
-                      {dataAnalytics.totalRecords}
-                    </div>
-                    <div className="mt-0.5 text-[10px] text-slate-500">
-                      {dataAnalytics.importedRecords} batch • {dataAnalytics.directRecords} direct
-                    </div>
-                  </div>
-
-                  <div className="rounded-2xl border border-slate-200/90 bg-slate-50/70 p-3 dark:border-slate-800 dark:bg-slate-800/50">
-                    <div className="text-[10px] font-bold uppercase text-slate-400">Active Batches</div>
-                    <div className="mt-1 text-xl font-black text-emerald-600 dark:text-emerald-400 tabular-nums">
-                      {dataAnalytics.batchesCount}
-                    </div>
-                    <div className="mt-0.5 text-[10px] text-slate-500">
-                      Avg{" "}
-                      {dataAnalytics.batchesCount > 0
-                        ? Math.round(dataAnalytics.importedRecords / dataAnalytics.batchesCount)
-                        : 0}{" "}
-                      / batch
-                    </div>
-                  </div>
-
-                  <div className="rounded-2xl border border-slate-200/90 bg-slate-50/70 p-3 dark:border-slate-800 dark:bg-slate-800/50">
-                    <div className="text-[10px] font-bold uppercase text-slate-400">Storage Footprint</div>
-                    <div className="mt-1 text-lg font-black font-mono text-sky-600 dark:text-sky-400 tabular-nums">
-                      {dataAnalytics.formattedSize}
-                    </div>
-                    <div className="mt-0.5 text-[10px] text-slate-500 font-mono">
-                      ~{dataAnalytics.avgBytesPerRecord} B / record
-                    </div>
-                  </div>
-
-                  <div className="rounded-2xl border border-slate-200/90 bg-slate-50/70 p-3 dark:border-slate-800 dark:bg-slate-800/50">
-                    <div className="text-[10px] font-bold uppercase text-slate-400">Capacity Left</div>
-                    <div className="mt-1 text-lg font-black font-mono text-indigo-600 dark:text-indigo-400 tabular-nums">
-                      +{dataAnalytics.estimatedRemainingRecords.toLocaleString()}
-                    </div>
-                    <div className="mt-0.5 text-[10px] text-slate-500">
-                      {dataAnalytics.quotaPercent}% of 5 MB used
-                    </div>
-                  </div>
-                </div>
-
-                {/* Quota Bar */}
-                <div className="rounded-2xl border border-slate-200/80 bg-slate-50/60 p-3 dark:border-slate-800 dark:bg-slate-800/40">
-                  <div className="flex items-center justify-between text-[10px] font-mono text-slate-500 mb-1">
-                    <span>Storage Utilization ({dataAnalytics.usedBytes.toLocaleString()} Bytes)</span>
-                    <span>{dataAnalytics.quotaPercent}%</span>
-                  </div>
-                  <div className="h-2 w-full rounded-full bg-slate-200 dark:bg-slate-700 overflow-hidden">
-                    <div
-                      className="h-full bg-indigo-600 rounded-full transition-all"
-                      style={{ width: `${Math.max(2, dataAnalytics.quotaPercent)}%` }}
-                    />
-                  </div>
-                </div>
-
-                {/* Carrier Distribution */}
-                {dataAnalytics.carrierBreakdown.length > 0 && (
-                  <div className="rounded-2xl border border-slate-200/80 bg-slate-50/60 p-3 dark:border-slate-800 dark:bg-slate-800/40 space-y-2">
-                    <div className="text-[11px] font-bold text-slate-700 dark:text-slate-300">
-                      Carrier Volume Distribution
-                    </div>
-                    <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
-                      {dataAnalytics.carrierBreakdown.map((c) => (
-                        <div
-                          key={c.id}
-                          className="flex items-center justify-between text-xs bg-white dark:bg-slate-900 px-2.5 py-1.5 rounded-xl border border-slate-200/70 dark:border-slate-800"
-                        >
-                          <span className="font-semibold text-slate-700 dark:text-slate-200 truncate">
-                            {c.name}
-                          </span>
-                          <span className="font-mono text-[11px] font-black text-indigo-600 dark:text-indigo-400 shrink-0 ml-2">
-                            {c.count} ({c.percent}%)
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* TAB 3: SETTINGS, MULTI-FORMAT BULK EXPORT PER BATCH & CLEAN-UP */}
-            {activeSideTab === "settings" && (
-              <div className="space-y-4 animate-in fade-in duration-150">
-                {/* 1. BULK EXPORT FEATURE (ANY FILE EXTENSION + STYLED DROPDOWN) */}
-                <div className="rounded-2xl border border-indigo-200/90 bg-indigo-50/50 p-3.5 dark:border-indigo-900/60 dark:bg-indigo-950/30 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <FileSpreadsheet className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
-                      <span className="text-xs font-extrabold text-slate-900 dark:text-white">
-                        Bulk Export by Batch
+                <div className="grid grid-cols-2 gap-1.5">
+                  {(
+                    [
+                      { id: "all", label: "All", count: scopedTotalCount },
+                      { id: "booked", label: "Booked", count: scopedBookedCount },
+                      { id: "in_transit", label: "In Transit", count: scopedInTransitCount },
+                      { id: "out_for_delivery", label: "Out Deliv.", count: scopedOutCount },
+                      { id: "delivered", label: "Delivered", count: scopedDeliveredCount },
+                      { id: "returned", label: "Returned", count: scopedReturnedCount },
+                    ] as const
+                  ).map((st) => (
+                    <button
+                      key={st.id}
+                      type="button"
+                      onClick={() => {
+                        setStatusFilter(st.id);
+                        if (activeMenu !== "dashboard" && activeMenu !== "data") {
+                          setActiveMenu("data");
+                        }
+                      }}
+                      className={`flex items-center justify-between rounded-xl border px-2.5 py-1.5 text-[11px] font-bold transition-all cursor-pointer ${
+                        statusFilter === st.id
+                          ? "border-indigo-600 bg-indigo-50 text-indigo-700 dark:border-indigo-500 dark:bg-indigo-950/70 dark:text-indigo-300"
+                          : "border-slate-200/80 bg-slate-50/60 text-slate-600 hover:bg-slate-100 dark:border-slate-800 dark:bg-slate-800/40 dark:text-slate-300"
+                      }`}
+                    >
+                      <span className="truncate">{st.label}</span>
+                      <span className="font-mono text-[10px] font-black tabular-nums ml-1">
+                        {st.count}
                       </span>
-                    </div>
-                    <span className="rounded-md bg-indigo-100 dark:bg-indigo-950 px-2 py-0.5 text-[10px] font-mono font-bold text-indigo-700 dark:text-indigo-300 uppercase">
-                      .{exportFileExtension}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Single Unified Account Card in Sidebar Footer */}
+          <div className="p-2.5 border-t border-slate-100 dark:border-slate-800/80 bg-slate-50/70 dark:bg-slate-800/40">
+            <button
+              type="button"
+              onClick={() => setActiveMenu("profile")}
+              title={
+                isSidebarCollapsed
+                  ? `${userProfile.fullName} • Account`
+                  : "Open Account Settings"
+              }
+              className={`w-full flex items-center rounded-xl border transition-all cursor-pointer ${
+                isSidebarCollapsed ? "justify-center p-2" : "gap-2.5 p-2.5 text-left"
+              } ${
+                activeMenu === "profile"
+                  ? "border-indigo-600 bg-indigo-50/90 dark:border-indigo-500 dark:bg-indigo-950/70 shadow-2xs"
+                  : "border-slate-200/80 bg-white hover:border-indigo-400 dark:border-slate-700 dark:bg-slate-900"
+              }`}
+            >
+              <div className="relative flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-600 to-violet-600 text-white font-black text-xs shadow-xs">
+                {userProfile.fullName
+                  .split(" ")
+                  .map((n) => n[0])
+                  .join("")
+                  .slice(0, 2)
+                  .toUpperCase() || "TF"}
+                <span className="absolute -bottom-0.5 -right-0.5 h-2 w-2 rounded-full bg-emerald-500 ring-2 ring-white dark:ring-slate-900" />
+              </div>
+              {!isSidebarCollapsed && (
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-1">
+                    <span className="text-xs font-extrabold text-slate-900 dark:text-white truncate">
+                      {userProfile.fullName}
+                    </span>
+                    <BadgeCheck className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400 shrink-0" />
+                  </div>
+                  <div className="text-[10px] font-medium text-slate-500 dark:text-slate-400 truncate">
+                    Account · {userProfile.hubPincode}
+                  </div>
+                </div>
+              )}
+            </button>
+          </div>
+        </aside>
+
+        {/* ============================================================ */}
+        {/* RIGHT MAIN SAAS WORKSPACE CONTENT                            */}
+        {/* ============================================================ */}
+        <div className="flex-1 min-w-0 px-3.5 sm:px-6 lg:px-8 py-4 sm:py-6 space-y-5">
+          {/* SEPARATE BACKUP REVIEW MODE BANNER */}
+          {isReviewingSeparately && backupReviewData && (
+            <div className="rounded-3xl border-2 border-indigo-500 bg-indigo-50/90 dark:border-indigo-600 dark:bg-indigo-950/80 p-4 sm:p-5 shadow-md flex flex-col md:flex-row items-start md:items-center justify-between gap-4 animate-in fade-in">
+              <div className="flex items-start gap-3">
+                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-indigo-600 text-white shadow-xs">
+                  <Database className="h-5 w-5" />
+                </span>
+                <div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="rounded-md bg-indigo-600 px-2 py-0.5 text-[10px] font-black uppercase text-white tracking-wider">
+                      Separate Review Mode Active
+                    </span>
+                    <span className="text-xs font-bold text-slate-900 dark:text-white font-mono">
+                      {backupReviewData.fileName}
                     </span>
                   </div>
+                  <p className="text-xs text-indigo-950/80 dark:text-indigo-200/90 mt-1">
+                    Viewing isolated backup snapshot with {backupReviewData.shipments.length} consignments (Exported: {backupReviewData.backupDate}). Live operational data is safe and unchanged.
+                  </p>
+                </div>
+              </div>
 
-                  {/* Custom Styled Select Batch to Export Dropdown */}
-                  <div className="relative">
-                    <label className="text-[10px] font-bold uppercase text-slate-500 dark:text-slate-400 block mb-1">
-                      Select Batch to Export:
-                    </label>
+              <div className="flex flex-wrap items-center gap-2 w-full md:w-auto">
+                <button
+                  type="button"
+                  onClick={handleMergeBackupIntoLive}
+                  className="flex-1 md:flex-initial inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-3.5 py-2 text-xs font-bold text-white shadow-xs transition-colors cursor-pointer"
+                  title="Add non-duplicate records from this backup to your live dashboard"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  <span>Merge into Live</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleRestoreBackupOverwrite}
+                  className="flex-1 md:flex-initial inline-flex items-center justify-center gap-1.5 rounded-xl border border-rose-300 bg-rose-50 hover:bg-rose-100 text-rose-700 dark:border-rose-800 dark:bg-rose-950/70 dark:text-rose-300 px-3.5 py-2 text-xs font-bold transition-colors cursor-pointer"
+                  title="Overwrite live consignments with this backup"
+                >
+                  <span>Replace Live</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsReviewingSeparately(false)}
+                  className="flex-1 md:flex-initial inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 px-3.5 py-2 text-xs font-bold transition-colors cursor-pointer"
+                >
+                  <X className="h-3.5 w-3.5" />
+                  <span>Exit Review</span>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* ========================================================== */}
+          {/* 1. ATTRACTIVE GLASS TOP CARD WITH VISUAL ELEMENTS & METRICS */}
+          {/* ========================================================== */}
+          <div className="relative overflow-hidden rounded-2xl sm:rounded-3xl border border-indigo-200/75 dark:border-indigo-500/30 bg-gradient-to-br from-indigo-500/[0.11] via-white/90 to-emerald-500/[0.09] dark:from-indigo-500/20 dark:via-slate-900/95 dark:to-emerald-500/15 backdrop-blur-xl p-4 sm:p-5.5 shadow-sm">
+            {/* Subtle radial grid pattern + decorative glow accents */}
+            <div
+              className="pointer-events-none absolute inset-0 opacity-[0.35] dark:opacity-[0.18]"
+              style={{
+                backgroundImage:
+                  "radial-gradient(circle at 1px 1px, rgba(99, 102, 241, 0.28) 1px, transparent 0)",
+                backgroundSize: "18px 18px",
+              }}
+            />
+            <div className="pointer-events-none absolute -top-20 -left-16 h-52 w-52 rounded-full bg-indigo-500/15 blur-3xl" />
+            <div className="pointer-events-none absolute -bottom-20 -right-16 h-52 w-52 rounded-full bg-emerald-500/15 blur-3xl" />
+            <div className="pointer-events-none absolute top-0 inset-x-0 h-[2px] bg-gradient-to-r from-indigo-500 via-sky-400 to-emerald-500 opacity-75" />
+
+            <div className="relative z-10 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+              {/* Left: Mobile Menu Button + Attractive View Emblem + Title & Status Strip */}
+              <div className="flex items-start sm:items-center gap-3 min-w-0">
+                {/* Mobile Left Sidebar Drawer Trigger */}
+                <button
+                  type="button"
+                  onClick={() => setIsMobileSidebarOpen(true)}
+                  className="flex lg:hidden h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-indigo-200/80 bg-white/95 text-indigo-600 shadow-2xs hover:bg-indigo-50 dark:border-slate-700 dark:bg-slate-900/90 dark:text-indigo-400 cursor-pointer"
+                  aria-label="Open menu"
+                >
+                  <Menu className="h-4.5 w-4.5" />
+                </button>
+
+                {/* Desktop Decorative View Emblem Icon */}
+                <div className="hidden sm:flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-indigo-600 to-violet-600 text-white shadow-sm shadow-indigo-500/25 ring-4 ring-indigo-500/10">
+                  {activeMenu === "dashboard" ? (
+                    <LayoutGrid className="h-5 w-5" />
+                  ) : activeMenu === "data" ? (
+                    <Package className="h-5 w-5" />
+                  ) : activeMenu === "batches" ? (
+                    <FolderKanban className="h-5 w-5" />
+                  ) : activeMenu === "analytics" ? (
+                    <BarChart3 className="h-5 w-5" />
+                  ) : activeMenu === "settings" ? (
+                    <Settings className="h-5 w-5" />
+                  ) : (
+                    <User className="h-5 w-5" />
+                  )}
+                </div>
+
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <h1 className="text-lg sm:text-xl font-bold tracking-tight text-slate-900 dark:text-white leading-tight truncate">
+                        {activeMenu === "dashboard"
+                          ? "Dashboard"
+                          : activeMenu === "data"
+                          ? "Consignments"
+                          : activeMenu === "batches"
+                          ? "Batches"
+                          : activeMenu === "analytics"
+                          ? "Analytics"
+                          : activeMenu === "settings"
+                          ? "Settings"
+                          : "Account"}
+                      </h1>
+                      <span className="hidden md:inline-flex items-center gap-1 rounded-full bg-indigo-500/10 dark:bg-indigo-400/15 border border-indigo-500/20 px-2.5 py-0.5 text-[11px] font-semibold text-indigo-700 dark:text-indigo-300">
+                        <span className="h-1.5 w-1.5 rounded-full bg-indigo-500" />
+                        <span>{totalCount} Active</span>
+                      </span>
+                      {totalCount > 0 && (
+                        <span className="hidden xl:inline-flex items-center gap-1 rounded-full bg-emerald-500/10 dark:bg-emerald-400/15 border border-emerald-500/20 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-700 dark:text-emerald-300">
+                          <CheckCircle2 className="h-3 w-3" />
+                          <span>{Math.round((deliveredCount / totalCount) * 100)}% Delivered</span>
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Mobile Account Avatar Shortcut */}
+                    <button
+                      type="button"
+                      onClick={() => setActiveMenu("profile")}
+                      className="flex lg:hidden h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-600 to-violet-600 text-white font-bold text-[11px] shadow-xs cursor-pointer"
+                      title="Account"
+                    >
+                      {userProfile.fullName
+                        .split(" ")
+                        .map((n) => n[0])
+                        .join("")
+                        .slice(0, 2)
+                        .toUpperCase() || "TF"}
+                    </button>
+                  </div>
+
+                  {/* Status Metadata Strip: Origin Hub + Live Sync Time Pill + Batch Filter Indicator */}
+                  <div className="mt-1.5 flex flex-wrap items-center gap-1.5 sm:gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setActiveMenu("profile")}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-white/90 hover:bg-white dark:bg-slate-900/90 dark:hover:bg-slate-900 border border-slate-200/80 dark:border-slate-700/80 px-2.5 py-1 text-[11px] font-semibold text-slate-700 dark:text-slate-300 shadow-2xs transition-colors cursor-pointer"
+                      title="Origin Hub"
+                    >
+                      <MapPin className="h-3 w-3 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                      <span className="truncate max-w-[165px] sm:max-w-[220px]">
+                        {userProfile.hubCity} ({userProfile.hubPincode})
+                      </span>
+                    </button>
+
+                    {/* Suitable Sync Time & Instant Refresh Pill */}
+                    <div className="inline-flex items-center gap-1.5 rounded-lg bg-white/90 dark:bg-slate-900/90 border border-slate-200/80 dark:border-slate-700/80 pl-2.5 pr-1 py-0.5 text-[11px] shadow-2xs">
+                      <span
+                        className={`h-1.5 w-1.5 rounded-full shrink-0 ${
+                          isAutoCheckEnabled ? "bg-emerald-500 animate-pulse" : "bg-amber-500"
+                        }`}
+                      />
+                      <span className="font-medium text-slate-500 dark:text-slate-400">
+                        {isAutoCheckEnabled ? "Sync" : "Paused"}
+                      </span>
+                      {isAutoCheckEnabled && (
+                        <span className="font-mono font-bold text-slate-800 dark:text-slate-200 tabular-nums">
+                          {formatTimer(secondsRemaining)}
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        onClick={handleRunAutoCheck}
+                        disabled={isRefreshing}
+                        className="ml-0.5 inline-flex items-center gap-1 rounded-md bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950/80 dark:hover:bg-indigo-900/80 px-2 py-0.5 text-[10px] font-bold text-indigo-600 dark:text-indigo-300 transition-colors cursor-pointer disabled:opacity-50"
+                        title="Sync now"
+                      >
+                        <RefreshCw
+                          className={`h-2.5 w-2.5 ${isRefreshing ? "animate-spin" : ""}`}
+                        />
+                        <span>Sync</span>
+                      </button>
+                    </div>
+
+                    {selectedBatchId !== "all" && (
+                      <span className="inline-flex items-center gap-1 rounded-lg bg-emerald-500/10 border border-emerald-500/25 px-2 py-0.5 text-[11px] font-semibold text-emerald-700 dark:text-emerald-300">
+                        <FolderKanban className="h-3 w-3 shrink-0" />
+                        <span className="truncate max-w-[140px]">
+                          {selectedBatchId === "imported_all"
+                            ? "All Imported"
+                            : uniqueBatches.find((b) => b.id === selectedBatchId)?.name || "Batch Filter"}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setSelectedBatchId("all")}
+                          className="ml-0.5 hover:text-rose-600 cursor-pointer"
+                          title="Clear batch filter"
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Right: Logically Placed Primary Action Buttons */}
+              <div className="grid grid-cols-2 sm:flex items-center gap-2 sm:gap-2.5 w-full lg:w-auto shrink-0">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIntakeError("");
+                    setIntakeAwb("");
+                    setIntakeStatus("booked");
+                    setRecentStagedCode(null);
+                    setIsCancelIntakeConfirmOpen(false);
+                    setIsCameraActive(false);
+                    setIsAddConsignmentsModalOpen(true);
+                  }}
+                  className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-200/90 bg-white/95 hover:bg-white px-3.5 py-2.5 text-xs font-bold text-slate-800 shadow-2xs hover:border-indigo-300 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:border-indigo-500/60 transition-all cursor-pointer whitespace-nowrap"
+                >
+                  <Plus className="h-4 w-4 text-indigo-600 dark:text-indigo-400 stroke-[2.4] shrink-0" />
+                  <span>Add Consignment</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (autoCloseTimerRef.current) clearTimeout(autoCloseTimerRef.current);
+                    setUploadError(null);
+                    setUploadSuccessMsg(null);
+                    setPreviewShipments(null);
+                    setImportSuccessState(null);
+                    setIsUploadModalOpen(true);
+                  }}
+                  className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-700 hover:to-violet-700 px-4 py-2.5 text-xs font-bold text-white shadow-sm shadow-indigo-500/20 transition-all cursor-pointer whitespace-nowrap"
+                >
+                  <FileSpreadsheet className="h-4 w-4 stroke-[2.2] shrink-0" />
+                  <span>Bulk Import</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* ============================================================ */}
+          {/* VIEW 1 & 2: DASHBOARD OVERVIEW & ALL DATA DIRECTORY          */}
+          {/* ============================================================ */}
+          {(activeMenu === "dashboard" || activeMenu === "data") && (
+            <div className="space-y-5 animate-in fade-in duration-150">
+              {/* Transparent Gradient KPI Cards on Dashboard view */}
+              {activeMenu === "dashboard" && (
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setStatusFilter("all")}
+                    className={`text-left rounded-2xl border p-3.5 transition-all cursor-pointer backdrop-blur-md ${
+                      statusFilter === "all"
+                        ? "border-indigo-500 bg-gradient-to-br from-indigo-500/15 via-indigo-500/5 to-white dark:from-indigo-500/25 dark:to-slate-900 shadow-xs"
+                        : "border-slate-200/90 bg-white/90 hover:border-indigo-300 dark:border-slate-800 dark:bg-slate-900/90"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-1 text-xs font-semibold text-slate-600 dark:text-slate-300">
+                      <span className="truncate">Total Active</span>
+                      <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 shrink-0">
+                        <Package className="h-3.5 w-3.5" />
+                      </span>
+                    </div>
+                    <div className="mt-2 text-2xl font-bold tracking-tight text-slate-900 dark:text-white tabular-nums">
+                      {totalCount}
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setStatusFilter("booked")}
+                    className={`text-left rounded-2xl border p-3.5 transition-all cursor-pointer backdrop-blur-md ${
+                      statusFilter === "booked"
+                        ? "border-violet-500 bg-gradient-to-br from-violet-500/15 via-violet-500/5 to-white dark:from-violet-500/25 dark:to-slate-900 shadow-xs"
+                        : "border-slate-200/90 bg-white/90 hover:border-violet-300 dark:border-slate-800 dark:bg-slate-900/90"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-1 text-xs font-semibold text-violet-700 dark:text-violet-400">
+                      <span className="truncate">Booked</span>
+                      <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-violet-500/10 text-violet-600 dark:text-violet-400 shrink-0">
+                        <Package className="h-3.5 w-3.5" />
+                      </span>
+                    </div>
+                    <div className="mt-2 text-2xl font-bold tracking-tight text-violet-600 dark:text-violet-400 tabular-nums">
+                      {bookedCount}
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setStatusFilter("in_transit")}
+                    className={`text-left rounded-2xl border p-3.5 transition-all cursor-pointer backdrop-blur-md ${
+                      statusFilter === "in_transit"
+                        ? "border-sky-500 bg-gradient-to-br from-sky-500/15 via-sky-500/5 to-white dark:from-sky-500/25 dark:to-slate-900 shadow-xs"
+                        : "border-slate-200/90 bg-white/90 hover:border-sky-300 dark:border-slate-800 dark:bg-slate-900/90"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-1 text-xs font-semibold text-sky-700 dark:text-sky-400">
+                      <span className="truncate">In Transit</span>
+                      <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-sky-500/10 text-sky-600 dark:text-sky-400 shrink-0">
+                        <Clock className="h-3.5 w-3.5" />
+                      </span>
+                    </div>
+                    <div className="mt-2 text-2xl font-bold tracking-tight text-sky-600 dark:text-sky-400 tabular-nums">
+                      {inTransitCount}
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setStatusFilter("out_for_delivery")}
+                    className={`text-left rounded-2xl border p-3.5 transition-all cursor-pointer backdrop-blur-md ${
+                      statusFilter === "out_for_delivery"
+                        ? "border-amber-500 bg-gradient-to-br from-amber-500/15 via-amber-500/5 to-white dark:from-amber-500/25 dark:to-slate-900 shadow-xs"
+                        : "border-slate-200/90 bg-white/90 hover:border-amber-300 dark:border-slate-800 dark:bg-slate-900/90"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-1 text-xs font-semibold text-amber-700 dark:text-amber-400">
+                      <span className="truncate">Out Deliv.</span>
+                      <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-amber-500/10 text-amber-600 dark:text-amber-400 shrink-0">
+                        <Truck className="h-3.5 w-3.5" />
+                      </span>
+                    </div>
+                    <div className="mt-2 text-2xl font-bold tracking-tight text-amber-600 dark:text-amber-400 tabular-nums">
+                      {outCount}
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setStatusFilter("delivered")}
+                    className={`text-left rounded-2xl border p-3.5 transition-all cursor-pointer backdrop-blur-md ${
+                      statusFilter === "delivered"
+                        ? "border-emerald-500 bg-gradient-to-br from-emerald-500/15 via-emerald-500/5 to-white dark:from-emerald-500/25 dark:to-slate-900 shadow-xs"
+                        : "border-slate-200/90 bg-white/90 hover:border-emerald-300 dark:border-slate-800 dark:bg-slate-900/90"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-1 text-xs font-semibold text-emerald-700 dark:text-emerald-400">
+                      <span className="truncate">Delivered</span>
+                      <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 shrink-0">
+                        <CheckCircle2 className="h-3.5 w-3.5" />
+                      </span>
+                    </div>
+                    <div className="mt-2 text-2xl font-bold tracking-tight text-emerald-600 dark:text-emerald-400 tabular-nums">
+                      {deliveredCount}
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setStatusFilter("returned")}
+                    className={`text-left rounded-2xl border p-3.5 transition-all cursor-pointer backdrop-blur-md ${
+                      statusFilter === "returned"
+                        ? "border-rose-500 bg-gradient-to-br from-rose-500/15 via-rose-500/5 to-white dark:from-rose-500/25 dark:to-slate-900 shadow-xs"
+                        : "border-slate-200/90 bg-white/90 hover:border-rose-300 dark:border-slate-800 dark:bg-slate-900/90"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-1 text-xs font-semibold text-rose-700 dark:text-rose-400">
+                      <span className="truncate">Returned</span>
+                      <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-rose-500/10 text-rose-600 dark:text-rose-400 shrink-0">
+                        <RotateCcw className="h-3.5 w-3.5" />
+                      </span>
+                    </div>
+                    <div className="mt-2 text-2xl font-bold tracking-tight text-rose-600 dark:text-rose-400 tabular-nums">
+                      {returnedCount}
+                    </div>
+                  </button>
+                </div>
+              )}
+
+              {/* Search, Custom Batch Scope Dropdown & Custom Status Filter Bar */}
+              <div className="rounded-3xl border border-slate-200/90 bg-white p-3.5 sm:p-4 shadow-xs dark:border-slate-800 dark:bg-slate-900 flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3">
+                <div className="relative flex-1 min-w-0">
+                  <Search className="absolute left-3.5 top-2.5 h-4 w-4 text-slate-400 pointer-events-none" />
+                  <input
+                    type="text"
+                    value={searchFilter}
+                    onChange={(e) => setSearchFilter(e.target.value)}
+                    placeholder="Search Tracking Code, Customer Name, Courier, Pincode, City..."
+                    className="w-full rounded-xl border border-slate-200/90 bg-slate-50/80 pl-10 pr-9 py-2 text-xs font-medium text-slate-900 placeholder:text-slate-400 focus:border-indigo-500 focus:bg-white focus:outline-none dark:border-slate-800 dark:bg-slate-800/70 dark:text-white"
+                  />
+                  {searchFilter && (
+                    <button
+                      type="button"
+                      onClick={() => setSearchFilter("")}
+                      className="absolute right-3 top-2 rounded-lg p-0.5 text-slate-400 hover:text-slate-600 cursor-pointer"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+                </div>
+
+                {/* Custom Styled SaaS Dropdowns for Batch Scope & Status Filter */}
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
+                  {/* 1. Custom Batch Scope Dropdown */}
+                  <div className="relative flex-1 sm:flex-initial min-w-[185px]">
                     <button
                       type="button"
                       onClick={() => {
-                        setIsExportBatchDropdownOpen((prev) => !prev);
-                        setIsExportFormatDropdownOpen(false);
+                        setIsFilterBatchDropdownOpen((prev) => !prev);
+                        setIsFilterStatusDropdownOpen(false);
                       }}
-                      className="w-full flex items-center justify-between rounded-xl border border-slate-200/90 bg-white px-3 py-2.5 text-xs font-bold text-slate-800 shadow-2xs hover:border-indigo-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 transition-colors cursor-pointer"
+                      className="w-full flex items-center justify-between gap-2 rounded-xl border border-slate-200/90 bg-slate-50/90 hover:bg-slate-100/80 hover:border-indigo-300 px-3.5 py-2 text-xs font-semibold text-slate-800 dark:border-slate-700 dark:bg-slate-800/90 dark:text-slate-100 dark:hover:border-indigo-500/60 transition-all cursor-pointer"
                     >
                       <div className="flex items-center gap-2 truncate">
-                        <span className="h-2 w-2 rounded-full bg-indigo-500 shrink-0" />
+                        <FolderKanban className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400 shrink-0" />
                         <span className="truncate">
-                          {exportBatchTargetId === "all"
-                            ? `All Tracked Shipments (${totalCount})`
-                            : exportBatchTargetId === "imported_all"
-                            ? `All Imported Batches (${importedCount})`
-                            : exportBatchTargetId === "direct_only"
-                            ? `Direct Added Consignments (${Math.max(0, totalCount - importedCount)})`
+                          {selectedBatchId === "all"
+                            ? `All Batches (${totalCount})`
+                            : selectedBatchId === "imported_all"
+                            ? `All Imported (${importedCount})`
                             : (() => {
-                                const b = uniqueBatches.find((x) => x.id === exportBatchTargetId);
-                                return b ? `${b.name} (${b.count})` : `All Tracked Shipments (${totalCount})`;
+                                const b = uniqueBatches.find((x) => x.id === selectedBatchId);
+                                return b ? `${b.name} (${b.count})` : `All Batches (${totalCount})`;
                               })()}
                         </span>
                       </div>
                       <ChevronDown
-                        className={`h-4 w-4 text-slate-400 shrink-0 ml-1 transition-transform ${
-                          isExportBatchDropdownOpen ? "rotate-180" : ""
+                        className={`h-3.5 w-3.5 text-slate-400 shrink-0 transition-transform duration-150 ${
+                          isFilterBatchDropdownOpen ? "rotate-180 text-indigo-600" : ""
                         }`}
                       />
                     </button>
 
-                    {isExportBatchDropdownOpen && (
+                    {isFilterBatchDropdownOpen && (
                       <>
                         <div
                           className="fixed inset-0 z-40"
-                          onClick={() => setIsExportBatchDropdownOpen(false)}
+                          onClick={() => setIsFilterBatchDropdownOpen(false)}
                         />
-                        <div className="absolute left-0 right-0 top-full mt-1.5 z-50 max-h-60 overflow-y-auto rounded-2xl border border-slate-200 bg-white p-1.5 shadow-2xl dark:border-slate-700 dark:bg-slate-800 space-y-0.5">
+                        <div className="absolute right-0 left-0 sm:left-auto top-full mt-1.5 z-50 sm:w-68 max-h-64 overflow-y-auto rounded-2xl border border-slate-200/90 bg-white p-1.5 shadow-2xl dark:border-slate-700 dark:bg-slate-800 space-y-0.5 animate-in fade-in zoom-in-95 duration-100">
                           {[
-                            { id: "all", label: "All Tracked Shipments", count: totalCount },
+                            { id: "all", label: "All Shipments", count: totalCount },
                             { id: "imported_all", label: "All Imported Batches", count: importedCount },
-                            {
-                              id: "direct_only",
-                              label: "Direct Added Consignments",
-                              count: Math.max(0, totalCount - importedCount),
-                            },
                             ...uniqueBatches.map((b) => ({
                               id: b.id,
                               label: b.name,
@@ -3385,94 +3779,18 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                               key={opt.id}
                               type="button"
                               onClick={() => {
-                                setExportBatchTargetId(opt.id);
-                                setIsExportBatchDropdownOpen(false);
+                                setSelectedBatchId(opt.id);
+                                setIsFilterBatchDropdownOpen(false);
                               }}
-                              className={`w-full flex items-center justify-between rounded-xl px-2.5 py-2 text-xs font-semibold transition-colors cursor-pointer ${
-                                exportBatchTargetId === opt.id
-                                  ? "bg-indigo-50 text-indigo-700 dark:bg-indigo-950/70 dark:text-indigo-300 font-bold"
+                              className={`w-full flex items-center justify-between gap-2 rounded-xl px-3 py-2 text-xs font-medium transition-colors cursor-pointer ${
+                                selectedBatchId === opt.id
+                                  ? "bg-indigo-50 text-indigo-700 dark:bg-indigo-950/70 dark:text-indigo-300 font-semibold"
                                   : "text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-700/70"
                               }`}
                             >
-                              <span className="truncate pr-2">{opt.label}</span>
-                              <div className="flex items-center gap-1.5 shrink-0">
-                                <span className="rounded-md bg-slate-100 dark:bg-slate-900 px-1.5 py-0.5 font-mono text-[10px] font-bold text-slate-600 dark:text-slate-300">
-                                  {opt.count}
-                                </span>
-                                {exportBatchTargetId === opt.id && (
-                                  <Check className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" />
-                                )}
-                              </div>
-                            </button>
-                          ))}
-                        </div>
-                      </>
-                    )}
-                  </div>
-
-                  {/* Custom Styled File Extension / Format Selector */}
-                  <div className="relative">
-                    <label className="text-[10px] font-bold uppercase text-slate-500 dark:text-slate-400 block mb-1">
-                      Choose File Extension:
-                    </label>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setIsExportFormatDropdownOpen((prev) => !prev);
-                        setIsExportBatchDropdownOpen(false);
-                      }}
-                      className="w-full flex items-center justify-between rounded-xl border border-slate-200/90 bg-white px-3 py-2 text-xs font-bold text-slate-800 shadow-2xs hover:border-indigo-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 transition-colors cursor-pointer"
-                    >
-                      <span className="truncate">
-                        {exportFileExtension === "csv"
-                          ? "CSV Spreadsheet (.csv)"
-                          : exportFileExtension === "xlsx"
-                          ? "Excel Workbook (.xlsx)"
-                          : exportFileExtension === "xls"
-                          ? "Excel 97-2004 (.xls)"
-                          : exportFileExtension === "json"
-                          ? "Structured JSON (.json)"
-                          : "Plain Text Report (.txt)"}
-                      </span>
-                      <ChevronDown
-                        className={`h-4 w-4 text-slate-400 shrink-0 ml-1 transition-transform ${
-                          isExportFormatDropdownOpen ? "rotate-180" : ""
-                        }`}
-                      />
-                    </button>
-
-                    {isExportFormatDropdownOpen && (
-                      <>
-                        <div
-                          className="fixed inset-0 z-40"
-                          onClick={() => setIsExportFormatDropdownOpen(false)}
-                        />
-                        <div className="absolute left-0 right-0 top-full mt-1.5 z-50 rounded-2xl border border-slate-200 bg-white p-1.5 shadow-2xl dark:border-slate-700 dark:bg-slate-800 space-y-0.5">
-                          {(
-                            [
-                              { ext: "csv", label: "CSV Spreadsheet", badge: ".csv" },
-                              { ext: "xlsx", label: "Excel Workbook", badge: ".xlsx" },
-                              { ext: "xls", label: "Excel Legacy", badge: ".xls" },
-                              { ext: "json", label: "Structured JSON", badge: ".json" },
-                              { ext: "txt", label: "Plain Text Report", badge: ".txt" },
-                            ] as const
-                          ).map((fmt) => (
-                            <button
-                              key={fmt.ext}
-                              type="button"
-                              onClick={() => {
-                                setExportFileExtension(fmt.ext);
-                                setIsExportFormatDropdownOpen(false);
-                              }}
-                              className={`w-full flex items-center justify-between rounded-xl px-2.5 py-1.5 text-xs font-semibold transition-colors cursor-pointer ${
-                                exportFileExtension === fmt.ext
-                                  ? "bg-indigo-50 text-indigo-700 dark:bg-indigo-950/70 dark:text-indigo-300 font-bold"
-                                  : "text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-700/70"
-                              }`}
-                            >
-                              <span>{fmt.label}</span>
-                              <span className="font-mono text-[10px] font-bold text-indigo-600 dark:text-indigo-400">
-                                {fmt.badge}
+                              <span className="truncate">{opt.label}</span>
+                              <span className="rounded-md bg-slate-100 dark:bg-slate-900 px-1.5 py-0.5 font-mono text-[10px] font-bold text-slate-600 dark:text-slate-300 tabular-nums shrink-0">
+                                {opt.count}
                               </span>
                             </button>
                           ))}
@@ -3481,10 +3799,1024 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                     )}
                   </div>
 
+                  {/* 2. Custom Status Filter Dropdown */}
+                  <div className="relative flex-1 sm:flex-initial min-w-[165px]">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsFilterStatusDropdownOpen((prev) => !prev);
+                        setIsFilterBatchDropdownOpen(false);
+                      }}
+                      className="w-full flex items-center justify-between gap-2 rounded-xl border border-slate-200/90 bg-slate-50/90 hover:bg-slate-100/80 hover:border-indigo-300 px-3.5 py-2 text-xs font-semibold text-slate-800 dark:border-slate-700 dark:bg-slate-800/90 dark:text-slate-100 dark:hover:border-indigo-500/60 transition-all cursor-pointer"
+                    >
+                      <div className="flex items-center gap-2 truncate">
+                        <Filter className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400 shrink-0" />
+                        <span className="truncate">
+                          {statusFilter === "all"
+                            ? `All Status (${scopedTotalCount})`
+                            : statusFilter === "booked"
+                            ? `Booked (${scopedBookedCount})`
+                            : statusFilter === "in_transit"
+                            ? `In Transit (${scopedInTransitCount})`
+                            : statusFilter === "out_for_delivery"
+                            ? `Out for Deliv. (${scopedOutCount})`
+                            : statusFilter === "delivered"
+                            ? `Delivered (${scopedDeliveredCount})`
+                            : `Returned (${scopedReturnedCount})`}
+                        </span>
+                      </div>
+                      <ChevronDown
+                        className={`h-3.5 w-3.5 text-slate-400 shrink-0 transition-transform duration-150 ${
+                          isFilterStatusDropdownOpen ? "rotate-180 text-indigo-600" : ""
+                        }`}
+                      />
+                    </button>
+
+                    {isFilterStatusDropdownOpen && (
+                      <>
+                        <div
+                          className="fixed inset-0 z-40"
+                          onClick={() => setIsFilterStatusDropdownOpen(false)}
+                        />
+                        <div className="absolute right-0 left-0 sm:left-auto top-full mt-1.5 z-50 sm:w-56 rounded-2xl border border-slate-200/90 bg-white p-1.5 shadow-2xl dark:border-slate-700 dark:bg-slate-800 space-y-0.5 animate-in fade-in zoom-in-95 duration-100">
+                          {(
+                            [
+                              { id: "all", label: "All Statuses", dot: "bg-indigo-500", count: scopedTotalCount },
+                              { id: "booked", label: "Booked", dot: "bg-violet-500", count: scopedBookedCount },
+                              { id: "in_transit", label: "In Transit", dot: "bg-sky-500", count: scopedInTransitCount },
+                              { id: "out_for_delivery", label: "Out for Delivery", dot: "bg-amber-500", count: scopedOutCount },
+                              { id: "delivered", label: "Delivered", dot: "bg-emerald-500", count: scopedDeliveredCount },
+                              { id: "returned", label: "Returned (RTO)", dot: "bg-rose-500", count: scopedReturnedCount },
+                            ] as const
+                          ).map((st) => (
+                            <button
+                              key={st.id}
+                              type="button"
+                              onClick={() => {
+                                setStatusFilter(st.id);
+                                setIsFilterStatusDropdownOpen(false);
+                              }}
+                              className={`w-full flex items-center justify-between gap-2 rounded-xl px-3 py-2 text-xs font-medium transition-colors cursor-pointer ${
+                                statusFilter === st.id
+                                  ? "bg-indigo-50 text-indigo-700 dark:bg-indigo-950/70 dark:text-indigo-300 font-semibold"
+                                  : "text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-700/70"
+                              }`}
+                            >
+                              <div className="flex items-center gap-2 truncate">
+                                <span className={`h-2 w-2 rounded-full shrink-0 ${st.dot}`} />
+                                <span className="truncate">{st.label}</span>
+                              </div>
+                              <span className="rounded-md bg-slate-100 dark:bg-slate-900 px-1.5 py-0.5 font-mono text-[10px] font-bold text-slate-600 dark:text-slate-300 tabular-nums shrink-0">
+                                {st.count}
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Main Shipments Table: ONLY 5 COLUMNS (Tracking code, Name, Courier Partner, Delivery Status, Track) + Click Row for Full Customer Details */}
+              <div className="overflow-hidden rounded-3xl border border-slate-200/90 bg-white shadow-xs dark:border-slate-800 dark:bg-slate-900">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs min-w-[640px]">
+                    <thead className="bg-slate-50/90 text-[11px] font-bold uppercase tracking-wider text-slate-500 dark:bg-slate-800/70 dark:text-slate-400 border-b border-slate-200/80 dark:border-slate-800">
+                      <tr>
+                        <th className="py-3.5 pl-4 sm:pl-5 pr-2 w-11">
+                          {(() => {
+                            const allSelected =
+                              filteredShipments.length > 0 &&
+                              selectedShipmentIds.length === filteredShipments.length;
+                            const isIndeterminate =
+                              selectedShipmentIds.length > 0 &&
+                              selectedShipmentIds.length < filteredShipments.length;
+                            return (
+                              <button
+                                type="button"
+                                role="checkbox"
+                                aria-checked={isIndeterminate ? "mixed" : allSelected}
+                                aria-label="Select all consignments"
+                                onClick={handleToggleSelectAll}
+                                className={`flex h-4.5 w-4.5 items-center justify-center rounded-md border transition-all cursor-pointer ${
+                                  allSelected || isIndeterminate
+                                    ? "border-indigo-600 bg-indigo-600 text-white shadow-2xs ring-2 ring-indigo-500/20"
+                                    : "border-slate-300 bg-white hover:border-indigo-400 dark:border-slate-600 dark:bg-slate-800 dark:hover:border-indigo-400"
+                                }`}
+                              >
+                                {allSelected ? (
+                                  <Check className="h-3 w-3 stroke-[3.2]" />
+                                ) : isIndeterminate ? (
+                                  <Minus className="h-3 w-3 stroke-[3.2]" />
+                                ) : null}
+                              </button>
+                            );
+                          })()}
+                        </th>
+                        <th className="py-3.5 px-3">Tracking Code</th>
+                        <th className="py-3.5 px-3">Name</th>
+                        <th className="py-3.5 px-3">Courier Partner</th>
+                        <th className="py-3.5 px-3">Delivery Status</th>
+                        <th className="py-3.5 px-4 text-right">Track</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 dark:divide-slate-800/80">
+                      {filteredShipments.length === 0 ? (
+                        <tr>
+                          <td colSpan={6} className="py-14 text-center text-slate-400">
+                            <Package className="mx-auto h-8 w-8 text-slate-300 dark:text-slate-600 mb-2" />
+                            <p className="text-sm font-semibold text-slate-600 dark:text-slate-300">
+                              No shipments matching your filter
+                            </p>
+                          </td>
+                        </tr>
+                      ) : (
+                        filteredShipments.map((item) => {
+                          const isRowSelected = selectedShipmentIds.includes(item.id);
+                          return (
+                            <tr
+                              key={item.id}
+                              onClick={() => setSelectedDetailShipment(item)}
+                              title="Click row to view full customer & shipment details"
+                              className={`transition-colors group cursor-pointer ${
+                                isRowSelected
+                                  ? "bg-indigo-50/60 dark:bg-indigo-950/35"
+                                  : "hover:bg-indigo-50/35 dark:hover:bg-slate-800/50"
+                              }`}
+                            >
+                              {/* Custom Styled SaaS Checkbox */}
+                              <td
+                                className="py-3.5 pl-4 sm:pl-5 pr-2 w-11"
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <button
+                                  type="button"
+                                  role="checkbox"
+                                  aria-checked={isRowSelected}
+                                  aria-label={`Select consignment ${item.trackingNumber}`}
+                                  onClick={() => handleToggleSelectRow(item.id)}
+                                  className={`flex h-4.5 w-4.5 items-center justify-center rounded-md border transition-all cursor-pointer ${
+                                    isRowSelected
+                                      ? "border-indigo-600 bg-indigo-600 text-white shadow-2xs ring-2 ring-indigo-500/20"
+                                      : "border-slate-300 bg-white hover:border-indigo-400 dark:border-slate-600 dark:bg-slate-800 dark:hover:border-indigo-400"
+                                  }`}
+                                >
+                                  {isRowSelected && <Check className="h-3 w-3 stroke-[3.2]" />}
+                                </button>
+                              </td>
+
+                              {/* Column 1: Tracking Code */}
+                              <td className="py-3.5 px-3">
+                                <div className="flex items-center gap-1.5">
+                                  <span className="font-mono font-bold text-indigo-600 group-hover:text-indigo-700 dark:text-indigo-400 dark:group-hover:text-indigo-300 transition-colors text-xs sm:text-[13px] tracking-tight">
+                                    {item.trackingNumber}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleCopy(item.id, item.trackingNumber);
+                                    }}
+                                    className="opacity-0 group-hover:opacity-100 p-1 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-opacity cursor-pointer"
+                                    title="Copy Tracking Code"
+                                  >
+                                    {copiedId === item.id ? (
+                                      <Check className="h-3 w-3 text-emerald-600" />
+                                    ) : (
+                                      <Copy className="h-3 w-3" />
+                                    )}
+                                  </button>
+                                </div>
+                              </td>
+
+                              {/* Column 2: Name */}
+                              <td className="py-3.5 px-3">
+                                <div className="font-semibold text-slate-900 dark:text-white text-xs sm:text-[13px] truncate max-w-[190px]">
+                                  {item.recipientName || "—"}
+                                </div>
+                              </td>
+
+                              {/* Column 3: Courier Partner */}
+                              <td className="py-3.5 px-3">
+                                <span className="font-semibold text-slate-700 dark:text-slate-200 text-xs truncate block max-w-[160px]">
+                                  {item.courierName}
+                                </span>
+                              </td>
+
+                              {/* Column 4: Delivery Status */}
+                              <td className="py-3.5 px-3">
+                                {item.status === "delivered" && (
+                                  <span className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-200/80 bg-emerald-50/90 dark:border-emerald-800/60 dark:bg-emerald-950/60 px-2.5 py-1 font-bold text-emerald-700 dark:text-emerald-300 text-[11px]">
+                                    <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                                    <span>Delivered</span>
+                                  </span>
+                                )}
+                                {item.status === "out_for_delivery" && (
+                                  <span className="inline-flex items-center gap-1.5 rounded-lg border border-amber-200/80 bg-amber-50/90 dark:border-amber-800/60 dark:bg-amber-950/60 px-2.5 py-1 font-bold text-amber-700 dark:text-amber-300 text-[11px]">
+                                    <Truck className="h-3.5 w-3.5 shrink-0" />
+                                    <span>Out for Delivery</span>
+                                  </span>
+                                )}
+                                {item.status === "in_transit" && (
+                                  <span className="inline-flex items-center gap-1.5 rounded-lg border border-sky-200/80 bg-sky-50/90 dark:border-sky-800/60 dark:bg-sky-950/60 px-2.5 py-1 font-bold text-sky-700 dark:text-sky-300 text-[11px]">
+                                    <Clock className="h-3.5 w-3.5 shrink-0" />
+                                    <span>In Transit</span>
+                                  </span>
+                                )}
+                                {item.status === "returned" && (
+                                  <span className="inline-flex items-center gap-1.5 rounded-lg border border-rose-200/80 bg-rose-50/90 dark:border-rose-800/60 dark:bg-rose-950/60 px-2.5 py-1 font-bold text-rose-700 dark:text-rose-300 text-[11px]">
+                                    <RotateCcw className="h-3.5 w-3.5 shrink-0" />
+                                    <span>Returned</span>
+                                  </span>
+                                )}
+                                {item.status === "booked" && (
+                                  <span className="inline-flex items-center gap-1.5 rounded-lg border border-violet-200/80 bg-violet-50/90 dark:border-violet-800/60 dark:bg-violet-950/60 px-2.5 py-1 font-bold text-violet-700 dark:text-violet-300 text-[11px]">
+                                    <Package className="h-3.5 w-3.5 shrink-0" />
+                                    <span>Booked</span>
+                                  </span>
+                                )}
+                              </td>
+
+                              {/* Column 5: Track */}
+                              <td
+                                className="py-3.5 px-4 text-right"
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <button
+                                  type="button"
+                                  onClick={() => onOpenTrackingResult(item.trackingNumber, item.courierId)}
+                                  className="inline-flex items-center gap-1 rounded-xl bg-indigo-50 hover:bg-indigo-600 hover:text-white px-3.5 py-1.5 text-xs font-bold text-indigo-700 dark:bg-indigo-950/70 dark:text-indigo-300 dark:hover:bg-indigo-600 dark:hover:text-white transition-all cursor-pointer"
+                                >
+                                  <span>Track</span>
+                                  <ArrowRight className="h-3 w-3" />
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ============================================================ */}
+          {/* VIEW 3: BATCHES (CLEAN BATCH MANAGEMENT WORKSPACE)           */}
+          {/* ============================================================ */}
+          {activeMenu === "batches" && (
+            <div className="space-y-5 animate-in fade-in duration-150">
+              {/* Batch Summary Strip */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
+                <div className="rounded-2xl border border-indigo-200/70 bg-gradient-to-br from-indigo-500/10 via-white to-white dark:from-indigo-500/20 dark:to-slate-900 p-4 dark:border-indigo-800/50">
+                  <div className="flex items-center justify-between text-xs font-semibold text-slate-500 dark:text-slate-400">
+                    <span>Total Batches</span>
+                    <FolderKanban className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
+                  </div>
+                  <div className="mt-1.5 text-2xl font-bold text-slate-900 dark:text-white tabular-nums">
+                    {uniqueBatches.length}
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-emerald-200/70 bg-gradient-to-br from-emerald-500/10 via-white to-white dark:from-emerald-500/20 dark:to-slate-900 p-4 dark:border-emerald-800/50">
+                  <div className="flex items-center justify-between text-xs font-semibold text-slate-500 dark:text-slate-400">
+                    <span>Batch Consignments</span>
+                    <Package className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
+                  </div>
+                  <div className="mt-1.5 text-2xl font-bold text-emerald-600 dark:text-emerald-400 tabular-nums">
+                    {importedCount}
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-violet-200/70 bg-gradient-to-br from-violet-500/10 via-white to-white dark:from-violet-500/20 dark:to-slate-900 p-4 dark:border-violet-800/50">
+                  <div className="flex items-center justify-between text-xs font-semibold text-slate-500 dark:text-slate-400">
+                    <span>Active Batch Filter</span>
+                    <Filter className="h-4 w-4 text-violet-600 dark:text-violet-400" />
+                  </div>
+                  <div className="mt-1.5 flex items-center justify-between gap-2">
+                    <span className="text-sm font-bold text-slate-900 dark:text-white truncate">
+                      {selectedBatchId === "all"
+                        ? "All Shipments"
+                        : selectedBatchId === "imported_all"
+                        ? "All Imported Batches"
+                        : uniqueBatches.find((b) => b.id === selectedBatchId)?.name || "All Shipments"}
+                    </span>
+                    {selectedBatchId !== "all" && (
+                      <button
+                        type="button"
+                        onClick={() => setSelectedBatchId("all")}
+                        className="text-xs font-semibold text-indigo-600 hover:underline dark:text-indigo-400 shrink-0 cursor-pointer"
+                      >
+                        Reset
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Batch Directory Card */}
+              <div className="rounded-3xl border border-slate-200/90 bg-white p-5 sm:p-6 shadow-xs dark:border-slate-800 dark:bg-slate-900 space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 dark:border-slate-800 pb-4">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedBatchId("all");
+                        setActiveMenu("dashboard");
+                      }}
+                      className={`rounded-xl px-3.5 py-2 text-xs font-bold transition-all cursor-pointer ${
+                        selectedBatchId === "all"
+                          ? "bg-indigo-600 text-white shadow-xs"
+                          : "bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300"
+                      }`}
+                    >
+                      All Shipments ({totalCount})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedBatchId("imported_all");
+                        setActiveMenu("dashboard");
+                      }}
+                      className={`rounded-xl px-3.5 py-2 text-xs font-bold transition-all cursor-pointer ${
+                        selectedBatchId === "imported_all"
+                          ? "bg-emerald-600 text-white shadow-xs"
+                          : "bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300"
+                      }`}
+                    >
+                      All Imported ({importedCount})
+                    </button>
+                  </div>
+
+                  {/* Search Batches Input */}
+                  <div className="relative w-full sm:w-64">
+                    <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-slate-400 pointer-events-none" />
+                    <input
+                      type="text"
+                      value={batchSearchQuery}
+                      onChange={(e) => setBatchSearchQuery(e.target.value)}
+                      placeholder="Search batch name..."
+                      className="w-full rounded-xl border border-slate-200/90 bg-slate-50/80 pl-9 pr-8 py-2 text-xs font-medium text-slate-900 placeholder:text-slate-400 focus:border-indigo-500 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
+                    />
+                    {batchSearchQuery && (
+                      <button
+                        type="button"
+                        onClick={() => setBatchSearchQuery("")}
+                        className="absolute right-2.5 top-2 text-slate-400 hover:text-slate-600 cursor-pointer"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {uniqueBatches.length === 0 ? (
+                  <div className="py-12 text-center text-xs text-slate-400">
+                    <FolderKanban className="mx-auto h-8 w-8 text-slate-300 dark:text-slate-600 mb-2" />
+                    <p className="font-semibold text-slate-600 dark:text-slate-300">
+                      No batches created yet
+                    </p>
+                    <p className="mt-1">
+                      Use Add Consignment or Bulk Import to organize shipments into batches.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+                    {uniqueBatches
+                      .filter((b) =>
+                        !batchSearchQuery.trim()
+                          ? true
+                          : b.name.toLowerCase().includes(batchSearchQuery.trim().toLowerCase())
+                      )
+                      .map((batch) => {
+                        const isSelected = selectedBatchId === batch.id;
+                        const isEditing = editingBatchId === batch.id;
+                        const batchRecords = activeShipments.filter((s) => s.batchId === batch.id);
+                        const batchBooked = batchRecords.filter((s) => s.status === "booked").length;
+                        const batchTransit = batchRecords.filter(
+                          (s) => s.status === "in_transit" || s.status === "out_for_delivery"
+                        ).length;
+                        const batchProgress =
+                          batch.count > 0 ? Math.round((batch.delivered / batch.count) * 100) : 0;
+
+                        return (
+                          <div
+                            key={batch.id}
+                            className={`rounded-2xl border p-4 transition-all flex flex-col justify-between gap-3 ${
+                              isSelected
+                                ? "border-indigo-500 bg-indigo-50/40 dark:border-indigo-500/80 dark:bg-indigo-950/30 shadow-xs"
+                                : "border-slate-200/90 bg-slate-50/50 hover:border-indigo-300 dark:border-slate-800 dark:bg-slate-800/40"
+                            }`}
+                          >
+                            <div className="flex items-start justify-between gap-2.5">
+                              {isEditing ? (
+                                <div className="flex items-center gap-1.5 flex-1 bg-white dark:bg-slate-900 px-2.5 py-1.5 rounded-xl border border-indigo-500">
+                                  <input
+                                    type="text"
+                                    value={editingBatchName}
+                                    onChange={(e) => setEditingBatchName(e.target.value)}
+                                    onKeyDown={(e) => {
+                                      if (e.key === "Enter") handleSaveBatchName(batch.id);
+                                      if (e.key === "Escape") handleCancelEditBatch();
+                                    }}
+                                    autoFocus
+                                    placeholder="Batch name..."
+                                    className="text-xs font-semibold text-slate-900 dark:text-white bg-transparent outline-none flex-1 min-w-0"
+                                  />
+                                  <button
+                                    type="button"
+                                    onClick={() => handleSaveBatchName(batch.id)}
+                                    className="px-2 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold cursor-pointer"
+                                  >
+                                    Save
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={handleCancelEditBatch}
+                                    className="px-2 py-1 rounded-lg bg-slate-200 hover:bg-slate-300 dark:bg-slate-800 text-slate-700 dark:text-slate-300 text-[11px] font-bold cursor-pointer"
+                                  >
+                                    Cancel
+                                  </button>
+                                </div>
+                              ) : (
+                                <div className="min-w-0 flex-1">
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-sm font-bold text-slate-900 dark:text-white truncate">
+                                      {batch.name}
+                                    </span>
+                                    {isSelected && (
+                                      <span className="rounded-md bg-indigo-600 px-2 py-0.5 text-[10px] font-bold text-white shrink-0">
+                                        Filtered
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div className="flex flex-wrap items-center gap-2 mt-1.5 text-[11px] font-medium text-slate-500 dark:text-slate-400">
+                                    <span className="font-semibold text-slate-700 dark:text-slate-200">
+                                      {batch.count} shipment{batch.count > 1 ? "s" : ""}
+                                    </span>
+                                    <span>·</span>
+                                    <span className="text-violet-600 dark:text-violet-400">
+                                      {batchBooked} booked
+                                    </span>
+                                    <span>·</span>
+                                    <span className="text-sky-600 dark:text-sky-400">
+                                      {batchTransit} transit
+                                    </span>
+                                    <span>·</span>
+                                    <span className="text-emerald-600 dark:text-emerald-400">
+                                      {batch.delivered} delivered
+                                    </span>
+                                  </div>
+                                </div>
+                              )}
+
+                              {!isEditing && (
+                                <div className="flex items-center gap-1.5 shrink-0">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleStartEditBatch(batch.id, batch.name)}
+                                    className="inline-flex items-center gap-1 rounded-xl border border-slate-200 bg-white hover:bg-slate-100 px-2.5 py-1.5 text-[11px] font-semibold text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 cursor-pointer"
+                                    title="Edit batch name"
+                                  >
+                                    <Pencil className="h-3 w-3" />
+                                    <span>Edit</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setBatchPendingDeleteId(batch.id)}
+                                    className="inline-flex items-center gap-1 rounded-xl border border-rose-200 bg-rose-50/80 hover:bg-rose-100 px-2.5 py-1.5 text-[11px] font-semibold text-rose-600 dark:border-rose-900/60 dark:bg-rose-950/60 dark:text-rose-300 cursor-pointer"
+                                    title="Delete batch"
+                                  >
+                                    <Trash2 className="h-3 w-3" />
+                                    <span>Delete</span>
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+
+                            {/* Delivery Progress Bar + Filter Batch Action */}
+                            <div className="pt-2 border-t border-slate-200/60 dark:border-slate-800 flex items-center justify-between gap-3">
+                              <div className="flex-1">
+                                <div className="flex items-center justify-between text-[10px] font-semibold text-slate-500 mb-1">
+                                  <span>Delivery Progress</span>
+                                  <span>{batchProgress}%</span>
+                                </div>
+                                <div className="h-1.5 w-full rounded-full bg-slate-200 dark:bg-slate-700 overflow-hidden">
+                                  <div
+                                    className="h-full bg-emerald-500 rounded-full transition-all"
+                                    style={{ width: `${batchProgress}%` }}
+                                  />
+                                </div>
+                              </div>
+
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setSelectedBatchId(batch.id);
+                                  setActiveMenu("dashboard");
+                                }}
+                                className="inline-flex items-center gap-1 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-3 py-1.5 text-[11px] font-bold text-white shadow-2xs transition-colors cursor-pointer shrink-0"
+                              >
+                                <Filter className="h-3 w-3" />
+                                <span>Filter Batch</span>
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* ============================================================ */}
+          {/* VIEW 4: ANALYTICS & ADVANCED DATE-WISE EXPORT STUDIO         */}
+          {/* ============================================================ */}
+          {activeMenu === "analytics" && (
+            <div className="space-y-5 animate-in fade-in duration-150">
+              {/* 1. DATE-WISE ANALYSIS & BATCH FILTER WORKSPACE */}
+              <div className="rounded-3xl border border-slate-200/90 bg-white p-5 sm:p-6 shadow-xs dark:border-slate-800 dark:bg-slate-900 space-y-5">
+                <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3.5 pb-4 border-b border-slate-100 dark:border-slate-800">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <Calendar className="h-4.5 w-4.5 text-indigo-600 dark:text-indigo-400" />
+                      <h3 className="text-base font-bold text-slate-900 dark:text-white">
+                        Date-Wise Shipment Analysis
+                      </h3>
+                    </div>
+                  </div>
+
+                  {/* Date Range Filter Pills + Batch Scope Filter */}
+                  <div className="flex flex-wrap items-center gap-2">
+                    {(
+                      [
+                        { id: "all", label: "All Dates" },
+                        { id: "today", label: "Today" },
+                        { id: "yesterday", label: "Yesterday" },
+                        { id: "last_7_days", label: "Last 7 Days" },
+                        { id: "custom", label: "Custom Date" },
+                      ] as const
+                    ).map((df) => (
+                      <button
+                        key={df.id}
+                        type="button"
+                        onClick={() => setAnalyticsDateFilter(df.id)}
+                        className={`rounded-xl px-3 py-1.5 text-xs font-semibold transition-all cursor-pointer ${
+                          analyticsDateFilter === df.id
+                            ? "bg-indigo-600 text-white shadow-2xs"
+                            : "bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300"
+                        }`}
+                      >
+                        {df.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Custom Date Range Picker Strip when 'custom' is active */}
+                {analyticsDateFilter === "custom" && (
+                  <div className="flex flex-wrap items-center gap-3 rounded-2xl bg-indigo-50/60 dark:bg-indigo-950/30 border border-indigo-200/70 dark:border-indigo-800/60 p-3.5">
+                    <div className="flex items-center gap-2">
+                      <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                        From:
+                      </label>
+                      <input
+                        type="date"
+                        value={customStartDate}
+                        onChange={(e) => setCustomStartDate(e.target.value)}
+                        className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-800 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+                      />
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                        To:
+                      </label>
+                      <input
+                        type="date"
+                        value={customEndDate}
+                        onChange={(e) => setCustomEndDate(e.target.value)}
+                        className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-800 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {/* Date-Filtered KPI Summary Cards */}
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+                  <div className="rounded-2xl border border-slate-200/80 bg-slate-50/70 dark:border-slate-800 dark:bg-slate-800/40 p-3.5">
+                    <div className="text-[11px] font-semibold text-slate-500">Matched Total</div>
+                    <div className="mt-1 text-xl font-bold text-slate-900 dark:text-white tabular-nums">
+                      {dateWiseAnalytics.filteredTotal}
+                    </div>
+                  </div>
+                  <div className="rounded-2xl border border-violet-200/70 bg-violet-50/50 dark:border-violet-900/50 dark:bg-violet-950/30 p-3.5">
+                    <div className="text-[11px] font-semibold text-violet-700 dark:text-violet-300">Booked</div>
+                    <div className="mt-1 text-xl font-bold text-violet-600 dark:text-violet-400 tabular-nums">
+                      {dateWiseAnalytics.filteredBooked}
+                    </div>
+                  </div>
+                  <div className="rounded-2xl border border-sky-200/70 bg-sky-50/50 dark:border-sky-900/50 dark:bg-sky-950/30 p-3.5">
+                    <div className="text-[11px] font-semibold text-sky-700 dark:text-sky-300">In Transit</div>
+                    <div className="mt-1 text-xl font-bold text-sky-600 dark:text-sky-400 tabular-nums">
+                      {dateWiseAnalytics.filteredInTransit}
+                    </div>
+                  </div>
+                  <div className="rounded-2xl border border-amber-200/70 bg-amber-50/50 dark:border-amber-900/50 dark:bg-amber-950/30 p-3.5">
+                    <div className="text-[11px] font-semibold text-amber-700 dark:text-amber-300">Out for Deliv.</div>
+                    <div className="mt-1 text-xl font-bold text-amber-600 dark:text-amber-400 tabular-nums">
+                      {dateWiseAnalytics.filteredOut}
+                    </div>
+                  </div>
+                  <div className="rounded-2xl border border-emerald-200/70 bg-emerald-50/50 dark:border-emerald-900/50 dark:bg-emerald-950/30 p-3.5">
+                    <div className="text-[11px] font-semibold text-emerald-700 dark:text-emerald-300">Delivered</div>
+                    <div className="mt-1 text-xl font-bold text-emerald-600 dark:text-emerald-400 tabular-nums">
+                      {dateWiseAnalytics.filteredDelivered}
+                    </div>
+                  </div>
+                  <div className="rounded-2xl border border-rose-200/70 bg-rose-50/50 dark:border-rose-900/50 dark:bg-rose-950/30 p-3.5">
+                    <div className="text-[11px] font-semibold text-rose-700 dark:text-rose-300">Returned</div>
+                    <div className="mt-1 text-xl font-bold text-rose-600 dark:text-rose-400 tabular-nums">
+                      {dateWiseAnalytics.filteredReturned}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Date-Wise Breakdown Table */}
+                <div className="overflow-hidden rounded-2xl border border-slate-200/90 dark:border-slate-800">
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs min-w-[620px]">
+                      <thead className="bg-slate-50/90 dark:bg-slate-800/70 text-[11px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 border-b border-slate-200/80 dark:border-slate-800">
+                        <tr>
+                          <th className="py-3 px-4">Date</th>
+                          <th className="py-3 px-3">Total</th>
+                          <th className="py-3 px-3 text-violet-600 dark:text-violet-400">Booked</th>
+                          <th className="py-3 px-3 text-sky-600 dark:text-sky-400">In Transit</th>
+                          <th className="py-3 px-3 text-amber-600 dark:text-amber-400">Out for Deliv.</th>
+                          <th className="py-3 px-3 text-emerald-600 dark:text-emerald-400">Delivered</th>
+                          <th className="py-3 px-3 text-rose-600 dark:text-rose-400">Returned</th>
+                          <th className="py-3 px-4 text-right">Delivery Rate</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 dark:divide-slate-800/80">
+                        {dateWiseAnalytics.dailyBuckets.length === 0 ? (
+                          <tr>
+                            <td colSpan={8} className="py-8 text-center text-slate-400">
+                              No shipments recorded for the selected date range.
+                            </td>
+                          </tr>
+                        ) : (
+                          dateWiseAnalytics.dailyBuckets.map((day) => {
+                            const rate = day.total > 0 ? Math.round((day.delivered / day.total) * 100) : 0;
+                            return (
+                              <tr key={day.date} className="hover:bg-slate-50/70 dark:hover:bg-slate-800/40">
+                                <td className="py-3 px-4 font-mono font-semibold text-slate-900 dark:text-white">
+                                  {day.date}
+                                  {day.date === getTodayIso() && (
+                                    <span className="ml-2 rounded bg-indigo-50 dark:bg-indigo-950/80 px-1.5 py-0.5 font-sans text-[10px] font-semibold text-indigo-600 dark:text-indigo-300">
+                                      Today
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="py-3 px-3 font-mono font-bold text-slate-900 dark:text-white">
+                                  {day.total}
+                                </td>
+                                <td className="py-3 px-3 font-mono font-semibold text-violet-600 dark:text-violet-400">
+                                  {day.booked}
+                                </td>
+                                <td className="py-3 px-3 font-mono font-semibold text-sky-600 dark:text-sky-400">
+                                  {day.in_transit}
+                                </td>
+                                <td className="py-3 px-3 font-mono font-semibold text-amber-600 dark:text-amber-400">
+                                  {day.out_for_delivery}
+                                </td>
+                                <td className="py-3 px-3 font-mono font-semibold text-emerald-600 dark:text-emerald-400">
+                                  {day.delivered}
+                                </td>
+                                <td className="py-3 px-3 font-mono font-semibold text-rose-600 dark:text-rose-400">
+                                  {day.returned}
+                                </td>
+                                <td className="py-3 px-4 text-right font-mono font-bold text-emerald-600 dark:text-emerald-400">
+                                  {rate}%
+                                </td>
+                              </tr>
+                            );
+                          })
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+
+              {/* 2. ADVANCED EXPORT STUDIO (DATE-WISE, BATCH-WISE & STATUS-WISE) + CARRIER & STORAGE */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+                {/* Advanced Date-Wise & Batch-Wise Export Card */}
+                <div className="rounded-3xl border border-slate-200/90 bg-white p-5 sm:p-6 shadow-xs dark:border-slate-800 dark:bg-slate-900 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Download className="h-4.5 w-4.5 text-indigo-600 dark:text-indigo-400" />
+                      <span className="text-base font-bold text-slate-900 dark:text-white">
+                        Advanced Export
+                      </span>
+                    </div>
+                    <span className="rounded-lg bg-indigo-50 dark:bg-indigo-950/80 border border-indigo-200/70 dark:border-indigo-800/60 px-2.5 py-0.5 font-mono text-xs font-bold text-indigo-600 dark:text-indigo-400 uppercase">
+                      .{exportFileExtension}
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                    {/* 1. Custom Date Filter Dropdown for Export */}
+                    <div className="relative">
+                      <label className="text-xs font-semibold text-slate-600 dark:text-slate-300 block mb-1.5">
+                        Date Scope
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsExportDateDropdownOpen((prev) => !prev);
+                          setIsExportBatchDropdownOpen(false);
+                          setIsExportStatusDropdownOpen(false);
+                          setIsExportFormatDropdownOpen(false);
+                        }}
+                        className="w-full flex items-center justify-between gap-2 rounded-xl border border-slate-200/90 bg-slate-50/90 hover:bg-slate-100/80 hover:border-indigo-300 px-3.5 py-2.5 text-xs font-semibold text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 transition-all cursor-pointer"
+                      >
+                        <span className="truncate">
+                          {analyticsDateFilter === "all"
+                            ? "All Dates"
+                            : analyticsDateFilter === "today"
+                            ? `Today (${getTodayIso()})`
+                            : analyticsDateFilter === "yesterday"
+                            ? `Yesterday (${getYesterdayIso()})`
+                            : analyticsDateFilter === "last_7_days"
+                            ? "Last 7 Days"
+                            : `${customStartDate} to ${customEndDate}`}
+                        </span>
+                        <ChevronDown className="h-4 w-4 text-slate-400 shrink-0" />
+                      </button>
+
+                      {isExportDateDropdownOpen && (
+                        <>
+                          <div
+                            className="fixed inset-0 z-40"
+                            onClick={() => setIsExportDateDropdownOpen(false)}
+                          />
+                          <div className="absolute left-0 right-0 top-full mt-1.5 z-50 rounded-2xl border border-slate-200/90 bg-white p-1.5 shadow-2xl dark:border-slate-700 dark:bg-slate-800 space-y-0.5">
+                            {(
+                              [
+                                { id: "all", label: "All Dates" },
+                                { id: "today", label: "Today" },
+                                { id: "yesterday", label: "Yesterday" },
+                                { id: "last_7_days", label: "Last 7 Days" },
+                                { id: "custom", label: "Custom Date Range" },
+                              ] as const
+                            ).map((opt) => (
+                              <button
+                                key={opt.id}
+                                type="button"
+                                onClick={() => {
+                                  setAnalyticsDateFilter(opt.id);
+                                  setIsExportDateDropdownOpen(false);
+                                }}
+                                className={`w-full flex items-center justify-between rounded-xl px-3 py-2 text-xs font-medium transition-colors cursor-pointer ${
+                                  analyticsDateFilter === opt.id
+                                    ? "bg-indigo-50 text-indigo-700 dark:bg-indigo-950/70 dark:text-indigo-300 font-semibold"
+                                    : "text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-700/70"
+                                }`}
+                              >
+                                <span>{opt.label}</span>
+                                {analyticsDateFilter === opt.id && (
+                                  <Check className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" />
+                                )}
+                              </button>
+                            ))}
+                          </div>
+                        </>
+                      )}
+                    </div>
+
+                    {/* 2. Custom Batch Scope Dropdown */}
+                    <div className="relative">
+                      <label className="text-xs font-semibold text-slate-600 dark:text-slate-300 block mb-1.5">
+                        Batch Scope
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsExportBatchDropdownOpen((prev) => !prev);
+                          setIsExportDateDropdownOpen(false);
+                          setIsExportStatusDropdownOpen(false);
+                          setIsExportFormatDropdownOpen(false);
+                        }}
+                        className="w-full flex items-center justify-between gap-2 rounded-xl border border-slate-200/90 bg-slate-50/90 hover:bg-slate-100/80 hover:border-indigo-300 px-3.5 py-2.5 text-xs font-semibold text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 transition-all cursor-pointer"
+                      >
+                        <span className="truncate">
+                          {exportBatchTargetId === "all"
+                            ? `All Shipments (${totalCount})`
+                            : exportBatchTargetId === "imported_all"
+                            ? `All Imported (${importedCount})`
+                            : exportBatchTargetId === "direct_only"
+                            ? `Direct Added (${Math.max(0, totalCount - importedCount)})`
+                            : (() => {
+                                const b = uniqueBatches.find((x) => x.id === exportBatchTargetId);
+                                return b ? `${b.name} (${b.count})` : `All Shipments (${totalCount})`;
+                              })()}
+                        </span>
+                        <ChevronDown className="h-4 w-4 text-slate-400 shrink-0" />
+                      </button>
+
+                      {isExportBatchDropdownOpen && (
+                        <>
+                          <div
+                            className="fixed inset-0 z-40"
+                            onClick={() => setIsExportBatchDropdownOpen(false)}
+                          />
+                          <div className="absolute left-0 right-0 top-full mt-1.5 z-50 max-h-60 overflow-y-auto rounded-2xl border border-slate-200/90 bg-white p-1.5 shadow-2xl dark:border-slate-700 dark:bg-slate-800 space-y-0.5">
+                            {[
+                              { id: "all", label: "All Shipments", count: totalCount },
+                              { id: "imported_all", label: "All Imported Batches", count: importedCount },
+                              {
+                                id: "direct_only",
+                                label: "Direct Added Consignments",
+                                count: Math.max(0, totalCount - importedCount),
+                              },
+                              ...uniqueBatches.map((b) => ({
+                                id: b.id,
+                                label: b.name,
+                                count: b.count,
+                              })),
+                            ].map((opt) => (
+                              <button
+                                key={opt.id}
+                                type="button"
+                                onClick={() => {
+                                  setExportBatchTargetId(opt.id);
+                                  setIsExportBatchDropdownOpen(false);
+                                }}
+                                className={`w-full flex items-center justify-between rounded-xl px-3 py-2 text-xs font-medium transition-colors cursor-pointer ${
+                                  exportBatchTargetId === opt.id
+                                    ? "bg-indigo-50 text-indigo-700 dark:bg-indigo-950/70 dark:text-indigo-300 font-semibold"
+                                    : "text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-700/70"
+                                }`}
+                              >
+                                <span className="truncate pr-2">{opt.label}</span>
+                                <span className="rounded-md bg-slate-100 dark:bg-slate-900 px-1.5 py-0.5 font-mono text-[10px] font-bold text-slate-600 dark:text-slate-300 tabular-nums shrink-0">
+                                  {opt.count}
+                                </span>
+                              </button>
+                            ))}
+                          </div>
+                        </>
+                      )}
+                    </div>
+
+                    {/* 3. Custom Status Scope Dropdown */}
+                    <div className="relative">
+                      <label className="text-xs font-semibold text-slate-600 dark:text-slate-300 block mb-1.5">
+                        Delivery Status
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsExportStatusDropdownOpen((prev) => !prev);
+                          setIsExportDateDropdownOpen(false);
+                          setIsExportBatchDropdownOpen(false);
+                          setIsExportFormatDropdownOpen(false);
+                        }}
+                        className="w-full flex items-center justify-between gap-2 rounded-xl border border-slate-200/90 bg-slate-50/90 hover:bg-slate-100/80 hover:border-indigo-300 px-3.5 py-2.5 text-xs font-semibold text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 transition-all cursor-pointer"
+                      >
+                        <span className="truncate">
+                          {exportStatusTarget === "all"
+                            ? "All Statuses"
+                            : exportStatusTarget === "booked"
+                            ? "Booked Only"
+                            : exportStatusTarget === "in_transit"
+                            ? "In Transit Only"
+                            : exportStatusTarget === "out_for_delivery"
+                            ? "Out for Delivery Only"
+                            : exportStatusTarget === "delivered"
+                            ? "Delivered Only"
+                            : "Returned Only"}
+                        </span>
+                        <ChevronDown className="h-4 w-4 text-slate-400 shrink-0" />
+                      </button>
+
+                      {isExportStatusDropdownOpen && (
+                        <>
+                          <div
+                            className="fixed inset-0 z-40"
+                            onClick={() => setIsExportStatusDropdownOpen(false)}
+                          />
+                          <div className="absolute left-0 right-0 top-full mt-1.5 z-50 rounded-2xl border border-slate-200/90 bg-white p-1.5 shadow-2xl dark:border-slate-700 dark:bg-slate-800 space-y-0.5">
+                            {(
+                              [
+                                { id: "all", label: "All Statuses" },
+                                { id: "booked", label: "Booked Only" },
+                                { id: "in_transit", label: "In Transit Only" },
+                                { id: "out_for_delivery", label: "Out for Delivery Only" },
+                                { id: "delivered", label: "Delivered Only" },
+                                { id: "returned", label: "Returned Only" },
+                              ] as const
+                            ).map((st) => (
+                              <button
+                                key={st.id}
+                                type="button"
+                                onClick={() => {
+                                  setExportStatusTarget(st.id);
+                                  setIsExportStatusDropdownOpen(false);
+                                }}
+                                className={`w-full flex items-center justify-between rounded-xl px-3 py-2 text-xs font-medium transition-colors cursor-pointer ${
+                                  exportStatusTarget === st.id
+                                    ? "bg-indigo-50 text-indigo-700 dark:bg-indigo-950/70 dark:text-indigo-300 font-semibold"
+                                    : "text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-700/70"
+                                }`}
+                              >
+                                <span>{st.label}</span>
+                                {exportStatusTarget === st.id && (
+                                  <Check className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" />
+                                )}
+                              </button>
+                            ))}
+                          </div>
+                        </>
+                      )}
+                    </div>
+
+                    {/* 4. Custom File Format Dropdown */}
+                    <div className="relative">
+                      <label className="text-xs font-semibold text-slate-600 dark:text-slate-300 block mb-1.5">
+                        File Format
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsExportFormatDropdownOpen((prev) => !prev);
+                          setIsExportDateDropdownOpen(false);
+                          setIsExportBatchDropdownOpen(false);
+                          setIsExportStatusDropdownOpen(false);
+                        }}
+                        className="w-full flex items-center justify-between gap-2 rounded-xl border border-slate-200/90 bg-slate-50/90 hover:bg-slate-100/80 hover:border-indigo-300 px-3.5 py-2.5 text-xs font-semibold text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 transition-all cursor-pointer"
+                      >
+                        <span className="truncate">
+                          {exportFileExtension === "xlsx"
+                            ? "Excel Workbook (.xlsx)"
+                            : exportFileExtension === "csv"
+                            ? "CSV Spreadsheet (.csv)"
+                            : exportFileExtension === "xls"
+                            ? "Excel Legacy (.xls)"
+                            : exportFileExtension === "json"
+                            ? "Structured JSON (.json)"
+                            : "Plain Text Report (.txt)"}
+                        </span>
+                        <ChevronDown className="h-4 w-4 text-slate-400 shrink-0" />
+                      </button>
+
+                      {isExportFormatDropdownOpen && (
+                        <>
+                          <div
+                            className="fixed inset-0 z-40"
+                            onClick={() => setIsExportFormatDropdownOpen(false)}
+                          />
+                          <div className="absolute left-0 right-0 top-full mt-1.5 z-50 rounded-2xl border border-slate-200/90 bg-white p-1.5 shadow-2xl dark:border-slate-700 dark:bg-slate-800 space-y-0.5">
+                            {(
+                              [
+                                { ext: "xlsx", label: "Excel Workbook", badge: ".xlsx" },
+                                { ext: "csv", label: "CSV Spreadsheet", badge: ".csv" },
+                                { ext: "xls", label: "Excel Legacy", badge: ".xls" },
+                                { ext: "json", label: "Structured JSON", badge: ".json" },
+                                { ext: "txt", label: "Plain Text Report", badge: ".txt" },
+                              ] as const
+                            ).map((fmt) => (
+                              <button
+                                key={fmt.ext}
+                                type="button"
+                                onClick={() => {
+                                  setExportFileExtension(fmt.ext);
+                                  setIsExportFormatDropdownOpen(false);
+                                }}
+                                className={`w-full flex items-center justify-between rounded-xl px-3 py-2 text-xs font-medium transition-colors cursor-pointer ${
+                                  exportFileExtension === fmt.ext
+                                    ? "bg-indigo-50 text-indigo-700 dark:bg-indigo-950/70 dark:text-indigo-300 font-semibold"
+                                    : "text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-700/70"
+                                }`}
+                              >
+                                <span>{fmt.label}</span>
+                                <span className="font-mono text-[10px] font-bold text-indigo-600 dark:text-indigo-400 uppercase">
+                                  {fmt.badge}
+                                </span>
+                              </button>
+                            ))}
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  </div>
+
                   {batchCsvExportMsg && (
-                    <div className="rounded-xl border border-emerald-300 bg-white dark:border-emerald-800 dark:bg-slate-900 px-3 py-1.5 text-[11px] font-bold text-emerald-700 dark:text-emerald-300 flex items-center gap-1.5">
-                      <Check className="h-3.5 w-3.5 text-emerald-600 shrink-0" />
-                      <span>{batchCsvExportMsg}</span>
+                    <div className="rounded-xl border border-emerald-300 bg-emerald-50/70 dark:border-emerald-800 dark:bg-emerald-950/50 px-3 py-2 text-xs font-semibold text-emerald-700 dark:text-emerald-300">
+                      {batchCsvExportMsg}
                     </div>
                   )}
 
@@ -3492,310 +4824,825 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                     type="button"
                     onClick={() => handleExportBatchCsv()}
                     disabled={totalCount === 0}
-                    className="w-full inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 px-3.5 py-2.5 text-xs font-extrabold text-white shadow-xs transition-colors cursor-pointer"
+                    className="w-full inline-flex items-center justify-center gap-1.5 rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-700 hover:to-violet-700 disabled:opacity-50 px-4 py-2.5 text-xs font-bold text-white shadow-sm transition-all cursor-pointer"
                   >
-                    <Download className="h-3.5 w-3.5" />
-                    <span>
-                      Download Batch (.{exportFileExtension.toUpperCase()})
-                    </span>
+                    <Download className="h-4 w-4" />
+                    <span>Export Filtered Data (.{exportFileExtension.toUpperCase()})</span>
                   </button>
-                </div>
 
-                {/* 2. AUTO BACKGROUND CHECK & SYNC FREQUENCY */}
-                <div className="rounded-2xl border border-slate-200 bg-slate-50/70 p-3.5 dark:border-slate-800 dark:bg-slate-800/50 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <div className="text-xs font-bold text-slate-900 dark:text-white">
-                        Auto Background Sync
-                      </div>
-                      <div className="text-[10px] text-slate-500">
-                        Interval: {Math.round(checkIntervalSec / 60)}m
-                      </div>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={handleToggleAutoCheck}
-                      className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out ${
-                        isAutoCheckEnabled ? "bg-emerald-600" : "bg-slate-300 dark:bg-slate-600"
-                      }`}
-                    >
-                      <span
-                        className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm transition duration-200 ease-in-out ${
-                          isAutoCheckEnabled ? "translate-x-5" : "translate-x-0"
-                        }`}
-                      />
-                    </button>
-                  </div>
-
-                  <div className="grid grid-cols-3 gap-1.5">
-                    {[
-                      { label: "5m", sec: 300 },
-                      { label: "15m", sec: 900 },
-                      { label: "30m", sec: 1800 },
-                    ].map((opt) => (
-                      <button
-                        key={opt.sec}
-                        type="button"
-                        onClick={() => handleChangeInterval(opt.sec)}
-                        className={`rounded-xl border py-1.5 px-2 text-xs font-bold transition-all cursor-pointer ${
-                          checkIntervalSec === opt.sec
-                            ? "border-indigo-600 bg-indigo-600 text-white"
-                            : "border-slate-200 bg-white text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300"
-                        }`}
-                      >
-                        {opt.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                {/* 3. DELIVERED EXPORT & CLEAN-UP */}
-                <div className="rounded-2xl border border-emerald-200/80 bg-emerald-50/50 p-3.5 dark:border-emerald-900/60 dark:bg-emerald-950/30 space-y-2.5">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-slate-900 dark:text-white">
-                      Delivered Export (.xlsx)
-                    </span>
-                    <span className="text-[10px] font-mono font-bold text-emerald-700 dark:text-emerald-300">
-                      {deliveredCount} delivered
-                    </span>
-                  </div>
-
-                  {exportDeliveredSuccessMsg && (
-                    <div className="rounded-xl border border-emerald-300 bg-white dark:bg-slate-900 px-2.5 py-1.5 text-[11px] font-bold text-emerald-700 dark:text-emerald-300">
-                      {exportDeliveredSuccessMsg}
-                    </div>
-                  )}
-
-                  <div className="flex flex-col gap-1.5">
+                  <div className="pt-3 border-t border-slate-100 dark:border-slate-800 grid grid-cols-1 sm:grid-cols-2 gap-2">
                     <button
                       type="button"
                       onClick={handleExportDeliveredOnly}
                       disabled={deliveredCount === 0}
-                      className="w-full inline-flex items-center justify-center gap-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 px-3 py-2 text-xs font-bold text-white cursor-pointer"
+                      className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 px-3 py-2.5 text-xs font-bold text-white cursor-pointer"
                     >
                       <Download className="h-3.5 w-3.5" />
                       <span>Export Delivered ({deliveredCount})</span>
                     </button>
 
-                    {lastExportedDeliveredIds.length > 0 && (
-                      <button
-                        type="button"
-                        onClick={() => setIsDeleteExportedModalOpen(true)}
-                        className="w-full inline-flex items-center justify-center gap-1.5 rounded-xl border border-rose-300 bg-rose-50 hover:bg-rose-100 text-rose-700 dark:border-rose-800 dark:bg-rose-950/70 dark:text-rose-300 px-3 py-2 text-xs font-bold cursor-pointer"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                        <span>Delete Exported ({lastExportedDeliveredIds.length})</span>
-                      </button>
-                    )}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setBackupError(null);
+                        setBackupSuccessMsg(null);
+                        setIsBackupModalOpen(true);
+                      }}
+                      className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-800 px-3 py-2.5 text-xs font-bold text-slate-700 dark:text-slate-200 cursor-pointer"
+                    >
+                      <Database className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" />
+                      <span>Backup &amp; Restore</span>
+                    </button>
                   </div>
                 </div>
 
-                {/* 4. JSON BACKUP & FULL SETTINGS MODAL */}
-                <div className="flex flex-col gap-2 pt-1">
+                {/* Carrier Volume & Storage Analytics Card */}
+                <div className="rounded-3xl border border-slate-200/90 bg-white p-5 sm:p-6 shadow-xs dark:border-slate-800 dark:bg-slate-900 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-base font-bold text-slate-900 dark:text-white">
+                      Carrier &amp; Storage Overview
+                    </h3>
+                    <span className="font-mono text-xs font-bold text-indigo-600 dark:text-indigo-400 tabular-nums">
+                      {dataAnalytics.formattedSize}
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="rounded-2xl border border-indigo-200/60 bg-gradient-to-br from-indigo-500/10 to-transparent p-3.5 dark:border-indigo-800/50">
+                      <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                        Total Records
+                      </div>
+                      <div className="mt-1 text-xl font-bold text-slate-900 dark:text-white tabular-nums">
+                        {dataAnalytics.totalRecords}
+                      </div>
+                      <div className="mt-0.5 text-[11px] font-medium text-slate-500">
+                        {dataAnalytics.importedRecords} batch · {dataAnalytics.directRecords} direct
+                      </div>
+                    </div>
+
+                    <div className="rounded-2xl border border-emerald-200/60 bg-gradient-to-br from-emerald-500/10 to-transparent p-3.5 dark:border-emerald-800/50">
+                      <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                        Active Batches
+                      </div>
+                      <div className="mt-1 text-xl font-bold text-emerald-600 dark:text-emerald-400 tabular-nums">
+                        {dataAnalytics.batchesCount}
+                      </div>
+                      <div className="mt-0.5 text-[11px] font-medium text-slate-500">
+                        {dataAnalytics.quotaPercent}% of 5 MB used
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Interactive Carrier Distribution */}
+                  {dataAnalytics.carrierBreakdown.length > 0 && (
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-bold text-slate-700 dark:text-slate-300">
+                          Courier Partner Breakdown
+                        </span>
+                        <span className="text-[11px] text-slate-400">
+                          Click to filter
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-52 overflow-y-auto pr-1">
+                        {dataAnalytics.carrierBreakdown.map((c) => (
+                          <button
+                            key={c.id}
+                            type="button"
+                            onClick={() => {
+                              setSearchFilter(c.name);
+                              setActiveMenu("data");
+                            }}
+                            className="flex items-center justify-between text-xs bg-slate-50/80 hover:bg-indigo-50/60 dark:bg-slate-800/50 dark:hover:bg-indigo-950/40 px-3.5 py-2.5 rounded-xl border border-slate-200/80 hover:border-indigo-300 dark:border-slate-800 transition-all cursor-pointer text-left"
+                          >
+                            <span className="font-semibold text-slate-800 dark:text-slate-200 truncate">
+                              {c.name}
+                            </span>
+                            <span className="font-mono text-xs font-bold text-indigo-600 dark:text-indigo-400 shrink-0 ml-2 tabular-nums">
+                              {c.count} ({c.percent}%)
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ============================================================ */}
+          {/* VIEW 5: SETTINGS                                             */}
+          {/* ============================================================ */}
+          {activeMenu === "settings" && (
+            <div className="rounded-3xl border border-slate-200/90 bg-white p-5 sm:p-6 shadow-xs dark:border-slate-800 dark:bg-slate-900 space-y-5 animate-in fade-in duration-150">
+              <div className="flex items-center justify-between rounded-2xl bg-slate-50 dark:bg-slate-800/60 p-4 border border-slate-200/80 dark:border-slate-700">
+                <div>
+                  <div className="text-sm font-extrabold text-slate-900 dark:text-white">
+                    Automatic Background Sync
+                  </div>
+                  <div className="text-xs text-slate-500 mt-0.5">
+                    Current interval: {Math.round(checkIntervalSec / 60)} minutes
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleToggleAutoCheck}
+                  className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out ${
+                    isAutoCheckEnabled ? "bg-emerald-600" : "bg-slate-300 dark:bg-slate-600"
+                  }`}
+                >
+                  <span
+                    className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm transition duration-200 ease-in-out ${
+                      isAutoCheckEnabled ? "translate-x-5" : "translate-x-0"
+                    }`}
+                  />
+                </button>
+              </div>
+
+              <div>
+                <label className="text-xs font-bold text-slate-700 dark:text-slate-300 mb-2 block">
+                  Sync Frequency:
+                </label>
+                <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+                  {[
+                    { label: "5 mins", sec: 300 },
+                    { label: "10 mins", sec: 600 },
+                    { label: "15 mins", sec: 900 },
+                    { label: "30 mins", sec: 1800 },
+                    { label: "1 hour", sec: 3600 },
+                  ].map((opt) => (
+                    <button
+                      key={opt.sec}
+                      type="button"
+                      onClick={() => handleChangeInterval(opt.sec)}
+                      className={`rounded-xl border py-2.5 px-3 text-xs font-bold transition-all cursor-pointer ${
+                        checkIntervalSec === opt.sec
+                          ? "border-indigo-600 bg-indigo-600 text-white shadow-xs"
+                          : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300"
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-slate-100 dark:border-slate-800">
+                <div className="flex items-center justify-between rounded-2xl border border-slate-200 p-3.5 dark:border-slate-800">
+                  <span className="text-xs font-bold text-slate-800 dark:text-slate-200">
+                    Auto-Next Scan Mode
+                  </span>
                   <button
                     type="button"
-                    onClick={() => {
-                      setBackupError(null);
-                      setBackupSuccessMsg(null);
-                      setIsBackupModalOpen(true);
-                    }}
-                    className="w-full inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 px-3 py-2 text-xs font-bold text-slate-700 dark:text-slate-200 cursor-pointer"
+                    onClick={() => setIsAutoNextEnabled((prev) => !prev)}
+                    className={`rounded-lg px-3 py-1 text-xs font-black cursor-pointer ${
+                      isAutoNextEnabled
+                        ? "bg-emerald-600 text-white"
+                        : "bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300"
+                    }`}
                   >
-                    <Database className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" />
-                    <span>Data Backup & Restore Center</span>
+                    {isAutoNextEnabled ? "ON" : "OFF"}
                   </button>
+                </div>
+
+                <div className="flex items-center justify-between rounded-2xl border border-slate-200 p-3.5 dark:border-slate-800">
+                  <span className="text-xs font-bold text-slate-800 dark:text-slate-200">
+                    No Rule
+                  </span>
                   <button
                     type="button"
-                    onClick={() => setIsSettingsOpen(true)}
-                    className="w-full inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 dark:border-slate-800 dark:bg-slate-800/60 px-3 py-2 text-[11px] font-bold text-slate-600 dark:text-slate-300 cursor-pointer"
+                    onClick={() => setIsPasteAnywayEnabled((prev) => !prev)}
+                    className={`rounded-lg px-3 py-1 text-xs font-black cursor-pointer ${
+                      isPasteAnywayEnabled
+                        ? "bg-amber-500 text-slate-950"
+                        : "bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300"
+                    }`}
                   >
-                    <Settings className="h-3.5 w-3.5" />
-                    <span>Open Fullscreen Settings</span>
+                    {isPasteAnywayEnabled ? "ON" : "OFF"}
                   </button>
                 </div>
               </div>
-            )}
-          </div>
-        </aside>
+            </div>
+          )}
 
-        {/* RIGHT / MAIN WORKSPACE: SHIPMENTS DATA TABLE */}
-        <div className="lg:col-span-8 xl:col-span-8 space-y-4">
-          {/* 4. SHIPMENTS DATA TABLE */}
-          <div className="overflow-hidden rounded-3xl border border-slate-200/90 bg-white shadow-xs dark:border-slate-800 dark:bg-slate-900">
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs min-w-[640px]">
-                <thead className="bg-slate-50/80 text-[11px] font-extrabold uppercase tracking-wider text-slate-500 dark:bg-slate-800/60 dark:text-slate-400 border-b border-slate-200/80 dark:border-slate-800">
-                  <tr>
-                    <th className="py-3.5 pl-4 sm:pl-6 pr-2 w-10">
+          {/* ============================================================ */}
+          {/* VIEW 6: PROFILE & ACCOUNT                                    */}
+          {/* ============================================================ */}
+          {activeMenu === "profile" && (
+            <div className="rounded-3xl border border-slate-200/90 bg-white p-5 sm:p-6 shadow-xs dark:border-slate-800 dark:bg-slate-900 space-y-5 animate-in fade-in duration-150">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-100 dark:border-slate-800">
+                <div className="flex items-center gap-3.5">
+                  <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-indigo-600 to-violet-600 text-white font-black text-lg shadow-sm">
+                    {userProfile.fullName
+                      .split(" ")
+                      .map((n) => n[0])
+                      .join("")
+                      .slice(0, 2)
+                      .toUpperCase() || "TF"}
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h3 className="text-base font-black text-slate-900 dark:text-white">
+                        {userProfile.fullName}
+                      </h3>
+                      <BadgeCheck className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
+                    </div>
+                    <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
+                      {userProfile.role} · {userProfile.companyName}
+                    </p>
+                  </div>
+                </div>
+
+                {profileSavedMsg && (
+                  <div className="rounded-xl bg-emerald-50 border border-emerald-200 dark:bg-emerald-950/60 dark:border-emerald-800 px-3 py-1.5 text-xs font-bold text-emerald-700 dark:text-emerald-300 flex items-center gap-1.5">
+                    <Check className="h-3.5 w-3.5" />
+                    <span>{profileSavedMsg}</span>
+                  </div>
+                )}
+              </div>
+
+              <form onSubmit={handleSaveProfile} className="space-y-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1.5">
+                      Full Name
+                    </label>
+                    <div className="relative">
+                      <User className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
                       <input
-                        type="checkbox"
-                        checked={filteredShipments.length > 0 && selectedShipmentIds.length === filteredShipments.length}
-                        onChange={handleToggleSelectAll}
-                        aria-label="Select all consignments"
-                        className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer accent-indigo-600"
+                        type="text"
+                        value={userProfile.fullName}
+                        onChange={(e) => setUserProfile({ ...userProfile, fullName: e.target.value })}
+                        className="w-full rounded-xl border border-slate-200 bg-slate-50 pl-9 pr-3 py-2 text-xs font-semibold text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-white focus:border-indigo-500 focus:outline-none"
                       />
-                    </th>
-                    <th className="py-3.5 px-3">Consignment / AWB</th>
-                    <th className="py-3.5 px-4">Courier Network</th>
-                    <th className="py-3.5 px-4">Current Status</th>
-                    <th className="py-3.5 px-4">Last Event</th>
-                    <th className="py-3.5 px-4 text-right">Actions</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                  {filteredShipments.length === 0 ? (
-                    <tr>
-                      <td colSpan={6} className="py-12 text-center text-slate-400">
-                        <Package className="mx-auto h-8 w-8 text-slate-300 dark:text-slate-600 mb-2" />
-                        <p className="text-sm font-semibold text-slate-600 dark:text-slate-300">
-                          No shipments matching your filter
-                        </p>
-                        <p className="text-xs text-slate-400 mt-1">
-                          Try adjusting the side filters or import tracking IDs above.
-                        </p>
-                      </td>
-                    </tr>
-                  ) : (
-                    filteredShipments.map((item) => (
-                      <tr
-                        key={item.id}
-                        className={`transition-colors group ${
-                          selectedShipmentIds.includes(item.id)
-                            ? "bg-indigo-50/60 dark:bg-indigo-950/40"
-                            : "hover:bg-slate-50/80 dark:hover:bg-slate-800/40"
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1.5">
+                      Email Address
+                    </label>
+                    <div className="relative">
+                      <Mail className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
+                      <input
+                        type="email"
+                        value={userProfile.email}
+                        onChange={(e) => setUserProfile({ ...userProfile, email: e.target.value })}
+                        className="w-full rounded-xl border border-slate-200 bg-slate-50 pl-9 pr-3 py-2 text-xs font-semibold text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-white focus:border-indigo-500 focus:outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1.5">
+                      Contact Mobile Number
+                    </label>
+                    <div className="relative">
+                      <Phone className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
+                      <input
+                        type="tel"
+                        value={userProfile.phone}
+                        onChange={(e) => setUserProfile({ ...userProfile, phone: e.target.value })}
+                        className="w-full rounded-xl border border-slate-200 bg-slate-50 pl-9 pr-3 py-2 font-mono text-xs font-semibold text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-white focus:border-indigo-500 focus:outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1.5">
+                      Organization / Company Name
+                    </label>
+                    <div className="relative">
+                      <Building2 className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
+                      <input
+                        type="text"
+                        value={userProfile.companyName}
+                        onChange={(e) => setUserProfile({ ...userProfile, companyName: e.target.value })}
+                        className="w-full rounded-xl border border-slate-200 bg-slate-50 pl-9 pr-3 py-2 text-xs font-semibold text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-white focus:border-indigo-500 focus:outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1.5">
+                      Default Origin Hub / City
+                    </label>
+                    <div className="relative">
+                      <MapPin className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
+                      <input
+                        type="text"
+                        value={userProfile.hubCity}
+                        onChange={(e) => setUserProfile({ ...userProfile, hubCity: e.target.value })}
+                        className="w-full rounded-xl border border-slate-200 bg-slate-50 pl-9 pr-3 py-2 text-xs font-semibold text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-white focus:border-indigo-500 focus:outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1.5">
+                      Default Hub Pincode
+                    </label>
+                    <div className="relative">
+                      <MapPin className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
+                      <input
+                        type="text"
+                        value={userProfile.hubPincode}
+                        onChange={(e) => setUserProfile({ ...userProfile, hubPincode: e.target.value })}
+                        className="w-full rounded-xl border border-slate-200 bg-slate-50 pl-9 pr-3 py-2 font-mono text-xs font-semibold text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-white focus:border-indigo-500 focus:outline-none"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex justify-end pt-2">
+                  <button
+                    type="submit"
+                    className="inline-flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-700 hover:to-violet-700 px-5 py-2.5 text-xs font-extrabold text-white shadow-xs transition-all cursor-pointer"
+                  >
+                    <Check className="h-4 w-4 stroke-[3]" />
+                    <span>Save Profile</span>
+                  </button>
+                </div>
+              </form>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ============================================================== */}
+      {/* EDIT CUSTOMER NAME, NUMBER & PINCODE MODAL (CUSTOM DROPDOWN)   */}
+      {/* ============================================================== */}
+      {editingShipment && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/75 backdrop-blur-xs animate-in fade-in">
+          <div className="fixed inset-0" onClick={() => setEditingShipment(null)} />
+          <div
+            className="relative z-10 w-full max-w-md rounded-3xl border border-slate-200 bg-white p-5 sm:p-6 shadow-2xl dark:border-slate-800 dark:bg-slate-900 space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-3">
+              <div>
+                <h3 className="text-sm font-extrabold text-slate-900 dark:text-white">
+                  Edit Customer &amp; Pincode
+                </h3>
+                <p className="text-xs font-mono font-bold text-indigo-600 dark:text-indigo-400">
+                  {editingShipment.trackingNumber} · {editingShipment.courierName}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingShipment(null)}
+                className="rounded-xl p-1.5 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              <div>
+                <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1">
+                  Customer Name
+                </label>
+                <input
+                  type="text"
+                  value={editCustomerName}
+                  onChange={(e) => setEditCustomerName(e.target.value)}
+                  placeholder="Enter Customer Name..."
+                  className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-white focus:border-indigo-500 focus:outline-none"
+                />
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1">
+                    Customer Number
+                  </label>
+                  <input
+                    type="tel"
+                    value={editCustomerPhone}
+                    onChange={(e) => setEditCustomerPhone(e.target.value)}
+                    placeholder="e.g. 9847011223"
+                    className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-xs font-semibold text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-white focus:border-indigo-500 focus:outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1">
+                    Pincode
+                  </label>
+                  <input
+                    type="text"
+                    value={editPincode}
+                    onChange={(e) => setEditPincode(e.target.value)}
+                    placeholder="e.g. 680003"
+                    className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-xs font-semibold text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-white focus:border-indigo-500 focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1">
+                    Destination City / Hub
+                  </label>
+                  <input
+                    type="text"
+                    value={editDestination}
+                    onChange={(e) => setEditDestination(e.target.value)}
+                    placeholder="Destination Hub"
+                    className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-white focus:border-indigo-500 focus:outline-none"
+                  />
+                </div>
+
+                <div className="relative">
+                  <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1">
+                    Status
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => setIsEditStatusDropdownOpen((prev) => !prev)}
+                    className="w-full flex items-center justify-between gap-2 rounded-xl border border-slate-200 bg-slate-50 hover:border-indigo-300 px-3 py-2 text-xs font-bold text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-white cursor-pointer"
+                  >
+                    <div className="flex items-center gap-2 truncate">
+                      <span
+                        className={`h-2 w-2 rounded-full shrink-0 ${
+                          editStatus === "delivered"
+                            ? "bg-emerald-500"
+                            : editStatus === "out_for_delivery"
+                            ? "bg-amber-500"
+                            : editStatus === "returned"
+                            ? "bg-rose-500"
+                            : editStatus === "booked"
+                            ? "bg-violet-500"
+                            : "bg-sky-500"
                         }`}
-                      >
-                        {/* Row Checkbox */}
-                        <td className="py-3.5 pl-4 sm:pl-6 pr-2 w-10">
-                          <input
-                            type="checkbox"
-                            checked={selectedShipmentIds.includes(item.id)}
-                            onChange={() => handleToggleSelectRow(item.id)}
-                            aria-label={`Select consignment ${item.trackingNumber}`}
-                            className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer accent-indigo-600"
-                          />
-                        </td>
+                      />
+                      <span className="truncate">
+                        {editStatus === "delivered"
+                          ? "Delivered"
+                          : editStatus === "out_for_delivery"
+                          ? "Out for Delivery"
+                          : editStatus === "returned"
+                          ? "Returned (RTO)"
+                          : editStatus === "booked"
+                          ? "Booked"
+                          : "In Transit"}
+                      </span>
+                    </div>
+                    <ChevronDown className="h-3.5 w-3.5 text-slate-400 shrink-0" />
+                  </button>
 
-                        {/* AWB & Copy */}
-                        <td className="py-3.5 px-3">
-                          <div className="flex items-center gap-2">
-                            <button
-                              type="button"
-                              onClick={() => onOpenTrackingResult(item.trackingNumber, item.courierId)}
-                              className="font-mono font-bold text-indigo-600 hover:text-indigo-800 dark:text-indigo-400 dark:hover:text-indigo-300 transition-colors text-xs"
-                              title="Click to view detailed tracking popup"
-                            >
-                              {item.trackingNumber}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleCopy(item.id, item.trackingNumber)}
-                              className="opacity-0 group-hover:opacity-100 p-1 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-opacity"
-                              title="Copy AWB"
-                            >
-                              {copiedId === item.id ? (
-                                <Check className="h-3 w-3 text-emerald-600" />
-                              ) : (
-                                <Copy className="h-3 w-3" />
-                              )}
-                            </button>
-                            {item.isImported && (
-                              <span
-                                className="inline-flex items-center gap-1 rounded-md bg-emerald-50 dark:bg-emerald-950/80 px-1.5 py-0.5 text-[9px] font-bold text-emerald-700 dark:text-emerald-300 border border-emerald-200/60 dark:border-emerald-800/60 select-none cursor-default"
-                                title={item.batchName || "Imported batch"}
-                              >
-                                <FileSpreadsheet className="h-2.5 w-2.5 text-emerald-600" />
-                                <span>{item.batchName ? item.batchName.split(" • ")[0] : "Imported"}</span>
-                              </span>
-                            )}
-                          </div>
-                          <div className="text-[10px] text-slate-400 font-mono mt-0.5">
-                            {item.articleType}
-                          </div>
-                        </td>
-
-                        {/* Courier Network */}
-                        <td className="py-3.5 px-4">
-                          <div className="flex items-center gap-2">
-                            <span className="flex h-2 w-2 rounded-full bg-indigo-500" />
-                            <span className="font-semibold text-slate-800 dark:text-slate-200 truncate max-w-[140px]">
-                              {item.courierName}
-                            </span>
-                          </div>
-                        </td>
-
-                        {/* Status Pill */}
-                        <td className="py-3.5 px-4">
-                          {item.status === "delivered" && (
-                            <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-0.5 text-[11px] font-bold text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300 border border-emerald-200/80 dark:border-emerald-800/60">
-                              <CheckCircle2 className="h-3 w-3" />
-                              Delivered
-                            </span>
-                          )}
-                          {item.status === "out_for_delivery" && (
-                            <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-0.5 text-[11px] font-bold text-amber-700 dark:bg-amber-950/60 dark:text-amber-300 border border-amber-200/80 dark:border-amber-800/60">
-                              <Truck className="h-3 w-3" />
-                              Out for Delivery
-                            </span>
-                          )}
-                          {item.status === "in_transit" && (
-                            <span className="inline-flex items-center gap-1.5 rounded-full bg-sky-50 px-2.5 py-0.5 text-[11px] font-bold text-sky-700 dark:bg-sky-950/60 dark:text-sky-300 border border-sky-200/80 dark:border-sky-800/60">
-                              <Clock className="h-3 w-3" />
-                              In Transit
-                            </span>
-                          )}
-                          {item.status === "returned" && (
-                            <div className="inline-flex flex-col items-start gap-0.5">
-                              <span className="inline-flex items-center gap-1.5 rounded-full bg-rose-50 px-2.5 py-0.5 text-[11px] font-bold text-rose-700 dark:bg-rose-950/60 dark:text-rose-300 border border-rose-200/80 dark:border-rose-800/60">
-                                <RotateCcw className="h-3 w-3 stroke-[2.4]" />
-                                Returned (RTO)
-                              </span>
-                              {item.returnReason && (
-                                <span className="text-[10px] text-rose-600 dark:text-rose-400 font-medium truncate max-w-[150px]">
-                                  {item.returnReason}
-                                </span>
-                              )}
+                  {isEditStatusDropdownOpen && (
+                    <>
+                      <div
+                        className="fixed inset-0 z-40"
+                        onClick={() => setIsEditStatusDropdownOpen(false)}
+                      />
+                      <div className="absolute right-0 left-0 top-full mt-1 z-50 rounded-2xl border border-slate-200 bg-white p-1.5 shadow-2xl dark:border-slate-700 dark:bg-slate-800 space-y-0.5">
+                        {(
+                          [
+                            { value: "booked", label: "Booked", dot: "bg-violet-500" },
+                            { value: "in_transit", label: "In Transit", dot: "bg-sky-500" },
+                            { value: "out_for_delivery", label: "Out for Delivery", dot: "bg-amber-500" },
+                            { value: "delivered", label: "Delivered", dot: "bg-emerald-500" },
+                            { value: "returned", label: "Returned (RTO)", dot: "bg-rose-500" },
+                          ] as const
+                        ).map((st) => (
+                          <button
+                            key={st.value}
+                            type="button"
+                            onClick={() => {
+                              setEditStatus(st.value);
+                              setIsEditStatusDropdownOpen(false);
+                            }}
+                            className={`w-full flex items-center justify-between rounded-xl px-2.5 py-1.5 text-xs font-semibold transition-colors cursor-pointer ${
+                              editStatus === st.value
+                                ? "bg-indigo-50 text-indigo-700 dark:bg-indigo-950/70 dark:text-indigo-300 font-bold"
+                                : "text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-700/70"
+                            }`}
+                          >
+                            <div className="flex items-center gap-2">
+                              <span className={`h-2 w-2 rounded-full ${st.dot}`} />
+                              <span>{st.label}</span>
                             </div>
-                          )}
-                          {item.status === "booked" && (
-                            <span className="inline-flex items-center gap-1.5 rounded-full bg-violet-50 px-2.5 py-0.5 text-[11px] font-bold text-violet-700 dark:bg-violet-950/60 dark:text-violet-300 border border-violet-200/80 dark:border-violet-800/60">
-                              <Package className="h-3 w-3" />
-                              Booked
-                            </span>
-                          )}
-                        </td>
-
-                        {/* Last Event */}
-                        <td className="py-3.5 px-4">
-                          <div className="font-medium text-slate-800 dark:text-slate-200 truncate max-w-[200px]">
-                            {item.statusText}
-                          </div>
-                          <div className="text-[10px] text-slate-400 mt-0.5">
-                            {item.lastUpdated} · {item.lastLocation}
-                          </div>
-                        </td>
-
-                        {/* Action buttons */}
-                        <td className="py-3.5 px-4 text-right">
-                          <div className="flex items-center justify-end">
-                            <button
-                              type="button"
-                              onClick={() => onOpenTrackingResult(item.trackingNumber, item.courierId)}
-                              className="rounded-xl bg-indigo-50 hover:bg-indigo-600 hover:text-white px-3 py-1.5 text-xs font-bold text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300 dark:hover:bg-indigo-600 dark:hover:text-white transition-all cursor-pointer"
-                            >
-                              Track
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    ))
+                            {editStatus === st.value && (
+                              <Check className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400 shrink-0" />
+                            )}
+                          </button>
+                        ))}
+                      </div>
+                    </>
                   )}
-                </tbody>
-              </table>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100 dark:border-slate-800">
+              <button
+                type="button"
+                onClick={() => setEditingShipment(null)}
+                className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleSaveEditShipment}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-4 py-2 text-xs font-extrabold text-white cursor-pointer"
+              >
+                <Check className="h-3.5 w-3.5 stroke-[3]" />
+                <span>Save</span>
+              </button>
             </div>
           </div>
         </div>
-      </div>
+      )}
+
+      {/* ============================================================== */}
+      {/* CUSTOMER & CONSIGNMENT FULL DETAILS MODAL (ROW CLICK VIEW)      */}
+      {/* ============================================================== */}
+      {selectedDetailShipment && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/75 backdrop-blur-xs animate-in fade-in">
+          <div className="fixed inset-0" onClick={() => setSelectedDetailShipment(null)} />
+          <div
+            className="relative z-10 w-full max-w-xl rounded-3xl border border-slate-200 bg-white shadow-2xl dark:border-slate-800 dark:bg-slate-900 overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Attractive Top Gradient Header */}
+            <div className="relative bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900 px-6 py-5 text-white overflow-hidden">
+              <div className="pointer-events-none absolute -top-12 -right-12 h-36 w-36 rounded-full bg-indigo-500/20 blur-2xl" />
+              <div className="relative flex items-start justify-between gap-4">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 mb-1.5">
+                    <span className="inline-flex items-center gap-1 rounded-md bg-white/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-indigo-200 border border-white/10">
+                      {selectedDetailShipment.courierName}
+                    </span>
+                    {selectedDetailShipment.batchName && (
+                      <span className="inline-flex items-center gap-1 rounded-md bg-indigo-500/20 px-2 py-0.5 text-[10px] font-medium text-indigo-200 border border-indigo-400/20 truncate max-w-[180px]">
+                        <FolderKanban className="h-3 w-3 shrink-0" />
+                        <span className="truncate">{selectedDetailShipment.batchName}</span>
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <h3 className="font-mono text-lg sm:text-xl font-bold tracking-wider text-white truncate">
+                      {selectedDetailShipment.trackingNumber}
+                    </h3>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        handleCopy(selectedDetailShipment.id, selectedDetailShipment.trackingNumber)
+                      }
+                      className="rounded-lg bg-white/10 hover:bg-white/20 p-1.5 text-slate-200 transition-colors cursor-pointer"
+                      title="Copy Tracking Number"
+                    >
+                      {copiedId === selectedDetailShipment.id ? (
+                        <CheckCheck className="h-3.5 w-3.5 text-emerald-400" />
+                      ) : (
+                        <Copy className="h-3.5 w-3.5" />
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setSelectedDetailShipment(null)}
+                  className="rounded-xl bg-white/10 hover:bg-white/20 p-1.5 text-slate-300 hover:text-white transition-colors cursor-pointer shrink-0"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+
+              {/* Status & Route Progress Strip inside Header */}
+              <div className="relative mt-4 pt-3.5 border-t border-white/10 flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <span
+                    className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-semibold ${
+                      selectedDetailShipment.status === "delivered"
+                        ? "bg-emerald-500/20 text-emerald-300 border border-emerald-400/30"
+                        : selectedDetailShipment.status === "out_for_delivery"
+                        ? "bg-amber-500/20 text-amber-300 border border-amber-400/30"
+                        : selectedDetailShipment.status === "returned"
+                        ? "bg-rose-500/20 text-rose-300 border border-rose-400/30"
+                        : selectedDetailShipment.status === "booked"
+                        ? "bg-violet-500/20 text-violet-300 border border-violet-400/30"
+                        : "bg-sky-500/20 text-sky-300 border border-sky-400/30"
+                    }`}
+                  >
+                    <span className="h-1.5 w-1.5 rounded-full bg-current" />
+                    <span>{selectedDetailShipment.statusText}</span>
+                  </span>
+                </div>
+                <div className="text-[11px] text-slate-300 flex items-center gap-1.5">
+                  <Clock className="h-3.5 w-3.5 text-indigo-300" />
+                  <span>Updated: {selectedDetailShipment.lastUpdated}</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Body: Customer Info + Route & Consignment Metadata */}
+            <div className="p-5 sm:p-6 space-y-4 max-h-[70vh] overflow-y-auto">
+              {/* Customer Details Card */}
+              <div className="rounded-2xl border border-slate-200/90 bg-slate-50/70 dark:border-slate-800 dark:bg-slate-800/40 p-4">
+                <div className="text-[11px] font-bold uppercase tracking-wider text-indigo-600 dark:text-indigo-400 mb-3 flex items-center gap-1.5">
+                  <UserCheck className="h-3.5 w-3.5" />
+                  <span>Customer Details</span>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
+                  <div className="rounded-xl bg-white dark:bg-slate-900 p-3 border border-slate-200/70 dark:border-slate-800">
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+                      Customer Name
+                    </div>
+                    <div className="mt-1 text-xs sm:text-sm font-semibold text-slate-900 dark:text-white truncate">
+                      {selectedDetailShipment.recipientName || "Not specified"}
+                    </div>
+                  </div>
+                  <div className="rounded-xl bg-white dark:bg-slate-900 p-3 border border-slate-200/70 dark:border-slate-800">
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+                      Phone Number
+                    </div>
+                    <div className="mt-1 font-mono text-xs sm:text-sm font-semibold text-slate-900 dark:text-white">
+                      {selectedDetailShipment.customerPhone || "Not specified"}
+                    </div>
+                  </div>
+                  <div className="rounded-xl bg-white dark:bg-slate-900 p-3 border border-slate-200/70 dark:border-slate-800">
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+                      Delivery Pincode
+                    </div>
+                    <div className="mt-1 font-mono text-xs sm:text-sm font-semibold text-indigo-600 dark:text-indigo-400">
+                      {selectedDetailShipment.pincode || "Not specified"}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Route & Logistics Details */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div className="rounded-xl border border-slate-200/80 dark:border-slate-800 p-3">
+                  <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+                    Origin Hub
+                  </div>
+                  <div className="mt-1 text-xs font-semibold text-slate-800 dark:text-slate-200 truncate">
+                    {selectedDetailShipment.origin}
+                  </div>
+                </div>
+                <div className="rounded-xl border border-slate-200/80 dark:border-slate-800 p-3">
+                  <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+                    Destination
+                  </div>
+                  <div className="mt-1 text-xs font-semibold text-slate-800 dark:text-slate-200 truncate">
+                    {selectedDetailShipment.destination}
+                  </div>
+                </div>
+                <div className="rounded-xl border border-slate-200/80 dark:border-slate-800 p-3">
+                  <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+                    Last Location
+                  </div>
+                  <div className="mt-1 text-xs font-semibold text-slate-800 dark:text-slate-200 truncate">
+                    {selectedDetailShipment.lastLocation}
+                  </div>
+                </div>
+                <div className="rounded-xl border border-slate-200/80 dark:border-slate-800 p-3">
+                  <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+                    Package Type
+                  </div>
+                  <div className="mt-1 text-xs font-semibold text-slate-800 dark:text-slate-200 truncate">
+                    {selectedDetailShipment.articleType} ({selectedDetailShipment.weight})
+                  </div>
+                </div>
+              </div>
+
+              {selectedDetailShipment.returnReason && (
+                <div className="rounded-2xl border border-rose-200 bg-rose-50/70 dark:border-rose-900/50 dark:bg-rose-950/40 p-3.5 flex items-center gap-2.5 text-xs text-rose-800 dark:text-rose-200">
+                  <AlertTriangle className="h-4 w-4 text-rose-600 shrink-0" />
+                  <span>
+                    <strong className="font-semibold">Return Reason:</strong>{" "}
+                    {selectedDetailShipment.returnReason}
+                  </span>
+                </div>
+              )}
+            </div>
+
+            {/* Footer Action Bar */}
+            <div className="border-t border-slate-100 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-900/80 px-5 sm:px-6 py-3.5 flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const target = selectedDetailShipment;
+                    setSelectedDetailShipment(null);
+                    handleOpenEditShipment(target);
+                  }}
+                  className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200/90 bg-white hover:bg-slate-50 px-3.5 py-2 text-xs font-semibold text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 cursor-pointer transition-colors"
+                >
+                  <Pencil className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" />
+                  <span>Edit Details</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const idToRemove = selectedDetailShipment.id;
+                    setSelectedDetailShipment(null);
+                    setSelectedShipmentIds([idToRemove]);
+                    setIsBulkDeleteModalOpen(true);
+                  }}
+                  className="inline-flex items-center gap-1.5 rounded-xl border border-rose-200/80 bg-rose-50/60 hover:bg-rose-100/70 px-3 py-2 text-xs font-semibold text-rose-700 dark:border-rose-900/50 dark:bg-rose-950/40 dark:text-rose-300 cursor-pointer transition-colors"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                  <span>Delete</span>
+                </button>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const target = selectedDetailShipment;
+                    setSelectedDetailShipment(null);
+                    onOpenTrackingResult(target.trackingNumber, target.courierId);
+                  }}
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-4 py-2 text-xs font-semibold text-white shadow-xs cursor-pointer transition-colors"
+                >
+                  <span>Track Live</span>
+                  <ArrowUpRight className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ============================================================== */}
+      {/* DELETE BATCH CONFIRMATION MODAL                                */}
+      {/* ============================================================== */}
+      {batchPendingDeleteId && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/75 backdrop-blur-xs animate-in fade-in">
+          <div className="fixed inset-0" onClick={() => setBatchPendingDeleteId(null)} />
+          <div
+            className="relative z-10 w-full max-w-md rounded-3xl border border-slate-200 bg-white p-6 shadow-2xl dark:border-slate-800 dark:bg-slate-900 space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-rose-100 text-rose-600 dark:bg-rose-950/80 dark:text-rose-400 shrink-0">
+                  <Trash2 className="h-5 w-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-slate-900 dark:text-white">
+                    Delete Batch?
+                  </h3>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    Confirm permanent removal of this batch
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setBatchPendingDeleteId(null)}
+                className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            {(() => {
+              const targetBatch = uniqueBatches.find((b) => b.id === batchPendingDeleteId);
+              return (
+                <div className="rounded-2xl border border-rose-200/80 bg-rose-50/60 dark:border-rose-900/50 dark:bg-rose-950/30 p-3.5 text-xs text-slate-700 dark:text-slate-200">
+                  Are you sure you want to delete batch{" "}
+                  <span className="font-bold text-slate-900 dark:text-white">
+                    &ldquo;{targetBatch?.name || batchPendingDeleteId}&rdquo;
+                  </span>{" "}
+                  and all{" "}
+                  <span className="font-mono font-bold text-rose-600 dark:text-rose-400">
+                    {targetBatch?.count ?? 0}
+                  </span>{" "}
+                  consignments inside it?
+                </div>
+              );
+            })()}
+
+            <div className="flex items-center justify-end gap-2.5 pt-2">
+              <button
+                type="button"
+                onClick={() => setBatchPendingDeleteId(null)}
+                className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => handleDeleteBatch(batchPendingDeleteId)}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-rose-600 hover:bg-rose-700 px-4 py-2 text-xs font-semibold text-white shadow-xs cursor-pointer transition-colors"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                <span>Delete Batch</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ============================================================== */}
       {/* CENTER-BOTTOM FLOATING CLEAR / DELETE ACTION BUTTON BAR        */}
@@ -4415,7 +6262,38 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-2.5">
+                  <div className="flex flex-wrap items-center gap-2.5">
+                    {/* Fallback 'No Rule' ON/OFF Toggle Button */}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsPasteAnywayEnabled((prev) => {
+                          const next = !prev;
+                          if (next) {
+                            setIntakeError("");
+                            setFlaggedInvalidCode(null);
+                          }
+                          return next;
+                        });
+                      }}
+                      className={`inline-flex items-center gap-1.5 rounded-xl border px-2.5 py-1 text-[11px] font-extrabold transition-colors cursor-pointer ${
+                        isPasteAnywayEnabled
+                          ? "border-amber-500/60 bg-amber-500/15 text-amber-300"
+                          : "border-slate-800 bg-slate-950 text-slate-300 hover:border-slate-700"
+                      }`}
+                    >
+                      <span>No Rule:</span>
+                      <span
+                        className={`rounded px-1.5 py-0.5 text-[10px] font-black uppercase ${
+                          isPasteAnywayEnabled
+                            ? "bg-amber-500 text-slate-950"
+                            : "bg-slate-800 text-slate-400"
+                        }`}
+                      >
+                        {isPasteAnywayEnabled ? "ON" : "OFF"}
+                      </span>
+                    </button>
+
                     <span className="text-xs font-bold text-slate-300">
                       Auto-Next:{" "}
                       <span className={isAutoNextEnabled ? "text-emerald-400" : "text-amber-400"}>
@@ -4447,8 +6325,28 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                   )}
 
                   {intakeError && (
-                    <div className="text-xs text-rose-300 bg-rose-950/70 p-3 rounded-xl border border-rose-800/80">
-                      {intakeError}
+                    <div className="text-xs text-rose-300 bg-rose-950/70 p-3 rounded-xl border border-rose-800/80 flex flex-wrap items-center justify-between gap-2">
+                      <span>{intakeError}</span>
+                      {flaggedInvalidCode && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleStageConsignment(
+                              flaggedInvalidCode,
+                              undefined,
+                              undefined,
+                              undefined,
+                              undefined,
+                              undefined,
+                              "camera",
+                              true
+                            )
+                          }
+                          className="rounded-lg bg-amber-500 hover:bg-amber-400 px-2.5 py-1 text-[11px] font-black text-slate-950 cursor-pointer shrink-0"
+                        >
+                          No Rule ({flaggedInvalidCode})
+                        </button>
+                      )}
                     </div>
                   )}
 
@@ -4631,8 +6529,8 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
 
                 {/* Modal Body (Scrollable) */}
                 <div className="overflow-y-auto p-4 sm:p-6 space-y-4 sm:space-y-5 flex-1">
-                  {/* Intake Toolbar: Auto-Next Toggle & Dedicated Camera Scanner Trigger */}
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-2xl bg-slate-50 dark:bg-slate-800/60 p-3.5 border border-slate-200 dark:border-slate-700">
+                  {/* Intake Toolbar: Auto-Next Toggle & Paste Anyway Toggle */}
+                  <div className="flex flex-wrap items-center justify-between gap-2.5 rounded-2xl bg-slate-50 dark:bg-slate-800/60 p-3 sm:p-3.5 border border-slate-200 dark:border-slate-700">
                     {/* Auto-Next Switch */}
                     <div className="flex items-center gap-2.5">
                       <div
@@ -4642,37 +6540,20 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                             : "bg-amber-500 ring-4 ring-amber-500/20"
                         }`}
                       />
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <span className="text-xs font-bold text-slate-900 dark:text-white">
-                            Auto-Next Scan:
-                          </span>
-                          <span
-                            className={`rounded-md px-1.5 py-0.5 text-[10px] font-black uppercase tracking-wider ${
-                              isAutoNextEnabled
-                                ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300"
-                                : "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300"
-                            }`}
-                          >
-                            {isAutoNextEnabled ? "ON" : "OFF"}
-                          </span>
-                        </div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-bold text-slate-900 dark:text-white">
+                          Auto-Next:
+                        </span>
+                        <span
+                          className={`rounded-md px-1.5 py-0.5 text-[10px] font-black uppercase tracking-wider ${
+                            isAutoNextEnabled
+                              ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300"
+                              : "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300"
+                          }`}
+                        >
+                          {isAutoNextEnabled ? "ON" : "OFF"}
+                        </span>
                       </div>
-                    </div>
-
-                    {/* Right controls: Dedicated Camera Scanner Button & Auto-Next Toggle switch */}
-                    <div className="flex flex-wrap items-center gap-2 self-end sm:self-auto">
-                      <button
-                        type="button"
-                        onClick={handleOpenSeparateCameraPage}
-                        className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 text-xs font-extrabold shadow-xs transition-all cursor-pointer"
-                        title="Open dedicated camera scanner page (/scan)"
-                      >
-                        <ScanLine className="h-4 w-4 stroke-[2.5]" />
-                        <span>Scan Barcode / QR</span>
-                      </button>
-
-                      {/* Auto-Next Switch */}
                       <button
                         type="button"
                         onClick={() => setIsAutoNextEnabled((prev) => !prev)}
@@ -4688,9 +6569,41 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                         />
                       </button>
                     </div>
+
+                    {/* Fallback 'No Rule' ON/OFF Toggle Button */}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsPasteAnywayEnabled((prev) => {
+                          const next = !prev;
+                          if (next) {
+                            setIntakeError("");
+                            setFlaggedInvalidCode(null);
+                          }
+                          return next;
+                        });
+                      }}
+                      className={`inline-flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-extrabold transition-all cursor-pointer ${
+                        isPasteAnywayEnabled
+                          ? "border-amber-500 bg-amber-50 text-amber-800 dark:border-amber-500/70 dark:bg-amber-950/60 dark:text-amber-300"
+                          : "border-slate-200 bg-white text-slate-700 hover:border-slate-300 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300"
+                      }`}
+                      title="Toggle No Rule mode for unrecognized consignment formats"
+                    >
+                      <span>No Rule:</span>
+                      <span
+                        className={`rounded px-1.5 py-0.5 text-[10px] font-black uppercase ${
+                          isPasteAnywayEnabled
+                            ? "bg-amber-500 text-slate-950"
+                            : "bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-400"
+                        }`}
+                      >
+                        {isPasteAnywayEnabled ? "ON" : "OFF"}
+                      </span>
+                    </button>
                   </div>
 
-                  {/* Unified Typing & Hardware Barcode Reader Field */}
+                  {/* Unified Typing, Hardware Barcode Reader & Convenient Mobile-Responsive Camera Scan Field */}
                   <div className="rounded-2xl border-2 border-indigo-500/60 bg-white p-4 sm:p-5 dark:border-indigo-500/50 dark:bg-slate-800/70 shadow-xs space-y-3.5">
                     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1.5">
                       <label className="text-xs font-black uppercase tracking-wider text-slate-700 dark:text-slate-200">
@@ -4736,20 +6649,30 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                             }
                           }}
                           onKeyDown={handleIntakeKeyDown}
-                          placeholder="Enter Consignment / AWB (e.g. EK123456789IN, B4000211866)..."
-                          className="w-full rounded-xl border border-slate-300 bg-white px-4 py-2.5 font-mono text-sm font-black uppercase tracking-wider text-slate-900 focus:border-indigo-600 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+                          placeholder="Enter Tracking Number"
+                          className="w-full rounded-xl border border-slate-300 bg-white px-4 py-2.5 font-mono text-sm font-semibold uppercase tracking-wider text-slate-900 focus:border-indigo-600 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
                         />
                       </div>
 
-                      {/* Stage / Add Button */}
-                      <div className="flex items-center gap-2 w-full sm:w-auto shrink-0">
+                      {/* Convenient & Mobile-Responsive Add + Scan Action Buttons */}
+                      <div className="grid grid-cols-2 sm:flex items-center gap-2 w-full sm:w-auto shrink-0">
                         <button
                           type="button"
                           onClick={() => handleStageConsignment(intakeAwb)}
-                          className="flex-1 sm:flex-initial inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-4 py-2.5 text-xs font-extrabold text-white shadow-xs transition-colors cursor-pointer"
+                          className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-4 py-2.5 text-xs font-extrabold text-white shadow-xs transition-colors cursor-pointer"
                         >
                           <Plus className="h-4 w-4 stroke-[2.5]" />
-                          <span>Stage Consignment</span>
+                          <span>Add</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={handleOpenSeparateCameraPage}
+                          className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-indigo-200 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 dark:border-indigo-500/40 dark:bg-indigo-950/70 dark:hover:bg-indigo-900/70 dark:text-indigo-300 px-4 py-2.5 text-xs font-extrabold shadow-xs transition-all cursor-pointer"
+                          title="Open camera scanner (/scan)"
+                        >
+                          <ScanLine className="h-4 w-4 stroke-[2.5]" />
+                          <span>Scan</span>
                         </button>
 
                         {!isAutoNextEnabled && recentStagedCode && (
@@ -4760,7 +6683,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                               setRecentStagedCode(null);
                               intakeInputRef.current?.focus();
                             }}
-                            className="inline-flex items-center justify-center gap-1 rounded-xl bg-emerald-600 hover:bg-emerald-700 px-3.5 py-2.5 text-xs font-bold text-white shadow-xs shrink-0 cursor-pointer animate-in fade-in"
+                            className="col-span-2 sm:col-span-1 inline-flex items-center justify-center gap-1 rounded-xl bg-emerald-600 hover:bg-emerald-700 px-3.5 py-2.5 text-xs font-bold text-white shadow-xs shrink-0 cursor-pointer animate-in fade-in"
                           >
                             <span>Next ID →</span>
                           </button>
@@ -4768,8 +6691,41 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                       </div>
                     </div>
 
-                    {/* Inline Options Strip: Carrier, Recipient, Destination, Status */}
-                    <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5 pt-1 text-xs">
+                    {/* Inline Options Strip: Customer Name, Customer Number, Pincode, Carrier, Destination, Status */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5 pt-1 text-xs">
+                      {/* Customer Name */}
+                      <input
+                        type="text"
+                        placeholder="Customer Name (e.g. Ananya Menon)"
+                        value={intakeRecipient}
+                        onChange={(e) => setIntakeRecipient(e.target.value)}
+                        className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 focus:border-indigo-500 focus:outline-none"
+                      />
+
+                      {/* Customer Number */}
+                      <input
+                        type="tel"
+                        placeholder="Customer Number (e.g. 9847012345)"
+                        value={intakePhone}
+                        onChange={(e) =>
+                          setIntakePhone(e.target.value.replace(/[^0-9+\-\s]/g, "").slice(0, 15))
+                        }
+                        className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-mono text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 focus:border-indigo-500 focus:outline-none"
+                      />
+
+                      {/* Pincode */}
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        maxLength={6}
+                        placeholder="Pincode (6-digit e.g. 682001)"
+                        value={intakePincode}
+                        onChange={(e) =>
+                          setIntakePincode(e.target.value.replace(/\D/g, "").slice(0, 6))
+                        }
+                        className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-mono font-bold text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 focus:border-indigo-500 focus:outline-none"
+                      />
+
                       {/* Courier Partner Selection with Search + Letter Key Auto-Filter */}
                       <div className="relative">
                         <button
@@ -4872,22 +6828,13 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                         )}
                       </div>
 
-                      {/* Recipient Name */}
-                      <input
-                        type="text"
-                        placeholder="Recipient Name (Optional)"
-                        value={intakeRecipient}
-                        onChange={(e) => setIntakeRecipient(e.target.value)}
-                        className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 focus:outline-none"
-                      />
-
                       {/* Destination City */}
                       <input
                         type="text"
                         placeholder="Destination Hub / City"
                         value={intakeDestination}
                         onChange={(e) => setIntakeDestination(e.target.value)}
-                        className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 focus:outline-none"
+                        className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 focus:border-indigo-500 focus:outline-none"
                       />
 
                       {/* Custom Styled Status Dropdown (with Booked + Logical Stage Metadata) */}
@@ -4989,10 +6936,31 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                       </div>
                     )}
 
-                    {/* Error Banner */}
+                    {/* Error Banner with Fallback 'No Rule' Action */}
                     {intakeError && (
-                      <div className="rounded-xl border border-rose-200 bg-rose-50 p-2.5 text-xs font-semibold text-rose-700 dark:border-rose-900/60 dark:bg-rose-950/60 dark:text-rose-300">
-                        {intakeError}
+                      <div className="rounded-xl border border-rose-200 bg-rose-50 p-2.5 text-xs font-semibold text-rose-700 dark:border-rose-900/60 dark:bg-rose-950/60 dark:text-rose-300 flex flex-wrap items-center justify-between gap-2">
+                        <span>{intakeError}</span>
+                        {flaggedInvalidCode && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleStageConsignment(
+                                flaggedInvalidCode,
+                                undefined,
+                                undefined,
+                                undefined,
+                                undefined,
+                                undefined,
+                                "manual",
+                                true
+                              )
+                            }
+                            className="inline-flex items-center gap-1 rounded-lg bg-amber-500 hover:bg-amber-400 px-2.5 py-1 text-[11px] font-black text-slate-950 shadow-2xs cursor-pointer shrink-0"
+                          >
+                            <Check className="h-3 w-3 stroke-[3]" />
+                            <span>No Rule ({flaggedInvalidCode})</span>
+                          </button>
+                        )}
                       </div>
                     )}
                   </div>
@@ -5019,13 +6987,15 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                         </p>
                       </div>
                     ) : (
-                      <div className="overflow-x-auto max-h-56 overflow-y-auto rounded-xl border border-slate-200 dark:border-slate-800">
-                        <table className="w-full text-left text-xs min-w-[550px]">
+                      <div className="overflow-x-auto max-h-64 overflow-y-auto rounded-xl border border-slate-200 dark:border-slate-800">
+                        <table className="w-full text-left text-xs min-w-[760px]">
                           <thead className="bg-slate-50 dark:bg-slate-800 text-[10px] uppercase font-bold text-slate-500 border-b border-slate-200 dark:border-slate-800 sticky top-0 z-10">
                             <tr>
                               <th className="py-2.5 px-3">AWB / Consignment</th>
+                              <th className="py-2.5 px-3">Customer Name</th>
+                              <th className="py-2.5 px-3">Customer Number</th>
+                              <th className="py-2.5 px-3">Pincode</th>
                               <th className="py-2.5 px-3">Carrier Partner</th>
-                              <th className="py-2.5 px-3">Destination / Addressee</th>
                               <th className="py-2.5 px-3">Status</th>
                               <th className="py-2.5 px-3 text-right">Remove</th>
                             </tr>
@@ -5038,44 +7008,173 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                                   {item.trackingNumber}
                                 </td>
 
-                                {/* Carrier Selector */}
+                                {/* Customer Name (Editable) */}
                                 <td className="py-2.5 px-3 font-sans">
-                                  <select
-                                    value={item.courierId}
-                                    onChange={(e) => handleUpdateStagedCourier(item.id, e.target.value)}
-                                    className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-semibold text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 cursor-pointer"
-                                  >
-                                    {COURIER_LIST.map((c) => (
-                                      <option key={c.id} value={c.id}>
-                                        {c.name}
-                                      </option>
-                                    ))}
-                                  </select>
-                                </td>
-
-                                {/* Destination */}
-                                <td className="py-2.5 px-3 font-sans text-slate-600 dark:text-slate-400 truncate max-w-[150px]">
-                                  {item.destination}
-                                </td>
-
-                                {/* Editable Logical Status Selector */}
-                                <td className="py-2.5 px-3 font-sans">
-                                  <select
-                                    value={item.status}
+                                  <input
+                                    type="text"
+                                    placeholder="Customer Name"
+                                    value={item.recipientName || ""}
                                     onChange={(e) =>
-                                      handleUpdateStagedStatus(
+                                      handleUpdateStagedCustomerField(item.id, "recipientName", e.target.value)
+                                    }
+                                    className="w-28 rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-medium text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+                                  />
+                                </td>
+
+                                {/* Customer Number (Editable) */}
+                                <td className="py-2.5 px-3 font-mono">
+                                  <input
+                                    type="tel"
+                                    placeholder="Mobile Number"
+                                    value={item.customerPhone || ""}
+                                    onChange={(e) =>
+                                      handleUpdateStagedCustomerField(
                                         item.id,
-                                        e.target.value as "booked" | "in_transit" | "out_for_delivery" | "delivered" | "returned"
+                                        "customerPhone",
+                                        e.target.value.replace(/[^0-9+\-\s]/g, "").slice(0, 15)
                                       )
                                     }
-                                    className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-bold text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 cursor-pointer"
-                                  >
-                                    <option value="booked">Booked</option>
-                                    <option value="in_transit">In Transit</option>
-                                    <option value="out_for_delivery">Out for Delivery</option>
-                                    <option value="delivered">Delivered</option>
-                                    <option value="returned">Returned (RTO)</option>
-                                  </select>
+                                    className="w-28 rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-mono text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+                                  />
+                                </td>
+
+                                {/* Pincode (Editable) */}
+                                <td className="py-2.5 px-3 font-mono">
+                                  <input
+                                    type="text"
+                                    inputMode="numeric"
+                                    maxLength={6}
+                                    placeholder="Pincode"
+                                    value={item.pincode || ""}
+                                    onChange={(e) =>
+                                      handleUpdateStagedCustomerField(
+                                        item.id,
+                                        "pincode",
+                                        e.target.value.replace(/\D/g, "").slice(0, 6)
+                                      )
+                                    }
+                                    className="w-20 rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-mono font-bold text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+                                  />
+                                </td>
+
+                                {/* Carrier Selector (Custom SaaS Dropdown) */}
+                                <td className="py-2.5 px-3 font-sans">
+                                  <div className="relative inline-block">
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        setOpenRowDropdown((prev) =>
+                                          prev?.id === item.id && prev.field === "courier"
+                                            ? null
+                                            : { id: item.id, field: "courier" }
+                                        )
+                                      }
+                                      className="inline-flex items-center justify-between gap-2 min-w-[130px] rounded-xl border border-slate-200/90 bg-slate-50/90 hover:border-indigo-300 px-2.5 py-1.5 text-[11px] font-semibold text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 cursor-pointer"
+                                    >
+                                      <span className="truncate">{item.courierName}</span>
+                                      <ChevronDown className="h-3 w-3 text-slate-400 shrink-0" />
+                                    </button>
+                                    {openRowDropdown?.id === item.id &&
+                                      openRowDropdown.field === "courier" && (
+                                        <>
+                                          <div
+                                            className="fixed inset-0 z-40"
+                                            onClick={() => setOpenRowDropdown(null)}
+                                          />
+                                          <div className="absolute left-0 top-full mt-1 z-50 w-52 max-h-48 overflow-y-auto rounded-xl border border-slate-200 bg-white p-1 shadow-xl dark:border-slate-700 dark:bg-slate-800">
+                                            {COURIER_LIST.map((c) => (
+                                              <button
+                                                key={c.id}
+                                                type="button"
+                                                onClick={() => {
+                                                  handleUpdateStagedCourier(item.id, c.id);
+                                                  setOpenRowDropdown(null);
+                                                }}
+                                                className={`w-full text-left rounded-lg px-2.5 py-1.5 text-[11px] font-medium flex items-center justify-between cursor-pointer ${
+                                                  item.courierId === c.id
+                                                    ? "bg-indigo-50 text-indigo-700 dark:bg-indigo-950/70 dark:text-indigo-300 font-semibold"
+                                                    : "text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-700"
+                                                }`}
+                                              >
+                                                <span className="truncate">{c.name}</span>
+                                                {item.courierId === c.id && (
+                                                  <Check className="h-3 w-3 text-indigo-600 dark:text-indigo-400 shrink-0" />
+                                                )}
+                                              </button>
+                                            ))}
+                                          </div>
+                                        </>
+                                      )}
+                                  </div>
+                                </td>
+
+                                {/* Editable Logical Status Selector (Custom SaaS Dropdown) */}
+                                <td className="py-2.5 px-3 font-sans">
+                                  <div className="relative inline-block">
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        setOpenRowDropdown((prev) =>
+                                          prev?.id === item.id && prev.field === "status"
+                                            ? null
+                                            : { id: item.id, field: "status" }
+                                        )
+                                      }
+                                      className="inline-flex items-center justify-between gap-2 min-w-[125px] rounded-xl border border-slate-200/90 bg-slate-50/90 hover:border-indigo-300 px-2.5 py-1.5 text-[11px] font-semibold text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 cursor-pointer"
+                                    >
+                                      <span className="truncate">
+                                        {item.status === "booked"
+                                          ? "Booked"
+                                          : item.status === "in_transit"
+                                          ? "In Transit"
+                                          : item.status === "out_for_delivery"
+                                          ? "Out for Delivery"
+                                          : item.status === "delivered"
+                                          ? "Delivered"
+                                          : "Returned (RTO)"}
+                                      </span>
+                                      <ChevronDown className="h-3 w-3 text-slate-400 shrink-0" />
+                                    </button>
+                                    {openRowDropdown?.id === item.id &&
+                                      openRowDropdown.field === "status" && (
+                                        <>
+                                          <div
+                                            className="fixed inset-0 z-40"
+                                            onClick={() => setOpenRowDropdown(null)}
+                                          />
+                                          <div className="absolute right-0 top-full mt-1 z-50 w-44 rounded-xl border border-slate-200 bg-white p-1 shadow-xl dark:border-slate-700 dark:bg-slate-800">
+                                            {(
+                                              [
+                                                { value: "booked", label: "Booked" },
+                                                { value: "in_transit", label: "In Transit" },
+                                                { value: "out_for_delivery", label: "Out for Delivery" },
+                                                { value: "delivered", label: "Delivered" },
+                                                { value: "returned", label: "Returned (RTO)" },
+                                              ] as const
+                                            ).map((st) => (
+                                              <button
+                                                key={st.value}
+                                                type="button"
+                                                onClick={() => {
+                                                  handleUpdateStagedStatus(item.id, st.value);
+                                                  setOpenRowDropdown(null);
+                                                }}
+                                                className={`w-full text-left rounded-lg px-2.5 py-1.5 text-[11px] font-medium flex items-center justify-between cursor-pointer ${
+                                                  item.status === st.value
+                                                    ? "bg-indigo-50 text-indigo-700 dark:bg-indigo-950/70 dark:text-indigo-300 font-semibold"
+                                                    : "text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-700"
+                                                }`}
+                                              >
+                                                <span>{st.label}</span>
+                                                {item.status === st.value && (
+                                                  <Check className="h-3 w-3 text-indigo-600 dark:text-indigo-400 shrink-0" />
+                                                )}
+                                              </button>
+                                            ))}
+                                          </div>
+                                        </>
+                                      )}
+                                  </div>
                                 </td>
 
                                 {/* Remove button */}
@@ -5112,7 +7211,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                     )}
                   </div>
 
-                  <div className="flex items-center gap-2.5">
+                  <div className="flex items-center gap-2.5 ml-auto">
                     <button
                       type="button"
                       onClick={handleRequestCancelIntake}
@@ -5128,7 +7227,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                     >
                       <Check className="h-4 w-4 stroke-[3]" />
                       <span>
-                        Confirm & Ingest ({stagedConsignments.length} Consignments)
+                        Save &amp; Add ({stagedConsignments.length})
                       </span>
                     </button>
                   </div>
@@ -5168,11 +7267,11 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                   )}
                 </div>
                 <div>
-                  <h3 className="text-base font-extrabold text-slate-900 dark:text-white">
+                  <h3 className="text-base font-bold text-slate-900 dark:text-white">
                     {importSuccessState
                       ? "Successfully Imported!"
                       : previewShipments
-                      ? "Review Bulk Data Before Import"
+                      ? "Review Import"
                       : "Bulk Import"}
                   </h3>
                 </div>
@@ -5344,38 +7443,123 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                                       </div>
                                     </td>
                                     <td className="py-2.5 px-3">
-                                      <select
-                                        value={p.courierId}
-                                        onChange={(e) => handleUpdatePreviewCourier(p.id, e.target.value)}
-                                        className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-semibold text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 cursor-pointer"
-                                      >
-                                        {COURIER_LIST.map((c) => (
-                                          <option key={c.id} value={c.id}>
-                                            {c.name}
-                                          </option>
-                                        ))}
-                                      </select>
+                                      <div className="relative inline-block">
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            setOpenRowDropdown((prev) =>
+                                              prev?.id === p.id && prev.field === "courier"
+                                                ? null
+                                                : { id: p.id, field: "courier" }
+                                            )
+                                          }
+                                          className="inline-flex items-center justify-between gap-2 min-w-[130px] rounded-xl border border-slate-200/90 bg-slate-50/90 hover:border-indigo-300 px-2.5 py-1.5 text-[11px] font-semibold text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 cursor-pointer"
+                                        >
+                                          <span className="truncate">{p.courierName}</span>
+                                          <ChevronDown className="h-3 w-3 text-slate-400 shrink-0" />
+                                        </button>
+                                        {openRowDropdown?.id === p.id &&
+                                          openRowDropdown.field === "courier" && (
+                                            <>
+                                              <div
+                                                className="fixed inset-0 z-40"
+                                                onClick={() => setOpenRowDropdown(null)}
+                                              />
+                                              <div className="absolute left-0 top-full mt-1 z-50 w-52 max-h-48 overflow-y-auto rounded-xl border border-slate-200 bg-white p-1 shadow-xl dark:border-slate-700 dark:bg-slate-800">
+                                                {COURIER_LIST.map((c) => (
+                                                  <button
+                                                    key={c.id}
+                                                    type="button"
+                                                    onClick={() => {
+                                                      handleUpdatePreviewCourier(p.id, c.id);
+                                                      setOpenRowDropdown(null);
+                                                    }}
+                                                    className={`w-full text-left rounded-lg px-2.5 py-1.5 text-[11px] font-medium flex items-center justify-between cursor-pointer ${
+                                                      p.courierId === c.id
+                                                        ? "bg-indigo-50 text-indigo-700 dark:bg-indigo-950/70 dark:text-indigo-300 font-semibold"
+                                                        : "text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-700"
+                                                    }`}
+                                                  >
+                                                    <span className="truncate">{c.name}</span>
+                                                    {p.courierId === c.id && (
+                                                      <Check className="h-3 w-3 text-indigo-600 dark:text-indigo-400 shrink-0" />
+                                                    )}
+                                                  </button>
+                                                ))}
+                                              </div>
+                                            </>
+                                          )}
+                                      </div>
                                     </td>
                                     <td className="py-2.5 px-3 text-slate-600 dark:text-slate-400 truncate max-w-[140px]">
                                       {p.destination}
                                     </td>
                                     <td className="py-2.5 px-3">
-                                      <select
-                                        value={p.status}
-                                        onChange={(e) =>
-                                          handleUpdatePreviewStatus(
-                                            p.id,
-                                            e.target.value as "booked" | "in_transit" | "out_for_delivery" | "delivered" | "returned"
-                                          )
-                                        }
-                                        className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-bold text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 cursor-pointer"
-                                      >
-                                        <option value="booked">Booked</option>
-                                        <option value="in_transit">In Transit</option>
-                                        <option value="out_for_delivery">Out for Delivery</option>
-                                        <option value="delivered">Delivered</option>
-                                        <option value="returned">Returned (RTO)</option>
-                                      </select>
+                                      <div className="relative inline-block">
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            setOpenRowDropdown((prev) =>
+                                              prev?.id === p.id && prev.field === "status"
+                                                ? null
+                                                : { id: p.id, field: "status" }
+                                            )
+                                          }
+                                          className="inline-flex items-center justify-between gap-2 min-w-[125px] rounded-xl border border-slate-200/90 bg-slate-50/90 hover:border-indigo-300 px-2.5 py-1.5 text-[11px] font-semibold text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 cursor-pointer"
+                                        >
+                                          <span className="truncate">
+                                            {p.status === "booked"
+                                              ? "Booked"
+                                              : p.status === "in_transit"
+                                              ? "In Transit"
+                                              : p.status === "out_for_delivery"
+                                              ? "Out for Delivery"
+                                              : p.status === "delivered"
+                                              ? "Delivered"
+                                              : "Returned (RTO)"}
+                                          </span>
+                                          <ChevronDown className="h-3 w-3 text-slate-400 shrink-0" />
+                                        </button>
+                                        {openRowDropdown?.id === p.id &&
+                                          openRowDropdown.field === "status" && (
+                                            <>
+                                              <div
+                                                className="fixed inset-0 z-40"
+                                                onClick={() => setOpenRowDropdown(null)}
+                                              />
+                                              <div className="absolute right-0 top-full mt-1 z-50 w-44 rounded-xl border border-slate-200 bg-white p-1 shadow-xl dark:border-slate-700 dark:bg-slate-800">
+                                                {(
+                                                  [
+                                                    { value: "booked", label: "Booked" },
+                                                    { value: "in_transit", label: "In Transit" },
+                                                    { value: "out_for_delivery", label: "Out for Delivery" },
+                                                    { value: "delivered", label: "Delivered" },
+                                                    { value: "returned", label: "Returned (RTO)" },
+                                                  ] as const
+                                                ).map((st) => (
+                                                  <button
+                                                    key={st.value}
+                                                    type="button"
+                                                    onClick={() => {
+                                                      handleUpdatePreviewStatus(p.id, st.value);
+                                                      setOpenRowDropdown(null);
+                                                    }}
+                                                    className={`w-full text-left rounded-lg px-2.5 py-1.5 text-[11px] font-medium flex items-center justify-between cursor-pointer ${
+                                                      p.status === st.value
+                                                        ? "bg-indigo-50 text-indigo-700 dark:bg-indigo-950/70 dark:text-indigo-300 font-semibold"
+                                                        : "text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-700"
+                                                    }`}
+                                                  >
+                                                    <span>{st.label}</span>
+                                                    {p.status === st.value && (
+                                                      <Check className="h-3 w-3 text-indigo-600 dark:text-indigo-400 shrink-0" />
+                                                    )}
+                                                  </button>
+                                                ))}
+                                              </div>
+                                            </>
+                                          )}
+                                      </div>
                                     </td>
                                     <td className="py-2.5 px-3 text-right">
                                       <button
@@ -5402,7 +7586,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                           onClick={handleCancelPreview}
                           className="rounded-xl border border-slate-200 px-4 py-2.5 text-xs font-bold text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800 cursor-pointer"
                         >
-                          ← Back / Choose Another File
+                          Back
                         </button>
                         <button
                           type="button"
@@ -5411,73 +7595,68 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                           className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 px-5 py-2.5 text-xs font-extrabold text-white shadow-xs cursor-pointer transition-colors disabled:cursor-not-allowed"
                         >
                           <Check className="h-4 w-4 stroke-[3]" />
-                          <span>Confirm & Import ({newReadyCount} Consignments)</span>
+                          <span>Import ({newReadyCount})</span>
                         </button>
                       </div>
                     </div>
                   );
                 })()
               ) : (
-                /* STEP 1: UPLOAD EXCEL/CSV OR PASTE BULK AWBs FOR REVIEW */
+                /* STEP 1: UPLOAD EXCEL OR PASTE BULK AWBs FOR REVIEW */
                 <div className="space-y-4">
-                  {/* Download Sample CSV / Excel Template Banner */}
+                  {/* Download Sample Excel Template Banner */}
                   <div className="rounded-2xl border border-indigo-200 bg-indigo-50/70 p-4 dark:border-indigo-900/50 dark:bg-indigo-950/40 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                     <div>
                       <div className="text-xs font-bold text-indigo-900 dark:text-indigo-200">
-                        Sample Templates
+                        Excel Import Template
+                      </div>
+                      <div className="text-[11px] text-indigo-700/80 dark:text-indigo-300/80">
+                        Default import status is automatically set to Booked
                       </div>
                     </div>
                     <div className="flex flex-wrap items-center gap-2 shrink-0">
                       <button
                         type="button"
-                        onClick={handleDownloadSampleCsvTemplate}
-                        className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-3.5 py-2 text-xs font-extrabold text-white shadow-xs cursor-pointer"
-                      >
-                        <Download className="h-3.5 w-3.5" />
-                        <span>Sample CSV</span>
-                      </button>
-                      <button
-                        type="button"
                         onClick={handleDownloadSampleTemplate}
-                        className="inline-flex items-center gap-1.5 rounded-xl border border-indigo-300 bg-white hover:bg-indigo-50 dark:border-indigo-700 dark:bg-slate-800 dark:hover:bg-slate-700 px-3 py-2 text-xs font-bold text-indigo-700 dark:text-indigo-300 shadow-2xs cursor-pointer"
+                        className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-3.5 py-2 text-xs font-semibold text-white shadow-xs cursor-pointer"
                       >
                         <Download className="h-3.5 w-3.5" />
-                        <span>Sample Excel</span>
+                        <span>Sample Excel (.xlsx)</span>
                       </button>
                     </div>
                   </div>
 
-                  {/* Upload Drop Zone */}
+                  {/* Upload Drop Zone (Excel only) */}
                   <div className="rounded-2xl border-2 border-dashed border-slate-300 bg-slate-50/50 p-6 text-center hover:border-indigo-500 hover:bg-indigo-50/20 dark:border-slate-700 dark:bg-slate-800/40 transition-colors">
                     <FileSpreadsheet className="mx-auto h-10 w-10 text-emerald-600 mb-2" />
                     <label
                       htmlFor="excel-file-input"
-                      className="text-xs font-bold text-slate-700 dark:text-slate-200 block mb-3 cursor-pointer"
+                      className="text-xs font-semibold text-slate-700 dark:text-slate-200 block mb-3 cursor-pointer"
                     >
-                      Select Excel (.xlsx, .xls) or CSV (.csv) file
+                      Select Excel (.xlsx, .xls) file
                     </label>
                     <input
                       ref={fileInputRef}
                       type="file"
-                      accept=".xlsx, .xls, .csv, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, application/vnd.ms-excel, text/csv"
+                      accept=".xlsx, .xls, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, application/vnd.ms-excel"
                       onChange={handleFileChange}
                       className="hidden"
                       id="excel-file-input"
                     />
                     <label
                       htmlFor="excel-file-input"
-                      className="inline-flex items-center gap-1.5 rounded-xl border border-slate-300 bg-white px-4 py-2 text-xs font-bold text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 shadow-2xs cursor-pointer"
+                      className="inline-flex items-center gap-1.5 rounded-xl border border-slate-300 bg-white px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 shadow-2xs cursor-pointer"
                     >
                       <Upload className="h-3.5 w-3.5" />
-                      <span>{isUploading ? "Reading File..." : "Browse Spreadsheet for Review"}</span>
+                      <span>{isUploading ? "Reading File..." : "Browse Excel File"}</span>
                     </label>
                   </div>
 
                   {/* Quick Bulk Paste Option (Also goes to Review Before Import) */}
                   <div className="rounded-2xl border border-slate-200 bg-slate-50/60 p-4 dark:border-slate-800 dark:bg-slate-800/40 space-y-2.5">
                     <div className="flex items-center justify-between">
-                      <label className="text-xs font-bold text-slate-700 dark:text-slate-200">
-                        Or Paste Multiple Consignment / AWB Numbers for Review:
+                      <label className="text-xs font-semibold text-slate-700 dark:text-slate-200">
+                        Or Paste Multiple Tracking Numbers:
                       </label>
                       <span className="text-[10px] text-slate-400">Comma or line separated</span>
                     </div>
@@ -5485,7 +7664,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                       rows={3}
                       value={bulkPasteText}
                       onChange={(e) => setBulkPasteText(e.target.value)}
-                      placeholder="Paste multiple AWB numbers here (e.g. EL855948618IN, B4000211866)..."
+                      placeholder="Enter Tracking Number (e.g. EL855948618IN, B4000211866)..."
                       className="w-full rounded-xl border border-slate-200 bg-white p-3 font-mono text-xs text-slate-900 placeholder:font-sans placeholder:text-slate-400 focus:border-indigo-500 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
                     />
                     <div className="flex justify-end">
@@ -5493,10 +7672,10 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                         type="button"
                         onClick={handleParseBulkPasteForReview}
                         disabled={!bulkPasteText.trim()}
-                        className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 px-4 py-2 text-xs font-extrabold text-white shadow-xs cursor-pointer disabled:cursor-not-allowed"
+                        className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 px-4 py-2 text-xs font-semibold text-white shadow-xs cursor-pointer disabled:cursor-not-allowed"
                       >
                         <ArrowRight className="h-3.5 w-3.5" />
-                        <span>Review Bulk Data Before Import</span>
+                        <span>Review Data</span>
                       </button>
                     </div>
                   </div>

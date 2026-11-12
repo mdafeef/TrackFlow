@@ -1,6 +1,5 @@
 import { CourierConfig } from "./couriers";
 import { TrackingResult, TrackingActivity, RouteMilestone } from "@/app/api/track/route";
-import { generateSecureTrackingToken } from "./security";
 
 function getHash(str: string): number {
   let hash = 0;
@@ -241,8 +240,6 @@ export function generateRealisticTracking(
   const isDelivered = overallStage === "delivered";
   const etaDate = isDelivered ? "Delivered" : overallStage === "out_for_delivery" ? "Expected Today" : "Expected in 1-2 Business Days";
 
-  const secureToken = generateSecureTrackingToken(cleanNum, courier.id);
-
   return {
     trackingNumber: cleanNum,
     courier: {
@@ -284,7 +281,5 @@ export function generateRealisticTracking(
     },
     activities,
     routeMilestones,
-    payloadHash: Buffer.from(JSON.stringify({ t: cleanNum, c: courier.id })).toString("base64"),
-    secureToken,
   };
 }

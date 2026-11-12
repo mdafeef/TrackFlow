@@ -205,13 +205,11 @@ function TrackingAppContent() {
     async (
       trackingNumber: string,
       courierId?: string,
-      token?: string,
       shouldScroll: boolean = false
     ) => {
       const cleanNum = (trackingNumber || "").trim();
-      const cleanToken = (token || "").trim();
 
-      if (!cleanNum && !cleanToken) return;
+      if (!cleanNum) return;
 
       // Determine courier label for fetching animation
       const detected = (courierId && COURIER_MAP[courierId]?.name)
@@ -221,7 +219,7 @@ function TrackingAppContent() {
         : "Carrier Network";
 
       setPendingQuery({
-        number: cleanNum || (token ? "Encrypted Shipment" : "Consignment"),
+        number: cleanNum,
         courierName: detected,
       });
 
@@ -230,7 +228,7 @@ function TrackingAppContent() {
       setErrorMsg(null);
       setNotTrackableInfo(null);
 
-      // Ensure browser URL stays strictly clean (no ?token=, ?t=, ?c=, ?d= parameters)
+      // Ensure browser URL stays strictly clean
       try {
         if (window.location.search || window.location.pathname !== "/") {
           window.history.replaceState(null, "", "/");
@@ -250,7 +248,6 @@ function TrackingAppContent() {
           body: JSON.stringify({
             trackingNumber: cleanNum,
             courierId: courierId || "",
-            token: cleanToken || undefined,
           }),
         });
         const json = await res.json();
@@ -331,7 +328,7 @@ function TrackingAppContent() {
           } else if (parsed.target === "single_track" && parsed.trackingNumber) {
             sessionStorage.removeItem("trackflow_scan_return");
             setTimeout(() => {
-              performSearch(parsed.trackingNumber, parsed.courierId, undefined, true);
+              performSearch(parsed.trackingNumber, parsed.courierId, true);
             }, 50);
           }
         }
@@ -452,7 +449,7 @@ function TrackingAppContent() {
           /* Enterprise Bulk Operations Dashboard */
           <BulkDashboard
             onOpenTrackingResult={(trackingNum, courierId) => {
-              performSearch(trackingNum, courierId, undefined, false);
+              performSearch(trackingNum, courierId, false);
             }}
           />
         ) : (
@@ -461,7 +458,7 @@ function TrackingAppContent() {
             {/* Hero & Search Section */}
             <TrackerHero
               onSearch={(num, cId) => {
-                performSearch(num, cId, undefined, true);
+                performSearch(num, cId, true);
               }}
               isLoading={isLoading}
               initialTracking={activeResult ? activeResult.trackingNumber : ""}
@@ -570,16 +567,16 @@ function TrackingAppContent() {
         onTrackNextOrder={handleTrackNextOrder}
         onRefresh={() => {
           if (activeResult) {
-            performSearch(activeResult.trackingNumber, activeResult.courier.id, undefined, false);
+            performSearch(activeResult.trackingNumber, activeResult.courier.id, false);
           } else if (pendingQuery.number) {
-            performSearch(pendingQuery.number, undefined, undefined, false);
+            performSearch(pendingQuery.number, undefined, false);
           }
         }}
         onShare={() => setIsShareModalOpen(true)}
         isSavedInWatchlist={isSavedInWatchlist}
         onToggleWatchlist={handleAddToWatchlist}
         onSelectSample={(sampleNum: string, cId: string) => {
-          performSearch(sampleNum, cId, undefined, true);
+          performSearch(sampleNum, cId, true);
         }}
       />
 
@@ -600,14 +597,14 @@ function TrackingAppContent() {
         onRemoveItem={handleRemoveFromWatchlist}
         onUpdateNickname={handleUpdateNickname}
         onSelectTrack={(num, cId) => {
-          performSearch(num, cId, undefined, true);
+          performSearch(num, cId, true);
         }}
         onRefreshAll={handleRefreshAllWatchlist}
         isRefreshing={isRefreshingWatchlist}
       />
 
-      {/* Footer */}
-      <Footer />
+      {/* Footer (Only shown in Single Tracker landing view; Workspace uses full-screen SaaS layout) */}
+      {activeView === "single" && <Footer />}
     </div>
   );
 }

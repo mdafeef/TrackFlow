@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { autoDetectCourier, COURIER_MAP, COURIER_LIST } from "@/lib/couriers";
 import { fetchLiveTracking, normalizeLiveTrackingData } from "@/lib/liveTracker";
-import { generateSecureTrackingToken, verifySecureTrackingToken } from "@/lib/security";
+import { verifySecureTrackingToken } from "@/lib/security";
 
 export interface TrackingActivity {
   id: string;
@@ -61,8 +61,6 @@ export interface TrackingResult {
   };
   activities: TrackingActivity[];
   routeMilestones: RouteMilestone[];
-  payloadHash: string;
-  secureToken?: string;
 }
 
 // Verified real fallback datasets for test numbers matching exact carrier data
@@ -720,8 +718,6 @@ async function processTrackingQuery(
     );
   }
 
-  const secureToken = generateSecureTrackingToken(trackingNumber, courierId);
-
   // 1. Attempt live real-time query first
   try {
     const liveRaw = await fetchLiveTracking(trackingNumber, courierId);
@@ -740,7 +736,6 @@ async function processTrackingQuery(
       // ONLY treat as success if real tracking checkpoints or booking records exist
       if (hasRealEvents || hasRealBooking) {
         const normalized = normalizeLiveTrackingData(liveRaw, trackingNumber, courier);
-        normalized.secureToken = secureToken;
         return NextResponse.json(
           { success: true, data: normalized, live: true },
           { headers: responseHeaders }
@@ -771,8 +766,6 @@ async function processTrackingQuery(
       bookingDetails: sample.bookingDetails!,
       activities: sample.activities!,
       routeMilestones: sample.routeMilestones!,
-      payloadHash: Buffer.from(JSON.stringify({ t: trackingNumber, c: courierId })).toString("base64"),
-      secureToken,
     };
     return NextResponse.json(
       { success: true, data: result, verified: true },
