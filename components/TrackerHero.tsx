@@ -419,15 +419,21 @@ export function TrackerHero({
           </div>
 
           {/* Trust points */}
-          <div className="mt-8 flex items-center justify-center gap-6 text-xs text-slate-500 dark:text-slate-400">
+          <div className="mt-8 flex flex-wrap items-center justify-center gap-x-6 gap-y-2 text-xs text-slate-500 dark:text-slate-400">
             <span className="inline-flex items-center gap-1.5">
               <ShieldCheck className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
               100% Free & Ad-Free
             </span>
             <span aria-hidden="true">·</span>
-            <span>No Account Required</span>
+            <span className="inline-flex items-center gap-1.5">
+              <CheckCircle2 className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
+              No Account Required
+            </span>
             <span aria-hidden="true">·</span>
-            <span>Instant Courier Auto-Detect</span>
+            <span className="inline-flex items-center gap-1.5">
+              <Zap className="h-4 w-4 text-amber-500 dark:text-amber-400" />
+              Instant Courier Auto-Detect
+            </span>
           </div>
         </div>
       </div>

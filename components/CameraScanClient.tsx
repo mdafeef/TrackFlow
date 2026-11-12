@@ -13,7 +13,6 @@ import {
   ChevronDown,
   ZoomIn,
   ZoomOut,
-  Focus,
   ScanLine,
   AlertTriangle,
 } from "lucide-react";
@@ -139,6 +138,7 @@ export function CameraScanClient() {
     carrier: string;
     formatLabel: string;
     length: number;
+    ts: number;
   } | null>(null);
 
   // Manual zoom control only (no auto-zoom)
@@ -150,14 +150,12 @@ export function CameraScanClient() {
     max: 1,
   });
 
-  // Touch-to-Focus state
-  const [focusRing, setFocusRing] = useState<{ x: number; y: number; id: number } | null>(null);
-  const [isFocusing, setIsFocusing] = useState<boolean>(false);
-  const focusRingTimerRef = useRef<NodeJS.Timeout | null>(null);
-
   // Consignment ID Format Error state
-  const [formatError, setFormatError] = useState<{ code: string; message: string } | null>(null);
-  const formatErrorTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const [formatError, setFormatError] = useState<{
+    code: string;
+    message: string;
+    ts: number;
+  } | null>(null);
 
   // Default Status: ALWAYS "booked" by default when adding new consignments
   const [defaultStatus, setDefaultStatus] = useState<StatusOption>(() => {
@@ -187,9 +185,10 @@ export function CameraScanClient() {
     }
     return [];
   });
+  const stagedItemsRef = useRef<BulkShipment[]>(stagedItems);
   const [isQueueExpanded, setIsQueueExpanded] = useState<boolean>(false);
   const [isCancelConfirmOpen, setIsCancelConfirmOpen] = useState<boolean>(false);
-  const [duplicateAlert, setDuplicateAlert] = useState<string | null>(null);
+  const [duplicateAlert, setDuplicateAlert] = useState<{ text: string; ts: number } | null>(null);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const cameraStreamRef = useRef<MediaStream | null>(null);
@@ -218,6 +217,48 @@ export function CameraScanClient() {
     isSoundEnabledRef.current = isSoundEnabled;
   }, [isSoundEnabled]);
 
+  useEffect(() => {
+    stagedItemsRef.current = stagedItems;
+    try {
+      localStorage.setItem(STAGED_STORAGE_KEY, JSON.stringify(stagedItems));
+    } catch {
+      // ignore
+    }
+  }, [stagedItems]);
+
+  // Guaranteed auto-clear for scan success green overlay & border after 750ms
+  const cameraScanSuccessTimestampRef = useRef<number>(0);
+  useEffect(() => {
+    if (!cameraScanSuccess) {
+      cameraScanSuccessTimestampRef.current = 0;
+      return;
+    }
+    cameraScanSuccessTimestampRef.current = cameraScanSuccess.ts || Date.now();
+    const timer = setTimeout(() => {
+      cameraScanSuccessTimestampRef.current = 0;
+      setCameraScanSuccess(null);
+    }, 750);
+    return () => clearTimeout(timer);
+  }, [cameraScanSuccess]);
+
+  // Guaranteed auto-clear for format error alert after 2200ms
+  useEffect(() => {
+    if (!formatError) return;
+    const timer = setTimeout(() => {
+      setFormatError(null);
+    }, 2200);
+    return () => clearTimeout(timer);
+  }, [formatError]);
+
+  // Guaranteed auto-clear for duplicate alert after 1500ms
+  useEffect(() => {
+    if (!duplicateAlert) return;
+    const timer = setTimeout(() => {
+      setDuplicateAlert(null);
+    }, 1500);
+    return () => clearTimeout(timer);
+  }, [duplicateAlert]);
+
   // Multi-frame barcode stability & cooldown refs to prevent partial misreads and multi-scans
   const scanCooldownUntilRef = useRef<number>(0);
   const lastScannedRef = useRef<{ code: string; timestamp: number }>({
@@ -240,7 +281,6 @@ export function CameraScanClient() {
     count: 0,
     lastSeen: 0,
   });
-  const scanSuccessTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   // Ensure no element has focus on mount so mobile keyboard never opens
   useEffect(() => {
@@ -248,15 +288,6 @@ export function CameraScanClient() {
       document.activeElement.blur();
     }
   }, []);
-
-  // Persist staged items whenever they change
-  useEffect(() => {
-    try {
-      localStorage.setItem(STAGED_STORAGE_KEY, JSON.stringify(stagedItems));
-    } catch {
-      // ignore
-    }
-  }, [stagedItems]);
 
   // Apply manual camera zoom
   const applyCameraZoom = useCallback((nextZoom: number) => {
@@ -412,6 +443,7 @@ export function CameraScanClient() {
   };
 
   // Stage a confirmed scanned consignment with logical format, length & carrier auto-identification
+  // (All side effects are executed outside setStagedItems so React never double-fires or traps cameraScanSuccess)
   const handleStageScannedCode = useCallback(
     (candidateCode: string) => {
       const rawTrimmed = candidateCode.trim();
@@ -426,145 +458,61 @@ export function CameraScanClient() {
           code: previewCode,
           message:
             identification.error ||
-            "Invalid Consignment ID format. Expected 8–22 alphanumeric characters (e.g. EK123456789IN).",
+            "Invalid Consignment ID format. Expected 8–20 alphanumeric characters (e.g. EK123456789IN).",
+          ts: Date.now(),
         });
-        if (formatErrorTimerRef.current) clearTimeout(formatErrorTimerRef.current);
-        formatErrorTimerRef.current = setTimeout(() => {
-          setFormatError(null);
-        }, 3000);
         return;
       }
 
       const cleanNum = identification.normalized;
       setFormatError(null);
 
-      // Always logically auto-identify carrier from the Consignment ID format & length
+      // Logically auto-identify carrier from the Consignment ID format & length
       const chosenCourier = identification.courier || COURIER_MAP.speedpost;
-      const activeStatus = defaultStatusRef.current;
 
-      setStagedItems((prev) => {
-        if (prev.some((s) => s.trackingNumber === cleanNum)) {
-          setDuplicateAlert(`Already scanned: ${cleanNum} (${chosenCourier.shortName})`);
-          setTimeout(() => setDuplicateAlert(null), 2000);
-          return prev;
-        }
-
-        const dest = "Destination Hub";
-        const meta = getLogicalStatusMeta(activeStatus, dest);
-
-        const newItem: BulkShipment = {
-          id: `staged-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-          trackingNumber: cleanNum,
-          courierId: chosenCourier.id,
-          courierName: chosenCourier.name,
-          status: activeStatus,
-          statusText: `${meta.statusText} • ${identification.formatLabel}`,
-          origin: "Origin Booking Hub",
-          destination: dest,
-          articleType: activeStatus === "booked" ? "Booked Consignment" : "Registered Consignment",
-          weight: "250 g",
-          lastUpdated: "Scanned Just Now",
-          lastLocation: meta.lastLocation,
-        };
-
-        playScanBeep(true);
-        setCameraScanSuccess({
-          code: cleanNum,
-          carrier: chosenCourier.name,
-          formatLabel: identification.formatLabel,
-          length: identification.length,
+      // Check duplicate synchronously against current stagedItemsRef
+      if (stagedItemsRef.current.some((s) => s.trackingNumber === cleanNum)) {
+        setDuplicateAlert({
+          text: `Already scanned: ${cleanNum} (${chosenCourier.shortName})`,
+          ts: Date.now(),
         });
-        if (scanSuccessTimerRef.current) clearTimeout(scanSuccessTimerRef.current);
-        scanSuccessTimerRef.current = setTimeout(() => {
-          setCameraScanSuccess(null);
-        }, 1250);
+        return;
+      }
 
-        return [newItem, ...prev];
+      const activeStatus = defaultStatusRef.current;
+      const dest = "Destination Hub";
+      const meta = getLogicalStatusMeta(activeStatus, dest);
+
+      const newItem: BulkShipment = {
+        id: `staged-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+        trackingNumber: cleanNum,
+        courierId: chosenCourier.id,
+        courierName: chosenCourier.name,
+        status: activeStatus,
+        statusText: `${meta.statusText} • ${identification.formatLabel}`,
+        origin: "Origin Booking Hub",
+        destination: dest,
+        articleType: activeStatus === "booked" ? "Booked Consignment" : "Registered Consignment",
+        weight: "250 g",
+        lastUpdated: "Scanned Just Now",
+        lastLocation: meta.lastLocation,
+      };
+
+      const nextList = [newItem, ...stagedItemsRef.current];
+      stagedItemsRef.current = nextList;
+      setStagedItems(nextList);
+
+      playScanBeep(true);
+      setCameraScanSuccess({
+        code: cleanNum,
+        carrier: chosenCourier.name,
+        formatLabel: identification.formatLabel,
+        length: identification.length,
+        ts: Date.now(),
       });
     },
     [playScanBeep]
   );
-
-  // Touch-to-Focus handler inside the Fixed Square Camera Space
-  const handleTouchToFocus = (
-    e: React.MouseEvent<HTMLDivElement> | React.TouchEvent<HTMLDivElement>
-  ) => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    let clientX = 0;
-    let clientY = 0;
-
-    if ("touches" in e) {
-      if (e.touches.length === 0) return;
-      clientX = e.touches[0].clientX;
-      clientY = e.touches[0].clientY;
-    } else {
-      clientX = e.clientX;
-      clientY = e.clientY;
-    }
-
-    const x = Math.max(28, Math.min(rect.width - 28, clientX - rect.left));
-    const y = Math.max(28, Math.min(rect.height - 28, clientY - rect.top));
-    const normX = Math.max(0, Math.min(1, x / rect.width));
-    const normY = Math.max(0, Math.min(1, y / rect.height));
-
-    const id = Date.now();
-    setFocusRing({ x, y, id });
-    setIsFocusing(true);
-    if (focusRingTimerRef.current) clearTimeout(focusRingTimerRef.current);
-    focusRingTimerRef.current = setTimeout(() => {
-      setFocusRing(null);
-      setIsFocusing(false);
-    }, 1100);
-
-    // Trigger hardware camera focus / point-of-interest refocus
-    const stream = cameraStreamRef.current;
-    if (stream) {
-      const [track] = stream.getVideoTracks();
-      if (track && typeof track.applyConstraints === "function") {
-        try {
-          const caps =
-            typeof track.getCapabilities === "function"
-              ? (track.getCapabilities() as Record<string, unknown>)
-              : {};
-          const advancedConstraints: Record<string, unknown> = {};
-          if (caps.pointsOfInterest) {
-            advancedConstraints.pointsOfInterest = [{ x: normX, y: normY }];
-          }
-          if (Array.isArray(caps.focusMode)) {
-            if (caps.focusMode.includes("single-shot")) {
-              advancedConstraints.focusMode = "single-shot";
-            } else if (caps.focusMode.includes("continuous")) {
-              advancedConstraints.focusMode = "continuous";
-            }
-          }
-          if (Object.keys(advancedConstraints).length > 0) {
-            track
-              .applyConstraints({
-                advanced: [advancedConstraints as MediaTrackConstraintSet],
-              })
-              .then(() => {
-                if (
-                  Array.isArray(caps.focusMode) &&
-                  caps.focusMode.includes("continuous") &&
-                  advancedConstraints.focusMode === "single-shot"
-                ) {
-                  setTimeout(() => {
-                    track
-                      .applyConstraints({
-                        advanced: [{ focusMode: "continuous" } as unknown as MediaTrackConstraintSet],
-                      })
-                      .catch(() => {});
-                  }, 700);
-                }
-              })
-              .catch(() => {});
-          }
-        } catch {
-          // ignore
-        }
-      }
-    }
-  };
 
   // Single Persistent Camera Stream & Non-Overlapping Sequential Decoder Loop
   useEffect(() => {
@@ -572,7 +520,7 @@ export function CameraScanClient() {
     let loopTimerId: NodeJS.Timeout | null = null;
     let isDecoding = false;
 
-    // Initialize ZXing readers with strict logistics formats (excluding noisy EAN-8 / UPC-E / Codabar partial misreads)
+    // Initialize ZXing readers with strict logistics formats
     const zxingBarcodeReader = new MultiFormatReader();
     const barcodeHints = new Map();
     barcodeHints.set(DecodeHintType.POSSIBLE_FORMATS, [
@@ -612,7 +560,6 @@ export function CameraScanClient() {
     bothHints.set(DecodeHintType.TRY_HARDER, true);
     zxingBothReader.setHints(bothHints);
 
-    // Native BarcodeDetector with format & value return
     let nativeDetector: {
       detect: (
         source: HTMLCanvasElement
@@ -655,7 +602,7 @@ export function CameraScanClient() {
     const processDecodedCandidate = (rawVal: string, is2DQr: boolean): boolean => {
       const now = Date.now();
 
-      // 1. Respect post-scan cooldown window so moving the camera away doesn't scan partial bars
+      // 1. Respect post-scan cooldown window
       if (now < scanCooldownUntilRef.current) {
         return false;
       }
@@ -663,7 +610,7 @@ export function CameraScanClient() {
       const candidate = extractCandidateScannedCode(rawVal);
       if (!candidate) return false;
 
-      // 2. Ignore same barcode within 2.8 seconds of last staged scan
+      // 2. Ignore same barcode within 2.8 seconds of last scan
       if (
         lastScannedRef.current.code === candidate &&
         now - lastScannedRef.current.timestamp < 2800
@@ -671,12 +618,10 @@ export function CameraScanClient() {
         return true;
       }
 
-      // 3. Check format & length validity first
+      // 3. Check format & length validity
       const identification = identifyAndValidateConsignment(candidate);
 
       if (!identification.isValid) {
-        // Require 2 consecutive frames of the same invalid code within 900ms before showing format error
-        // (so transient motion-blurred 1D frames don't spam false error popups)
         const inv = invalidCandidateRef.current;
         if (inv.code === candidate && now - inv.lastSeen < 900) {
           inv.count += 1;
@@ -735,7 +680,7 @@ export function CameraScanClient() {
       const w = canvas.width;
       const h = canvas.height;
 
-      // 1. Native BarcodeDetector with 250ms timeout guard so it can never hang the loop
+      // 1. Native BarcodeDetector with 250ms timeout guard
       if (nativeDetector) {
         try {
           const detectPromise = nativeDetector.detect(canvas);
@@ -830,6 +775,14 @@ export function CameraScanClient() {
 
       isDecoding = true;
       try {
+        if (
+          cameraScanSuccessTimestampRef.current > 0 &&
+          Date.now() - cameraScanSuccessTimestampRef.current > 750
+        ) {
+          cameraScanSuccessTimestampRef.current = 0;
+          setCameraScanSuccess(null);
+        }
+
         const video = videoRef.current;
         const canvas = scanCanvasRef.current;
         if (!video || !canvas) {
@@ -955,13 +908,6 @@ export function CameraScanClient() {
                 max: Math.min(z.max ?? 3, 3),
               };
               setIsHwZoomSupported(true);
-            }
-            if (Array.isArray(caps.focusMode) && caps.focusMode.includes("continuous")) {
-              videoTrack
-                .applyConstraints({
-                  advanced: [{ focusMode: "continuous" } as unknown as MediaTrackConstraintSet],
-                })
-                .catch(() => {});
             }
           } catch {
             // ignore
@@ -1153,7 +1099,7 @@ export function CameraScanClient() {
 
           {/* Right: Scanned Count Badge + Sound Toggle */}
           <div className="flex items-center gap-2 shrink-0">
-            <span className="rounded-full bg-emerald-500/15 border border-emerald-500/35 px-2.5 py-1 text-[11px] font-mono font-black text-emerald-300">
+            <span className="rounded-full bg-indigo-500/15 border border-indigo-500/35 px-2.5 py-1 text-[11px] font-mono font-black text-indigo-300">
               {stagedItems.length} Scanned
             </span>
 
@@ -1164,7 +1110,7 @@ export function CameraScanClient() {
               title={isSoundEnabled ? "Mute scan beep" : "Unmute scan beep"}
             >
               {isSoundEnabled ? (
-                <Volume2 className="h-4 w-4 text-emerald-400" />
+                <Volume2 className="h-4 w-4 text-indigo-400" />
               ) : (
                 <VolumeX className="h-4 w-4 text-slate-500" />
               )}
@@ -1269,7 +1215,7 @@ export function CameraScanClient() {
           </div>
         </div>
 
-        {/* Fixed Square Camera Space */}
+        {/* Fixed Square Camera Space (No Focus Option) */}
         <div className="relative flex flex-col items-center justify-center w-full my-auto">
           {cameraError && (
             <div className="mb-2.5 w-full max-w-[340px] sm:max-w-[380px] rounded-xl border border-amber-700/80 bg-amber-950/90 px-3.5 py-2 text-xs font-semibold text-amber-200 text-center">
@@ -1279,15 +1225,11 @@ export function CameraScanClient() {
 
           {/* Dedicated Fixed Square Camera Container */}
           <div
-            onClick={handleTouchToFocus}
-            onTouchStart={handleTouchToFocus}
-            className={`relative aspect-square w-[min(85vw,330px)] sm:w-[370px] rounded-3xl bg-black overflow-hidden flex items-center justify-center border-2 transition-all duration-200 cursor-crosshair shadow-2xl ${
+            className={`relative aspect-square w-[min(85vw,330px)] sm:w-[370px] rounded-3xl bg-black overflow-hidden flex items-center justify-center border-2 transition-all duration-150 shadow-2xl ${
               cameraScanSuccess
-                ? "border-emerald-500 shadow-[0_0_32px_rgba(16,185,129,0.45)]"
+                ? "border-emerald-500 shadow-[0_0_28px_rgba(16,185,129,0.4)]"
                 : formatError
                 ? "border-rose-500 shadow-[0_0_28px_rgba(244,63,94,0.45)]"
-                : isFocusing
-                ? "border-indigo-400/90"
                 : "border-slate-800"
             }`}
           >
@@ -1305,26 +1247,12 @@ export function CameraScanClient() {
               autoPlay
             />
 
-            {/* Touch-to-Focus Reticle at Tap Point */}
-            {focusRing && (
-              <div
-                key={focusRing.id}
-                style={{
-                  left: focusRing.x - 26,
-                  top: focusRing.y - 26,
-                }}
-                className="absolute z-30 h-13 w-13 pointer-events-none rounded-xl border-2 border-amber-400 shadow-[0_0_12px_rgba(251,191,36,0.7)] flex items-center justify-center animate-pulse"
-              >
-                <div className="h-1.5 w-1.5 rounded-full bg-amber-300" />
-              </div>
-            )}
-
             {/* Guide Frame (Strictly scans inside this frame; no text note overlay) */}
             {cameraGuideMode === "barcode" && (
               <div
                 className={`relative z-10 w-[84%] h-[38%] rounded-2xl border-2 pointer-events-none shadow-[0_0_0_9999px_rgba(2,6,23,0.58)] flex items-center justify-center transition-colors ${
                   cameraScanSuccess
-                    ? "border-emerald-400 bg-emerald-500/15"
+                    ? "border-emerald-400"
                     : formatError
                     ? "border-rose-500 bg-rose-500/15"
                     : "border-white/85"
@@ -1340,7 +1268,7 @@ export function CameraScanClient() {
               <div
                 className={`relative z-10 w-[68%] h-[68%] rounded-2xl border-2 pointer-events-none shadow-[0_0_0_9999px_rgba(2,6,23,0.58)] flex items-center justify-center transition-colors ${
                   cameraScanSuccess
-                    ? "border-emerald-400 bg-emerald-500/15"
+                    ? "border-emerald-400"
                     : formatError
                     ? "border-rose-500 bg-rose-500/15"
                     : "border-white/85"
@@ -1356,7 +1284,7 @@ export function CameraScanClient() {
               <div
                 className={`relative z-10 w-[82%] h-[68%] rounded-2xl border-2 pointer-events-none shadow-[0_0_0_9999px_rgba(2,6,23,0.58)] flex items-center justify-center transition-colors ${
                   cameraScanSuccess
-                    ? "border-emerald-400 bg-emerald-500/15"
+                    ? "border-emerald-400"
                     : formatError
                     ? "border-rose-500 bg-rose-500/15"
                     : "border-white/85"
@@ -1369,16 +1297,19 @@ export function CameraScanClient() {
               </div>
             )}
 
-            {/* Quick Success Checkmark Overlay with Auto-Identified Carrier & Format */}
+            {/* Brief Scan Confirmation Badge (Auto-hides after 850ms) */}
             {cameraScanSuccess && (
-              <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-slate-950/75 backdrop-blur-[2px] animate-in zoom-in-95 duration-150 pointer-events-none px-4 text-center">
-                <div className="flex h-14 w-14 items-center justify-center rounded-full bg-emerald-500 text-white shadow-xl shadow-emerald-500/40 ring-4 ring-emerald-400/30">
-                  <Check className="h-8 w-8 stroke-[3.5]" />
+              <div
+                key={cameraScanSuccess.ts}
+                className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-slate-950/70 backdrop-blur-[2px] pointer-events-none px-4 text-center"
+              >
+                <div className="flex h-12 w-12 items-center justify-center rounded-full bg-emerald-500 text-white shadow-lg">
+                  <Check className="h-7 w-7 stroke-[3.5]" />
                 </div>
-                <div className="mt-2.5 rounded-full bg-emerald-500 px-3.5 py-1 text-xs font-black tracking-wider text-white font-mono shadow-lg">
+                <div className="mt-2 rounded-full bg-slate-900/95 border border-emerald-500/60 px-3.5 py-1 text-xs font-black tracking-wider text-emerald-300 font-mono shadow-lg">
                   ✓ {cameraScanSuccess.code}
                 </div>
-                <div className="mt-1.5 text-xs font-extrabold text-emerald-300">
+                <div className="mt-1 text-xs font-extrabold text-white">
                   {cameraScanSuccess.carrier}
                 </div>
                 <div className="mt-0.5 text-[10px] font-semibold text-slate-300">
@@ -1389,7 +1320,10 @@ export function CameraScanClient() {
 
             {/* Invalid Consignment ID Format Overlay inside Square Camera */}
             {formatError && (
-              <div className="absolute inset-x-3 bottom-3 z-30 rounded-2xl border border-rose-500/90 bg-rose-950/95 p-3 text-white shadow-2xl backdrop-blur-md animate-in fade-in">
+              <div
+                key={formatError.ts}
+                className="absolute inset-x-3 bottom-3 z-30 rounded-2xl border border-rose-500/90 bg-rose-950/95 p-3 text-white shadow-2xl backdrop-blur-md"
+              >
                 <div className="flex items-start gap-2">
                   <AlertTriangle className="h-4 w-4 text-rose-400 shrink-0 mt-0.5" />
                   <div className="min-w-0 flex-1 text-left">
@@ -1411,8 +1345,11 @@ export function CameraScanClient() {
 
             {/* Duplicate Scan Alert Pill */}
             {duplicateAlert && !formatError && (
-              <div className="absolute bottom-3 inset-x-4 z-30 rounded-xl border border-amber-500/70 bg-amber-950/95 px-3 py-1.5 text-center text-xs font-bold text-amber-300 shadow-lg">
-                {duplicateAlert}
+              <div
+                key={duplicateAlert.ts}
+                className="absolute bottom-3 inset-x-4 z-30 rounded-xl border border-amber-500/70 bg-amber-950/95 px-3 py-1.5 text-center text-xs font-bold text-amber-300 shadow-lg"
+              >
+                {duplicateAlert.text}
               </div>
             )}
           </div>
@@ -1428,14 +1365,14 @@ export function CameraScanClient() {
           >
             {stagedItems.length > 0 ? (
               <div className="flex items-center gap-2 min-w-0">
-                <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-emerald-500/20 text-emerald-400">
+                <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-indigo-500/20 text-indigo-400">
                   <Check className="h-3 w-3 stroke-[3]" />
                 </span>
                 <div className="truncate text-xs">
                   <span className="font-mono font-black text-white">
                     {stagedItems[0].trackingNumber}
                   </span>
-                  <span className="text-emerald-400 font-bold ml-1.5">
+                  <span className="text-indigo-400 font-bold ml-1.5">
                     • {stagedItems[0].courierName}
                   </span>
                   <span className="text-slate-400 text-[10px] font-mono ml-1.5">
@@ -1445,7 +1382,7 @@ export function CameraScanClient() {
               </div>
             ) : (
               <span className="text-[11px] text-slate-400 flex items-center gap-1.5 truncate">
-                <Focus className="h-3.5 w-3.5 text-indigo-400 shrink-0" />
+                <ScanLine className="h-3.5 w-3.5 text-indigo-400 shrink-0" />
                 <span>Auto-identifies carrier, format &amp; length on scan</span>
               </span>
             )}
@@ -1553,7 +1490,7 @@ export function CameraScanClient() {
               <button
                 type="button"
                 onClick={handleDirectConfirmIngest}
-                className="order-1 sm:order-2 w-full sm:w-auto inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 px-5 py-2.5 text-xs font-extrabold text-white shadow-lg shadow-emerald-950/50 transition-all cursor-pointer"
+                className="order-1 sm:order-2 w-full sm:w-auto inline-flex items-center justify-center gap-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 px-5 py-2.5 text-xs font-extrabold text-white shadow-lg shadow-indigo-950/50 transition-all cursor-pointer"
               >
                 <Check className="h-4 w-4 stroke-[3]" />
                 <span>Confirm &amp; Add ({stagedItems.length})</span>
@@ -1574,7 +1511,7 @@ export function CameraScanClient() {
                 onClick={() => setIsAutoNextEnabled((prev) => !prev)}
                 className={`rounded-xl px-3.5 py-2.5 text-xs font-bold border transition-colors cursor-pointer shrink-0 ${
                   isAutoNextEnabled
-                    ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-300"
+                    ? "border-indigo-500/40 bg-indigo-500/15 text-indigo-300"
                     : "border-slate-800 bg-slate-950 text-slate-400"
                 }`}
               >

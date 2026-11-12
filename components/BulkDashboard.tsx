@@ -41,7 +41,6 @@ import {
   Zap,
   ZoomIn,
   ZoomOut,
-  Focus,
   FileText,
   FileCode,
 } from "lucide-react";
@@ -373,6 +372,15 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
   const scanCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const lastScannedRef = useRef<{ code: string; timestamp: number }>({ code: "", timestamp: 0 });
   const scanSuccessTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Guaranteed auto-clear for scan success green overlay & border after 750ms
+  useEffect(() => {
+    if (!cameraScanSuccess) return;
+    const timer = setTimeout(() => {
+      setCameraScanSuccess(null);
+    }, 750);
+    return () => clearTimeout(timer);
+  }, [cameraScanSuccess]);
 
   // Auto-filter when typing any letters while Add Consignments carrier dropdown is open
   useEffect(() => {
@@ -2613,9 +2621,6 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
               <h1 className="text-lg sm:text-2xl font-black tracking-tight text-slate-900 dark:text-white leading-tight">
                 Bulk Shipment Operations
               </h1>
-              <p className="mt-0.5 text-[11px] sm:text-xs text-slate-500 dark:text-slate-400 line-clamp-1 sm:line-clamp-none">
-                Multi-carrier fleet monitoring, automatic SLA sync, barcode/QR scanning &amp; batch ingestion.
-              </p>
             </div>
 
             {/* Mobile-First Compact Sync Timer Pill (visible on mobile/tablet right beside title) */}
@@ -2731,9 +2736,6 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
             <div className="mt-1 text-lg sm:text-2xl font-black text-slate-900 dark:text-white tabular-nums leading-none">
               {totalCount}
             </div>
-            <div className="hidden sm:block mt-1 text-[10px] text-slate-500 truncate">
-              All consignments
-            </div>
           </button>
 
           {/* Booked */}
@@ -2752,9 +2754,6 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
             </div>
             <div className="mt-1 text-lg sm:text-2xl font-black text-violet-600 dark:text-violet-400 tabular-nums leading-none">
               {bookedCount}
-            </div>
-            <div className="hidden sm:block mt-1 text-[10px] text-slate-500 truncate">
-              Booked at origin
             </div>
           </button>
 
@@ -2775,9 +2774,6 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
             <div className="mt-1 text-lg sm:text-2xl font-black text-sky-600 dark:text-sky-400 tabular-nums leading-none">
               {inTransitCount}
             </div>
-            <div className="hidden sm:block mt-1 text-[10px] text-slate-500 truncate">
-              Active dispatch
-            </div>
           </button>
 
           {/* Out for Delivery */}
@@ -2796,9 +2792,6 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
             </div>
             <div className="mt-1 text-lg sm:text-2xl font-black text-amber-600 dark:text-amber-400 tabular-nums leading-none">
               {outCount}
-            </div>
-            <div className="hidden sm:block mt-1 text-[10px] text-slate-500 truncate">
-              With delivery agent
             </div>
           </button>
 
@@ -2819,9 +2812,6 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
             <div className="mt-1 text-lg sm:text-2xl font-black text-emerald-600 dark:text-emerald-400 tabular-nums leading-none">
               {deliveredCount}
             </div>
-            <div className="hidden sm:block mt-1 text-[10px] text-slate-500 truncate">
-              {totalCount > 0 ? `${Math.round((deliveredCount / totalCount) * 100)}% completed` : "0%"}
-            </div>
           </button>
 
           {/* Returned / RTO */}
@@ -2840,9 +2830,6 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
             </div>
             <div className="mt-1 text-lg sm:text-2xl font-black text-rose-600 dark:text-rose-400 tabular-nums leading-none">
               {returnedCount}
-            </div>
-            <div className="hidden sm:block mt-1 text-[10px] text-slate-500 truncate">
-              Returned to origin
             </div>
           </button>
         </div>
@@ -3229,9 +3216,6 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                     <h3 className="text-xs font-extrabold text-slate-900 dark:text-white">
                       Data Size & Volume Analytics
                     </h3>
-                    <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                      Real-time storage footprint & added data metrics
-                    </p>
                   </div>
                   <span className="rounded-lg bg-indigo-100 dark:bg-indigo-950 px-2 py-0.5 font-mono text-[10px] font-black text-indigo-700 dark:text-indigo-300">
                     {dataAnalytics.formattedSize}
@@ -3340,9 +3324,6 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                       .{exportFileExtension}
                     </span>
                   </div>
-                  <p className="text-[11px] text-slate-600 dark:text-slate-400">
-                    Choose any batch and file extension (.csv, .xlsx, .xls, .json, or .txt) to download.
-                  </p>
 
                   {/* Custom Styled Select Batch to Export Dropdown */}
                   <div className="relative">
@@ -3871,9 +3852,6 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                   <h3 className="text-base font-extrabold text-slate-900 dark:text-white">
                     Operations, Bulk Export & Sync Settings
                   </h3>
-                  <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                    Configure auto-sync intervals, batch CSV exports, delivered clean-up, and backups
-                  </p>
                 </div>
               </div>
               <button
@@ -3900,9 +3878,6 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                     .{exportFileExtension}
                   </span>
                 </div>
-                <p className="text-[11px] text-slate-600 dark:text-slate-400">
-                  Select any batch and choose your desired file extension (.csv, .xlsx, .xls, .json, or .txt).
-                </p>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                   {/* Custom Styled Select Batch Dropdown */}
@@ -4070,9 +4045,6 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                   <div className="text-xs font-bold text-slate-900 dark:text-white">
                     Automatic Background Check
                   </div>
-                  <div className="text-[11px] text-slate-500 mt-0.5">
-                    Periodically query carriers for fresh shipment delivery scans.
-                  </div>
                 </div>
                 <button
                   type="button"
@@ -4149,9 +4121,6 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                     Set
                   </button>
                 </div>
-                <p className="mt-1.5 text-[11px] text-slate-400">
-                  Current active interval: {Math.round(checkIntervalSec / 60)} minutes ({checkIntervalSec} seconds).
-                </p>
               </div>
 
               {/* Delivered Consignments Export & Clean-Up */}
@@ -4167,9 +4136,6 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                     {deliveredCount} delivered
                   </span>
                 </div>
-                <p className="text-[11px] text-slate-600 dark:text-slate-400">
-                  Export completed deliveries to an Excel (.xlsx) report and optionally remove exported delivered items from the live workspace.
-                </p>
 
                 {exportDeliveredSuccessMsg && (
                   <div className="rounded-xl border border-emerald-300 bg-white/90 dark:border-emerald-800 dark:bg-slate-900 px-3 py-2 text-xs font-bold text-emerald-700 dark:text-emerald-300 flex items-center justify-between gap-2">
@@ -4227,9 +4193,6 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                     {shipments.length} consignments
                   </span>
                 </div>
-                <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                  Export complete data backup to JSON or import previous archives for review in a separate window.
-                </p>
 
                 <div className="flex flex-col sm:flex-row gap-2 pt-1">
                   <button
@@ -4376,9 +4339,6 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                           {stagedConsignments.length} Scanned
                         </span>
                       </div>
-                      <p className="text-[11px] text-slate-400">
-                        Dedicated camera mode — scans auto-detect carrier without opening the keyboard
-                      </p>
                     </div>
                   </div>
 
@@ -4431,24 +4391,8 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                       </button>
                     </div>
 
-                    {/* Smart Auto-Zoom & Focus Sensitivity Controls for Damaged Labels */}
+                    {/* Manual Zoom Controls */}
                     <div className="inline-flex items-center gap-1 rounded-xl bg-slate-950 px-2 py-1 border border-slate-800 text-[11px] font-bold">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const next = !isAutoZoomFocusEnabled;
-                          setIsAutoZoomFocusEnabled(next);
-                          if (!next) setIsEnhancingDamagedLabel(false);
-                        }}
-                        className={`inline-flex items-center gap-1 rounded-lg px-2 py-0.5 transition-colors cursor-pointer ${
-                          isAutoZoomFocusEnabled
-                            ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40"
-                            : "text-slate-400 hover:text-slate-200"
-                        }`}
-                      >
-                        <Focus className="h-3 w-3" />
-                        <span>Auto-Focus/Zoom: {isAutoZoomFocusEnabled ? "ON" : "OFF"}</span>
-                      </button>
                       <button
                         type="button"
                         onClick={() => applyInlineCameraZoomAndFocus(cameraZoomLevel - 0.25)}
@@ -4674,9 +4618,6 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                       <h3 className="text-base sm:text-lg font-black tracking-tight text-slate-900 dark:text-white">
                         Add & Scan Consignments
                       </h3>
-                      <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                        Type numbers manually, scan with barcode reader devices, or open the dedicated camera scanner.
-                      </p>
                     </div>
                   </div>
                   <button
@@ -4716,11 +4657,6 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                             {isAutoNextEnabled ? "ON" : "OFF"}
                           </span>
                         </div>
-                        <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                          {isAutoNextEnabled
-                            ? "Auto-Next ON: Automatically stages each scanned barcode and clears input for next scan."
-                            : "Auto-Next OFF: Holds scanned ID in view to verify details before advancing."}
-                        </p>
                       </div>
                     </div>
 
@@ -4758,7 +4694,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                   <div className="rounded-2xl border-2 border-indigo-500/60 bg-white p-4 sm:p-5 dark:border-indigo-500/50 dark:bg-slate-800/70 shadow-xs space-y-3.5">
                     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1.5">
                       <label className="text-xs font-black uppercase tracking-wider text-slate-700 dark:text-slate-200">
-                        Consignment / AWB Number (Type manually or scan barcode device):
+                        Consignment / AWB Number:
                       </label>
                       {intakeAwb.trim() && (() => {
                         const info = identifyAndValidateConsignment(intakeAwb);
@@ -5020,14 +4956,9 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                                       : "text-slate-700 dark:text-slate-300"
                                   }`}
                                 >
-                                  <div>
-                                    <div className="flex items-center gap-2">
-                                      <span className={`h-2 w-2 rounded-full ${st.dot}`} />
-                                      <span>{st.label}</span>
-                                    </div>
-                                    <div className="pl-4 text-[10px] text-slate-400 font-normal">
-                                      {st.desc}
-                                    </div>
+                                  <div className="flex items-center gap-2">
+                                    <span className={`h-2 w-2 rounded-full ${st.dot}`} />
+                                    <span>{st.label}</span>
                                   </div>
                                   {intakeStatus === st.value && (
                                     <Check className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400 shrink-0" />
@@ -5074,11 +5005,8 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                           {stagedConsignments.length}
                         </span>
                         <h4 className="text-xs sm:text-sm font-bold text-slate-900 dark:text-white">
-                          Full Review Before Add: Staged Consignments
+                          Staged Consignments
                         </h4>
-                      </div>
-                      <div className="text-[11px] text-slate-500 dark:text-slate-400">
-                        Inspect all items below. Nothing is added to dashboard until you click Confirm.
                       </div>
                     </div>
 
@@ -5088,9 +5016,6 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                         <Package className="mx-auto h-8 w-8 text-slate-300 dark:text-slate-600 mb-2" />
                         <p className="text-xs font-semibold text-slate-600 dark:text-slate-300">
                           No consignments staged for review yet
-                        </p>
-                        <p className="text-[11px] text-slate-400 mt-0.5">
-                          Type numbers in the field above, scan with a barcode reader device, or open the dedicated camera scanner.
                         </p>
                       </div>
                     ) : (
@@ -5248,15 +5173,8 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                       ? "Successfully Imported!"
                       : previewShipments
                       ? "Review Bulk Data Before Import"
-                      : "Bulk Import & Smart CSV/Excel Analyzer"}
+                      : "Bulk Import"}
                   </h3>
-                  <p className="text-[11px] text-slate-500">
-                    {importSuccessState
-                      ? "Consignments verified and committed to dashboard"
-                      : previewShipments
-                      ? `Inspect, edit carrier/status, or remove rows from ${previewFileName} before importing`
-                      : "Upload CSV (.csv) or Excel (.xlsx, .xls) — auto-analyzes columns & detects carriers"}
-                  </p>
                 </div>
               </div>
               <button
@@ -5342,7 +5260,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                                 Pre-Import Data Verification & Review
                               </div>
                               <div className="text-[11px] text-slate-500 dark:text-slate-400">
-                                Source: <span className="font-mono font-semibold">{previewFileName}</span> — Nothing is imported until you click Confirm below.
+                                Source: <span className="font-mono font-semibold">{previewFileName}</span>
                               </div>
                             </div>
                           </div>
@@ -5506,10 +5424,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                   <div className="rounded-2xl border border-indigo-200 bg-indigo-50/70 p-4 dark:border-indigo-900/50 dark:bg-indigo-950/40 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                     <div>
                       <div className="text-xs font-bold text-indigo-900 dark:text-indigo-200">
-                        Smart CSV & Excel Platform Analyzer
-                      </div>
-                      <div className="text-[11px] text-indigo-700/80 dark:text-indigo-300/80">
-                        Automatically maps AWB, Carrier, Status (Booked, In Transit, Out for Delivery, Delivered, Returned), Origin, Destination, Recipient & Weight—or re-imports any Bulk Exported CSV file.
+                        Sample Templates
                       </div>
                     </div>
                     <div className="flex flex-wrap items-center gap-2 shrink-0">
@@ -5537,13 +5452,10 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                     <FileSpreadsheet className="mx-auto h-10 w-10 text-emerald-600 mb-2" />
                     <label
                       htmlFor="excel-file-input"
-                      className="text-xs font-bold text-slate-700 dark:text-slate-200 block mb-1 cursor-pointer"
+                      className="text-xs font-bold text-slate-700 dark:text-slate-200 block mb-3 cursor-pointer"
                     >
-                      Select Excel (.xlsx, .xls) or CSV (.csv) file to Review
+                      Select Excel (.xlsx, .xls) or CSV (.csv) file
                     </label>
-                    <p className="text-[11px] text-slate-400 mb-3">
-                      All rows will be shown in a review table before importing into your dashboard
-                    </p>
                     <input
                       ref={fileInputRef}
                       type="file"
@@ -5636,9 +5548,6 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                   <h3 className="text-base font-extrabold text-slate-900 dark:text-white">
                     Data Backup & Recovery Center
                   </h3>
-                  <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                    Export entire logistics data or import saved backups to review separately
-                  </p>
                 </div>
               </div>
               <button
@@ -5683,9 +5592,6 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                         Export Full Operational Backup (.json)
                       </h4>
                     </div>
-                    <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
-                      Archive all {shipments.length} consignments across {uniqueBatches.length} imported batches, SLAs, tracking history, and tags into an offline file.
-                    </p>
                   </div>
                   <button
                     type="button"
@@ -5703,12 +5609,9 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                 <div className="flex items-center gap-2">
                   <FileJson className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
                   <h4 className="text-xs sm:text-sm font-bold text-slate-900 dark:text-white">
-                    Import Backup Data for Review in Separate View
+                    Import Backup Data for Review
                   </h4>
                 </div>
-                <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                  Select a previously downloaded backup JSON file. You can review all records separately without modifying your live shipments, or merge them as needed.
-                </p>
 
                 {/* File picker */}
                 <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
@@ -5773,10 +5676,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                     <div className="flex flex-wrap items-center justify-between gap-3 p-3 rounded-2xl bg-indigo-50/80 dark:bg-indigo-950/60 border border-indigo-200 dark:border-indigo-900">
                       <div>
                         <div className="text-xs font-bold text-indigo-950 dark:text-indigo-200">
-                          Review in Separate Dashboard Mode
-                        </div>
-                        <div className="text-[11px] text-indigo-800/80 dark:text-indigo-300/80">
-                          Inspect all {backupReviewData.shipments.length} consignments on the main dashboard table with zero impact on live data.
+                          Review in Separate Dashboard Mode ({backupReviewData.shipments.length})
                         </div>
                       </div>
                       <button
@@ -5911,9 +5811,6 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                 <h3 className="text-base font-extrabold text-slate-900 dark:text-white">
                   Confirm Multiple Delete
                 </h3>
-                <p className="text-xs text-slate-500 dark:text-slate-400">
-                  Prevent accidental deletion of selected consignments
-                </p>
               </div>
             </div>
 
@@ -5985,9 +5882,6 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                 <h3 className="text-base font-extrabold text-slate-900 dark:text-white">
                   Delete Exported Delivered Data
                 </h3>
-                <p className="text-xs text-slate-500 dark:text-slate-400">
-                  Quick clean-up of completed shipments
-                </p>
               </div>
             </div>
 
