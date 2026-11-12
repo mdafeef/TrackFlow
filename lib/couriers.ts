@@ -28,10 +28,10 @@ export const COURIER_LIST: CourierConfig[] = [
     name: "India Post Speed Post",
     shortName: "Speed Post",
     label: "India Post",
-    priority: 9,
+    priority: 4,
     regex: /^[A-Z]{2}\d{9}[A-Z]{2}$/i,
     sampleNumber: "EL855948618IN",
-    formatDescription: "2 letters, 9 digits, 2 letters (e.g., EL855948618IN)",
+    formatDescription: "13 chars: 2 letters + 9 digits + 2 letters (e.g., EL855948618IN)",
     badgeColor: {
       bg: "bg-red-50",
       text: "text-red-700",
@@ -50,11 +50,11 @@ export const COURIER_LIST: CourierConfig[] = [
     name: "DTDC Courier & Cargo",
     shortName: "DTDC",
     label: "DTDC",
-    priority: 999,
+    priority: 10,
     fallback: true,
-    regex: /^[A-Z0-9-]{8,32}$/i,
+    regex: /^[A-Z]{1,2}\d{7,12}$/i,
     sampleNumber: "B4000211866",
-    formatDescription: "8 to 32 alphanumeric characters (e.g., B4000211866)",
+    formatDescription: "8–14 chars: 1–2 letters + 7–12 digits (e.g., B4000211866)",
     badgeColor: {
       bg: "bg-blue-50",
       text: "text-blue-700",
@@ -74,9 +74,9 @@ export const COURIER_LIST: CourierConfig[] = [
     shortName: "Ekart",
     label: "Ekart",
     priority: 6,
-    regex: /^[A-Z]{4}\d{10}$/i,
+    regex: /^(?!FMPA)[A-Z]{4}\d{10}$/i,
     sampleNumber: "FMPP4397267510",
-    formatDescription: "4 letters followed by 10 digits (e.g., FMPP4397267510)",
+    formatDescription: "14 chars: 4 letters + 10 digits (e.g., FMPP4397267510)",
     badgeColor: {
       bg: "bg-amber-50",
       text: "text-amber-700",
@@ -118,9 +118,9 @@ export const COURIER_LIST: CourierConfig[] = [
     shortName: "Delhivery",
     label: "Delhivery",
     priority: 7,
-    regex: /^\d{12,18}$/i,
+    regex: /^(?:\d{13,14}|\d{16,18})$/i,
     sampleNumber: "3892104928172",
-    formatDescription: "12 to 18 numeric digits (e.g., 3892104928172)",
+    formatDescription: "13–14 or 16–18 numeric digits (e.g., 3892104928172)",
     badgeColor: {
       bg: "bg-red-50",
       text: "text-red-700",
@@ -139,10 +139,10 @@ export const COURIER_LIST: CourierConfig[] = [
     name: "Shadowfax Technologies",
     shortName: "Shadowfax",
     label: "Shadowfax",
-    priority: 12,
-    regex: /^(?:SF|R)\d+[A-Z]+$/i,
+    priority: 8,
+    regex: /^(?:SF\d{8,14}[A-Z]{0,3}|R\d{8,14}[A-Z]{1,3})$/i,
     sampleNumber: "SF84928104IND",
-    formatDescription: "Starts with SF or R followed by digits and letters",
+    formatDescription: "10–19 chars: SF or R + 8–14 digits + suffix",
     badgeColor: {
       bg: "bg-violet-50",
       text: "text-violet-700",
@@ -162,9 +162,9 @@ export const COURIER_LIST: CourierConfig[] = [
     shortName: "Valmo",
     label: "Valmo",
     priority: 0,
-    regex: /^VL\d{13}$/i,
+    regex: /^VL\d{12,14}$/i,
     sampleNumber: "VL9384729104821",
-    formatDescription: "VL followed by 13 digits (e.g., VL9384729104821)",
+    formatDescription: "14–16 chars: VL followed by 12–14 digits",
     badgeColor: {
       bg: "bg-fuchsia-50",
       text: "text-fuchsia-700",
@@ -184,9 +184,9 @@ export const COURIER_LIST: CourierConfig[] = [
     shortName: "XpressBees",
     label: "XpressBees",
     priority: 14,
-    regex: /^\d{13,15}$/i,
-    sampleNumber: "1482938471928",
-    formatDescription: "13 to 15 numeric digits (e.g., 1482938471928)",
+    regex: /^\d{15}$/i,
+    sampleNumber: "148293847192810",
+    formatDescription: "15 numeric digits (e.g., 148293847192810)",
     badgeColor: {
       bg: "bg-yellow-50",
       text: "text-yellow-700",
@@ -205,10 +205,10 @@ export const COURIER_LIST: CourierConfig[] = [
     name: "Myntra Logistics",
     shortName: "Myntra",
     label: "Myntra",
-    priority: 4,
+    priority: 3,
     regex: /^MY[A-Z]{2}\d{10}$/i,
     sampleNumber: "MYEX8492019482",
-    formatDescription: "MY followed by 2 letters and 10 digits",
+    formatDescription: "14 chars: MY + 2 letters + 10 digits",
     badgeColor: {
       bg: "bg-rose-50",
       text: "text-rose-700",
@@ -250,9 +250,9 @@ export const COURIER_LIST: CourierConfig[] = [
     shortName: "Shree Maruti",
     label: "Shree Maruti",
     priority: 16,
-    regex: /^\d{11,14}$/i,
-    sampleNumber: "84920194821",
-    formatDescription: "11 to 14 numeric digits",
+    regex: /^SM\d{9,12}$/i,
+    sampleNumber: "SM8492019482",
+    formatDescription: "11–14 chars: SM + 9–12 digits",
     badgeColor: {
       bg: "bg-orange-50",
       text: "text-orange-700",
@@ -293,10 +293,10 @@ export const COURIER_LIST: CourierConfig[] = [
     name: "Akash Ganga Courier",
     shortName: "Akash Ganga",
     label: "Akash Ganga",
-    priority: 11,
-    regex: /^\d{8,16}$/i,
-    sampleNumber: "7482910482",
-    formatDescription: "8 to 16 numeric digits",
+    priority: 18,
+    regex: /^\d{8,9}$/i,
+    sampleNumber: "748291048",
+    formatDescription: "8 to 9 numeric digits",
     badgeColor: {
       bg: "bg-teal-50",
       text: "text-teal-700",
@@ -315,10 +315,10 @@ export const COURIER_LIST: CourierConfig[] = [
     name: "Flipkart Shipping Services",
     shortName: "Flipkart",
     label: "Flipkart",
-    priority: 18,
-    regex: /^[A-Z]{4}\d{10}$/i,
+    priority: 5,
+    regex: /^FMPA\d{10}$/i,
     sampleNumber: "FMPA9281048291",
-    formatDescription: "4 letters followed by 10 digits",
+    formatDescription: "14 chars: FMPA followed by 10 digits",
     badgeColor: {
       bg: "bg-blue-50",
       text: "text-blue-700",
@@ -338,9 +338,9 @@ export const COURIER_LIST: CourierConfig[] = [
     shortName: "Meesho",
     label: "Meesho",
     priority: 19,
-    regex: /^(?:VL\d{13}|(?:SF|R)\d+[A-Z]+)$/i,
-    sampleNumber: "VL8492018471928",
-    formatDescription: "Valmo ID (VL...) or Shadowfax ID (SF...)",
+    regex: /^MSH\d{10,13}$/i,
+    sampleNumber: "MSH8492018471",
+    formatDescription: "13–16 chars: MSH + 10–13 digits",
     badgeColor: {
       bg: "bg-pink-50",
       text: "text-pink-700",
@@ -360,9 +360,9 @@ export const COURIER_LIST: CourierConfig[] = [
     shortName: "Emirates",
     label: "Emirates Post",
     priority: 1,
-    regex: /^EE\d{9}AE$/i,
+    regex: /^[A-Z]{2}\d{9}AE$/i,
     sampleNumber: "EE928104821AE",
-    formatDescription: "EE followed by 9 digits and AE",
+    formatDescription: "13 chars: 2 letters + 9 digits + AE",
     badgeColor: {
       bg: "bg-emerald-50",
       text: "text-emerald-700",
@@ -381,10 +381,10 @@ export const COURIER_LIST: CourierConfig[] = [
     name: "Saudi Post (SPL)",
     shortName: "SPL",
     label: "Saudi Post",
-    priority: 8,
+    priority: 2,
     regex: /^ABSEPS\d{10}$/i,
     sampleNumber: "ABSEPS9281048291",
-    formatDescription: "ABSEPS followed by 10 digits",
+    formatDescription: "16 chars: ABSEPS + 10 digits",
     badgeColor: {
       bg: "bg-cyan-50",
       text: "text-cyan-700",
@@ -404,9 +404,9 @@ export const COURIER_LIST: CourierConfig[] = [
     shortName: "Oman Post",
     label: "Oman Post",
     priority: 2,
-    regex: /^EE\d{9}OM$/i,
+    regex: /^[A-Z]{2}\d{9}OM$/i,
     sampleNumber: "EE849201948OM",
-    formatDescription: "EE followed by 9 digits and OM",
+    formatDescription: "13 chars: 2 letters + 9 digits + OM",
     badgeColor: {
       bg: "bg-indigo-50",
       text: "text-indigo-700",
@@ -428,7 +428,7 @@ export const COURIER_LIST: CourierConfig[] = [
     priority: 3,
     regex: /^[A-Z]{2}\d{9}PH$/i,
     sampleNumber: "CP928104821PH",
-    formatDescription: "2 letters, 9 digits, PH",
+    formatDescription: "13 chars: 2 letters + 9 digits + PH",
     badgeColor: {
       bg: "bg-indigo-50",
       text: "text-indigo-700",
@@ -447,10 +447,10 @@ export const COURIER_LIST: CourierConfig[] = [
     name: "Pos Indonesia",
     shortName: "Pos Indo",
     label: "Pos Indonesia",
-    priority: 10,
-    regex: /^(P\d{13}|[A-Z][A-Z0-9]{21,29})$/i,
+    priority: 9,
+    regex: /^P\d{12,14}$/i,
     sampleNumber: "P9482910482910",
-    formatDescription: "P + 13 digits or 22-30 character barcode",
+    formatDescription: "13–15 chars: P + 12–14 digits",
     badgeColor: {
       bg: "bg-orange-50",
       text: "text-orange-700",
@@ -477,9 +477,230 @@ const DETECTION_PRIORITY_ORDER = [...COURIER_LIST]
 
 const DETECTION_FALLBACK = COURIER_LIST.find(c => c.fallback);
 
+export interface ConsignmentIdentification {
+  isValid: boolean;
+  normalized: string;
+  courier: CourierConfig | null;
+  formatLabel: string;
+  length: number;
+  formatName?: string;
+  lengthLabel?: string;
+  error?: string;
+}
+
+/**
+ * Logical Consignment ID Format, Length & Carrier Auto-Identification Engine:
+ * Evaluates structure, prefix, suffix, total length, and numeric digit count
+ * for both Manual Entry and Camera Barcode/QR Scanning.
+ */
+export function identifyAndValidateConsignment(rawCode: string): ConsignmentIdentification {
+  if (!rawCode || typeof rawCode !== "string") {
+    return {
+      isValid: false,
+      normalized: "",
+      courier: null,
+      formatLabel: "Empty ID",
+      length: 0,
+      error: "Consignment ID cannot be empty.",
+    };
+  }
+
+  const clean = rawCode.trim().toUpperCase().replace(/\s+/g, "");
+  if (!clean) {
+    return {
+      isValid: false,
+      normalized: "",
+      courier: null,
+      formatLabel: "Empty ID",
+      length: 0,
+      error: "Consignment ID cannot be empty.",
+    };
+  }
+
+  // 1. Check for illegal characters (only letters, digits, and optional single hyphens)
+  if (/[^A-Z0-9-]/.test(clean) || clean.startsWith("-") || clean.endsWith("-") || clean.includes("--")) {
+    return {
+      isValid: false,
+      normalized: clean,
+      courier: null,
+      formatLabel: "Invalid Characters",
+      length: clean.length,
+      error: "Invalid format: Only letters and digits are allowed in Consignment IDs.",
+    };
+  }
+
+  // Strip optional hyphens for structural analysis
+  const compact = clean.replace(/-/g, "");
+  const len = compact.length;
+
+  // 2. Check specific prefix/suffix partial errors BEFORE general length check so user gets exact logical feedback
+  // Postal UPU S10 candidate (starts with 2 letters and ends with IN, AE, OM, PH)
+  if (/^[A-Z]{2}\d+(?:IN|AE|OM|PH)$/.test(compact) && len !== 13) {
+    return {
+      isValid: false,
+      normalized: compact,
+      courier: null,
+      formatLabel: "Postal S10 (Requires 13 chars)",
+      length: len,
+      error: `Invalid Postal ID length (${len} chars). Postal Consignment IDs must be exactly 13 characters: 2 letters + 9 digits + 2 country letters (e.g. EL855948618IN).`,
+    };
+  }
+
+  // Valmo candidate (starts with VL)
+  if (/^VL\d+$/.test(compact) && (len < 14 || len > 16)) {
+    return {
+      isValid: false,
+      normalized: compact,
+      courier: null,
+      formatLabel: "Valmo AWB (Requires 14–16 chars)",
+      length: len,
+      error: `Invalid Valmo ID length (${len} chars). Expected VL followed by 12–14 digits (14–16 chars, e.g. VL9384729104821).`,
+    };
+  }
+
+  // Ekart / Flipkart candidate (starts with FMP)
+  if (/^FMP[A-Z]\d+$/.test(compact) && len !== 14) {
+    return {
+      isValid: false,
+      normalized: compact,
+      courier: null,
+      formatLabel: "Ekart/Flipkart (Requires 14 chars)",
+      length: len,
+      error: `Invalid Ekart/Flipkart ID length (${len} chars). Expected 4 letters + 10 digits (14 chars, e.g. FMPP4397267510).`,
+    };
+  }
+
+  // Myntra candidate (starts with MY + 2 letters)
+  if (/^MY[A-Z]{2}\d+$/.test(compact) && len !== 14) {
+    return {
+      isValid: false,
+      normalized: compact,
+      courier: null,
+      formatLabel: "Myntra AWB (Requires 14 chars)",
+      length: len,
+      error: `Invalid Myntra ID length (${len} chars). Expected MY + 2 letters + 10 digits (14 chars, e.g. MYEX8492019482).`,
+    };
+  }
+
+  // Saudi Post candidate
+  if (compact.startsWith("ABSEPS") && !/^ABSEPS\d{10}$/.test(compact)) {
+    return {
+      isValid: false,
+      normalized: compact,
+      courier: null,
+      formatLabel: "Saudi Post (Requires 16 chars)",
+      length: len,
+      error: `Invalid Saudi Post ID (${len} chars). Expected ABSEPS + 10 digits (16 chars).`,
+    };
+  }
+
+  // 3. General Length Boundaries (8 to 20 characters)
+  if (len < 8) {
+    return {
+      isValid: false,
+      normalized: compact,
+      courier: null,
+      formatLabel: "Need 8–20 chars",
+      length: len,
+      error: `Too short (${len} chars). Valid Consignment IDs require 8 to 20 characters (e.g. EL855948618IN or B4000211866).`,
+    };
+  }
+  if (len > 20) {
+    return {
+      isValid: false,
+      normalized: compact,
+      courier: null,
+      formatLabel: "Exceeds 20 chars",
+      length: len,
+      error: `Too long (${len} chars). Valid Consignment IDs are between 8 and 20 characters.`,
+    };
+  }
+
+  // 4. Digit Count & Anti-Gibberish Check: Every real Consignment ID has at least 7 numeric digits
+  const digitMatches = compact.match(/\d/g);
+  const digitCount = digitMatches ? digitMatches.length : 0;
+  if (digitCount < 7) {
+    return {
+      isValid: false,
+      normalized: compact,
+      courier: null,
+      formatLabel: "Need at least 7 digits",
+      length: len,
+      error: `Invalid Consignment ID: Contains only ${digitCount} digit${digitCount === 1 ? "" : "s"}. A valid tracking ID requires at least 7 digits.`,
+    };
+  }
+
+  // Reject all-identical repeating digits (e.g. 0000000000 or 1111111111)
+  const digitsOnly = compact.replace(/\D/g, "");
+  if (/^(\d)\1{6,}$/.test(digitsOnly)) {
+    return {
+      isValid: false,
+      normalized: compact,
+      courier: null,
+      formatLabel: "Invalid Repeating Digits",
+      length: len,
+      error: "Invalid Consignment ID: Repetitive placeholder digits are not allowed.",
+    };
+  }
+
+  // 5. Match against Priority-Ordered Carrier Formats
+  for (const c of DETECTION_PRIORITY_ORDER) {
+    if (c.regex.test(compact)) {
+      return {
+        isValid: true,
+        normalized: compact,
+        courier: c,
+        formatLabel: `${c.shortName} Format`,
+        length: len,
+        formatName: `${c.shortName} Format`,
+        lengthLabel: `${len} chars`,
+      };
+    }
+  }
+
+  // 6. Match DTDC (1–2 letters + 7–12 digits, 8–14 chars total)
+  if (DETECTION_FALLBACK && DETECTION_FALLBACK.regex.test(compact)) {
+    return {
+      isValid: true,
+      normalized: compact,
+      courier: DETECTION_FALLBACK,
+      formatLabel: "DTDC Alphanumeric AWB",
+      length: len,
+      formatName: "DTDC Alphanumeric AWB",
+      lengthLabel: `${len} chars`,
+    };
+  }
+
+  // 7. Standard Courier Alphanumeric Prefix + Digits + Optional Country/Hub Suffix (e.g. 1–4 letters + 7–14 digits + 0–2 letters)
+  if (/^[A-Z]{1,4}\d{7,14}[A-Z]{0,2}$/.test(compact)) {
+    const fallbackCarrier = DETECTION_FALLBACK || COURIER_LIST[0];
+    return {
+      isValid: true,
+      normalized: compact,
+      courier: fallbackCarrier,
+      formatLabel: "Standard Express AWB",
+      length: len,
+      formatName: "Standard Express AWB",
+      lengthLabel: `${len} chars`,
+    };
+  }
+
+  return {
+    isValid: false,
+    normalized: compact,
+    courier: null,
+    formatLabel: "Unrecognized Structure",
+    length: len,
+    error: `Unrecognized Consignment ID structure (${len} chars). Use a valid format like EL855948618IN (13 chars), B4000211866 (11 chars), or 8–18 digit AWB.`,
+  };
+}
+
 export function autoDetectCourier(trackingNumber: string): CourierConfig | null {
+  const result = identifyAndValidateConsignment(trackingNumber);
+  if (result.courier) return result.courier;
+
   if (!trackingNumber) return null;
-  const cleaned = trackingNumber.trim().toUpperCase().replace(/\s+/g, '');
+  const cleaned = trackingNumber.trim().toUpperCase().replace(/[\s-]+/g, "");
   if (!cleaned) return null;
 
   for (const c of DETECTION_PRIORITY_ORDER) {
@@ -495,52 +716,15 @@ export function autoDetectCourier(trackingNumber: string): CourierConfig | null 
   return null;
 }
 
-/**
- * Strict Consignment ID validation:
- * Validates whether a consignment/tracking code matches either:
- * 1. Standard Postal UPU S10 format: 2 letters + 9 digits + 2 letters (e.g., EK123456789IN, RM123456789IN)
- * 2. Standard courier consignment / AWB format: 8 to 24 alphanumeric characters (A-Z, 0-9, and optional hyphens).
- * Rejects random short strings (< 8 chars), strings > 24 chars, strings with spaces, special characters, commas, slashes, or non-tracking payloads.
- */
-export function validateConsignmentFormat(code: string): { isValid: boolean; normalized: string; error?: string } {
-  if (!code || typeof code !== "string") {
-    return { isValid: false, normalized: "", error: "Consignment ID cannot be empty." };
-  }
-  const clean = code.trim().toUpperCase().replace(/\s+/g, "");
-  if (clean.length < 8) {
-    return {
-      isValid: false,
-      normalized: clean,
-      error: `Too short (${clean.length} chars). Valid consignment IDs have at least 8 characters (e.g. EK123456789IN).`,
-    };
-  }
-  if (clean.length > 24) {
-    return {
-      isValid: false,
-      normalized: clean,
-      error: `Too long (${clean.length} chars). Valid consignment IDs are between 8 and 24 characters.`,
-    };
-  }
-  if (/[^A-Z0-9-]/.test(clean)) {
-    return {
-      isValid: false,
-      normalized: clean,
-      error: "Invalid format. Only letters, digits, and hyphens are permitted (e.g. EK123456789IN).",
-    };
-  }
-
-  // Must match either standard postal format or standard courier AWB format
-  const isPostFormat = /^[A-Z]{2}\d{9}[A-Z]{2}$/.test(clean);
-  const isCourierFormat = /^[A-Z0-9-]{8,24}$/.test(clean);
-
-  if (isPostFormat || isCourierFormat) {
-    return { isValid: true, normalized: clean };
-  }
-
-  return {
-    isValid: false,
-    normalized: clean,
-    error: "Invalid consignment format. Expected format e.g. EK123456789IN or 8–24 alphanumeric digits.",
-  };
+export function validateConsignmentFormat(code: string): {
+  isValid: boolean;
+  normalized: string;
+  courier?: CourierConfig | null;
+  formatName?: string;
+  lengthLabel?: string;
+  error?: string;
+} {
+  return identifyAndValidateConsignment(code);
 }
+
 

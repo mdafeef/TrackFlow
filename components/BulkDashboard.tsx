@@ -55,7 +55,13 @@ import {
   HybridBinarizer,
 } from "@zxing/library";
 import jsQR from "jsqr";
-import { autoDetectCourier, COURIER_LIST, COURIER_MAP, validateConsignmentFormat } from "@/lib/couriers";
+import {
+  autoDetectCourier,
+  COURIER_LIST,
+  COURIER_MAP,
+  identifyAndValidateConsignment,
+  validateConsignmentFormat,
+} from "@/lib/couriers";
 
 export interface BulkShipment {
   id: string;
@@ -218,9 +224,8 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
   const [activeSideTab, setActiveSideTab] = useState<"filters" | "analytics" | "settings">("filters");
   const [exportBatchTargetId, setExportBatchTargetId] = useState<string>("all");
   const [exportFileExtension, setExportFileExtension] = useState<
-    "csv" | "xlsx" | "xls" | "json" | "tsv" | "txt" | "xml" | "custom"
+    "csv" | "xlsx" | "xls" | "json" | "txt"
   >("csv");
-  const [customExportExtension, setCustomExportExtension] = useState<string>("csv");
   const [isExportBatchDropdownOpen, setIsExportBatchDropdownOpen] = useState<boolean>(false);
   const [isExportFormatDropdownOpen, setIsExportFormatDropdownOpen] = useState<boolean>(false);
   const [isModalExportBatchDropdownOpen, setIsModalExportBatchDropdownOpen] = useState<boolean>(false);
@@ -662,17 +667,17 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
     returnReasonOverride?: string,
     scanSource: "manual" | "camera" = "manual"
   ) => {
-    const validation = validateConsignmentFormat(awbToStage);
-    if (!validation.isValid) {
+    const identification = identifyAndValidateConsignment(awbToStage);
+    if (!identification.isValid) {
       setIntakeError(
-        validation.error ||
-          "Invalid Consignment ID format. Expected 8–24 alphanumeric characters (e.g. EK123456789IN)."
+        identification.error ||
+          "Invalid Consignment ID format. Expected 8–22 alphanumeric characters (e.g. EK123456789IN)."
       );
       playChime(false);
       return;
     }
 
-    const cleanNum = validation.normalized;
+    const cleanNum = identification.normalized;
 
     // Check duplicate in currently staged list
     if (stagedConsignments.some((s) => s.trackingNumber === cleanNum)) {
@@ -682,8 +687,8 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
 
     setIntakeError("");
 
-    const detected = autoDetectCourier(cleanNum);
-    // If scanning device or camera passes code, auto detect carrier partner
+    const detected = identification.courier || autoDetectCourier(cleanNum);
+    // Logically identify carrier from Consignment ID format & length unless explicitly overridden
     const chosenCourier = courierOverride
       ? (COURIER_MAP[courierOverride] || detected || COURIER_LIST[0])
       : (detected || (intakeCourier && COURIER_MAP[intakeCourier]) || COURIER_LIST[0]);
@@ -935,12 +940,12 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
         JSON.stringify({
           mode: "bulk",
           defaultStatus: intakeStatus,
-          defaultCourierId: intakeCourier || "auto",
+          defaultCourierId: "auto",
         })
       );
     } catch {}
     router.push("/scan");
-  }, [stopCameraStreamOnly, stagedConsignments, intakeStatus, intakeCourier, router]);
+  }, [stopCameraStreamOnly, stagedConsignments, intakeStatus, router]);
 
   // Check if returning from the dedicated /scan camera page with staged consignments for review
   useEffect(() => {
@@ -2155,7 +2160,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
     }
   };
 
-  // Bulk Export Feature: Download all tracked shipment data within a selected batch in ANY chosen file extension (.csv, .xlsx, .xls, .json, .tsv, .txt, .xml, or custom)
+  // Bulk Export Feature: Download all tracked shipment data within a selected batch in chosen file extension (.csv, .xlsx, .xls, .json, or .txt)
   const handleExportBatchCsv = (overrideBatchId?: string, overrideFormat?: string) => {
     const targetId = overrideBatchId || exportBatchTargetId || selectedBatchId || "all";
     const listToExport = activeShipments.filter((item) => {
@@ -2171,7 +2176,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
       return;
     }
 
-    const rawChosenExt = overrideFormat || (exportFileExtension === "custom" ? customExportExtension : exportFileExtension) || "csv";
+    const rawChosenExt = overrideFormat || exportFileExtension || "csv";
     const cleanExt = rawChosenExt.trim().replace(/^\.+/, "").toLowerCase() || "csv";
 
     const exportedAtIso = new Date().toISOString();
@@ -2236,35 +2241,6 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
-    } else if (cleanExt === "xml") {
-      const escapeXml = (v: string) =>
-        String(v ?? "")
-          .replace(/&/g, "&amp;")
-          .replace(/</g, "&lt;")
-          .replace(/>/g, "&gt;")
-          .replace(/"/g, "&quot;");
-      const xmlItems = structuredRows
-        .map(
-          (r) =>
-            `  <Consignment>\n` +
-            Object.entries(r)
-              .map(([k, val]) => `    <${k}>${escapeXml(String(val))}</${k}>`)
-              .join("\n") +
-            `\n  </Consignment>`
-        )
-        .join("\n");
-      const xmlContent = `<?xml version="1.0" encoding="UTF-8"?>\n<TrackFlowExport batch="${escapeXml(
-        batchObj ? batchObj.name : safeBatchSlug
-      )}" count="${structuredRows.length}">\n${xmlItems}\n</TrackFlowExport>`;
-      const blob = new Blob([xmlContent], { type: "application/xml;charset=utf-8;" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${fileBaseName}.xml`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
     } else if (cleanExt === "txt") {
       const headers = Object.keys(structuredRows[0]);
       const txtLines = [
@@ -2285,8 +2261,8 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
     } else {
-      // Default delimiter format: .csv (comma), .tsv (tab), or any custom extension requested by user
-      const delimiter = cleanExt === "tsv" ? "\t" : ",";
+      // Default delimiter format: .csv (comma)
+      const delimiter = ",";
       const headers = Object.keys(structuredRows[0]);
       const escapeDelimitedVal = (val: string | undefined) => {
         const str = String(val ?? "");
@@ -2303,12 +2279,11 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
             .join(delimiter)
         ),
       ];
-      const mimeType = cleanExt === "tsv" ? "text/tab-separated-values;charset=utf-8;" : "text/csv;charset=utf-8;";
-      const blob = new Blob([lines.join("\n")], { type: mimeType });
+      const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8;" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `${fileBaseName}.${cleanExt}`;
+      a.download = `${fileBaseName}.csv`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -3362,11 +3337,11 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                       </span>
                     </div>
                     <span className="rounded-md bg-indigo-100 dark:bg-indigo-950 px-2 py-0.5 text-[10px] font-mono font-bold text-indigo-700 dark:text-indigo-300 uppercase">
-                      .{exportFileExtension === "custom" ? customExportExtension || "csv" : exportFileExtension}
+                      .{exportFileExtension}
                     </span>
                   </div>
                   <p className="text-[11px] text-slate-600 dark:text-slate-400">
-                    Choose any batch and file extension (.csv, .xlsx, .xls, .json, .tsv, .txt, .xml, or custom) to download.
+                    Choose any batch and file extension (.csv, .xlsx, .xls, .json, or .txt) to download.
                   </p>
 
                   {/* Custom Styled Select Batch to Export Dropdown */}
@@ -3476,13 +3451,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                           ? "Excel 97-2004 (.xls)"
                           : exportFileExtension === "json"
                           ? "Structured JSON (.json)"
-                          : exportFileExtension === "tsv"
-                          ? "Tab-Separated (.tsv)"
-                          : exportFileExtension === "txt"
-                          ? "Plain Text Report (.txt)"
-                          : exportFileExtension === "xml"
-                          ? "XML Document (.xml)"
-                          : `Custom Extension (.${customExportExtension || "csv"})`}
+                          : "Plain Text Report (.txt)"}
                       </span>
                       <ChevronDown
                         className={`h-4 w-4 text-slate-400 shrink-0 ml-1 transition-transform ${
@@ -3504,10 +3473,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                               { ext: "xlsx", label: "Excel Workbook", badge: ".xlsx" },
                               { ext: "xls", label: "Excel Legacy", badge: ".xls" },
                               { ext: "json", label: "Structured JSON", badge: ".json" },
-                              { ext: "tsv", label: "Tab-Separated Values", badge: ".tsv" },
                               { ext: "txt", label: "Plain Text Report", badge: ".txt" },
-                              { ext: "xml", label: "XML Data Feed", badge: ".xml" },
-                              { ext: "custom", label: "Any Custom Extension...", badge: ".ext" },
                             ] as const
                           ).map((fmt) => (
                             <button
@@ -3534,23 +3500,6 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                     )}
                   </div>
 
-                  {exportFileExtension === "custom" && (
-                    <div className="flex items-center gap-2">
-                      <span className="text-[11px] font-bold text-slate-600 dark:text-slate-300">
-                        Extension:
-                      </span>
-                      <input
-                        type="text"
-                        value={customExportExtension}
-                        onChange={(e) =>
-                          setCustomExportExtension(e.target.value.replace(/[^a-zA-Z0-9]/g, ""))
-                        }
-                        placeholder="e.g. dat, log, csv"
-                        className="flex-1 rounded-xl border border-slate-200 bg-white px-2.5 py-1.5 font-mono text-xs font-bold text-slate-800 dark:border-slate-700 dark:bg-slate-900 dark:text-white focus:outline-none focus:border-indigo-500"
-                      />
-                    </div>
-                  )}
-
                   {batchCsvExportMsg && (
                     <div className="rounded-xl border border-emerald-300 bg-white dark:border-emerald-800 dark:bg-slate-900 px-3 py-1.5 text-[11px] font-bold text-emerald-700 dark:text-emerald-300 flex items-center gap-1.5">
                       <Check className="h-3.5 w-3.5 text-emerald-600 shrink-0" />
@@ -3566,7 +3515,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                   >
                     <Download className="h-3.5 w-3.5" />
                     <span>
-                      Download Batch (.{(exportFileExtension === "custom" ? customExportExtension || "csv" : exportFileExtension).toUpperCase()})
+                      Download Batch (.{exportFileExtension.toUpperCase()})
                     </span>
                   </button>
                 </div>
@@ -3948,11 +3897,11 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                     </span>
                   </div>
                   <span className="rounded-lg bg-indigo-100 dark:bg-indigo-950 px-2 py-0.5 text-[10px] font-mono font-bold text-indigo-800 dark:text-indigo-300 uppercase">
-                    .{exportFileExtension === "custom" ? customExportExtension || "csv" : exportFileExtension}
+                    .{exportFileExtension}
                   </span>
                 </div>
                 <p className="text-[11px] text-slate-600 dark:text-slate-400">
-                  Select any batch and choose your desired file extension (.csv, .xlsx, .xls, .json, .tsv, .txt, .xml, or custom).
+                  Select any batch and choose your desired file extension (.csv, .xlsx, .xls, .json, or .txt).
                 </p>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
@@ -4051,13 +4000,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                           ? "Excel Legacy (.xls)"
                           : exportFileExtension === "json"
                           ? "JSON (.json)"
-                          : exportFileExtension === "tsv"
-                          ? "TSV (.tsv)"
-                          : exportFileExtension === "txt"
-                          ? "Text (.txt)"
-                          : exportFileExtension === "xml"
-                          ? "XML (.xml)"
-                          : `Custom (.${customExportExtension || "csv"})`}
+                          : "Text (.txt)"}
                       </span>
                       <ChevronDown className="h-3.5 w-3.5 text-slate-400 shrink-0 ml-1" />
                     </button>
@@ -4075,10 +4018,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                               { ext: "xlsx", label: "Excel Workbook", badge: ".xlsx" },
                               { ext: "xls", label: "Excel 97-2004", badge: ".xls" },
                               { ext: "json", label: "Structured JSON", badge: ".json" },
-                              { ext: "tsv", label: "Tab-Separated", badge: ".tsv" },
                               { ext: "txt", label: "Plain Text", badge: ".txt" },
-                              { ext: "xml", label: "XML Data", badge: ".xml" },
-                              { ext: "custom", label: "Custom Extension...", badge: ".ext" },
                             ] as const
                           ).map((fmt) => (
                             <button
@@ -4106,23 +4046,6 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                   </div>
                 </div>
 
-                {exportFileExtension === "custom" && (
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-bold text-slate-600 dark:text-slate-300">
-                      Custom Extension:
-                    </span>
-                    <input
-                      type="text"
-                      value={customExportExtension}
-                      onChange={(e) =>
-                        setCustomExportExtension(e.target.value.replace(/[^a-zA-Z0-9]/g, ""))
-                      }
-                      placeholder="Enter extension (e.g. dat, log, csv)"
-                      className="flex-1 rounded-xl border border-slate-200 bg-white px-3 py-1.5 font-mono text-xs font-bold text-slate-800 dark:border-slate-700 dark:bg-slate-900 dark:text-white focus:outline-none focus:border-indigo-500"
-                    />
-                  </div>
-                )}
-
                 <button
                   type="button"
                   onClick={() => handleExportBatchCsv()}
@@ -4131,7 +4054,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                 >
                   <Download className="h-3.5 w-3.5" />
                   <span>
-                    Bulk Export as .{(exportFileExtension === "custom" ? customExportExtension || "csv" : exportFileExtension).toUpperCase()}
+                    Bulk Export as .{exportFileExtension.toUpperCase()}
                   </span>
                 </button>
                 {batchCsvExportMsg && (
@@ -4837,14 +4760,28 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                       <label className="text-xs font-black uppercase tracking-wider text-slate-700 dark:text-slate-200">
                         Consignment / AWB Number (Type manually or scan barcode device):
                       </label>
-                      {intakeAwb && (
-                        <div className="flex items-center gap-1.5 text-xs">
-                          <span className="text-[11px] text-slate-400">Detected Courier:</span>
-                          <span className="font-bold text-indigo-600 dark:text-indigo-400">
-                            {autoDetectCourier(intakeAwb)?.name || "Auto-Detecting"}
-                          </span>
-                        </div>
-                      )}
+                      {intakeAwb.trim() && (() => {
+                        const info = identifyAndValidateConsignment(intakeAwb);
+                        if (info.isValid && info.courier) {
+                          return (
+                            <div className="flex flex-wrap items-center gap-1.5 text-xs">
+                              <span className="rounded-md bg-emerald-100 dark:bg-emerald-950/80 px-2 py-0.5 text-[10px] font-extrabold text-emerald-700 dark:text-emerald-300">
+                                ✓ {info.formatLabel} ({info.length} chars)
+                              </span>
+                              <span className="font-bold text-indigo-600 dark:text-indigo-400">
+                                {info.courier.name}
+                              </span>
+                            </div>
+                          );
+                        }
+                        return (
+                          <div className="flex items-center gap-1.5 text-xs">
+                            <span className="rounded-md bg-amber-100 dark:bg-amber-950/80 px-2 py-0.5 text-[10px] font-bold text-amber-700 dark:text-amber-300">
+                              {info.length} chars • {info.formatLabel}
+                            </span>
+                          </div>
+                        );
+                      })()}
                     </div>
 
                     <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5 w-full">
@@ -4857,11 +4794,13 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                             const val = e.target.value.toUpperCase();
                             setIntakeAwb(val);
                             setIntakeError("");
-                            const detected = autoDetectCourier(val);
-                            if (detected) setIntakeCourier(detected.id);
+                            const identified = identifyAndValidateConsignment(val);
+                            if (identified.courier) {
+                              setIntakeCourier(identified.courier.id);
+                            }
                           }}
                           onKeyDown={handleIntakeKeyDown}
-                          placeholder="Enter Consignment / AWB..."
+                          placeholder="Enter Consignment / AWB (e.g. EK123456789IN, B4000211866)..."
                           className="w-full rounded-xl border border-slate-300 bg-white px-4 py-2.5 font-mono text-sm font-black uppercase tracking-wider text-slate-900 focus:border-indigo-600 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
                         />
                       </div>

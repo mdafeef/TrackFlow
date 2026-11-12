@@ -27,10 +27,9 @@ import {
 } from "@zxing/library";
 import jsQR from "jsqr";
 import {
-  autoDetectCourier,
   COURIER_LIST,
   COURIER_MAP,
-  validateConsignmentFormat,
+  identifyAndValidateConsignment,
 } from "@/lib/couriers";
 import type { BulkShipment } from "@/components/BulkDashboard";
 
@@ -138,6 +137,8 @@ export function CameraScanClient() {
   const [cameraScanSuccess, setCameraScanSuccess] = useState<{
     code: string;
     carrier: string;
+    formatLabel: string;
+    length: number;
   } | null>(null);
 
   // Manual zoom control only (no auto-zoom)
@@ -173,19 +174,6 @@ export function CameraScanClient() {
   });
   const [isStatusMenuOpen, setIsStatusMenuOpen] = useState<boolean>(false);
 
-  const [defaultCourierId] = useState<string>(() => {
-    if (typeof window !== "undefined") {
-      try {
-        const rawCtx = sessionStorage.getItem(SCAN_CONTEXT_KEY);
-        if (rawCtx) {
-          const parsed = JSON.parse(rawCtx);
-          if (parsed.defaultCourierId) return parsed.defaultCourierId;
-        }
-      } catch {}
-    }
-    return "auto";
-  });
-
   // Staged Consignments scanned during session
   const [stagedItems, setStagedItems] = useState<BulkShipment[]>(() => {
     if (typeof window !== "undefined") {
@@ -206,9 +194,51 @@ export function CameraScanClient() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const cameraStreamRef = useRef<MediaStream | null>(null);
   const scanCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+
+  // Refs synced with UI state so the camera loop never restarts when buttons are clicked
+  const guideModeRef = useRef<"barcode" | "qr" | "both">(cameraGuideMode);
+  const zoomLevelRef = useRef<number>(cameraZoomLevel);
+  const defaultStatusRef = useRef<StatusOption>(defaultStatus);
+  const isSoundEnabledRef = useRef<boolean>(isSoundEnabled);
+
+  useEffect(() => {
+    guideModeRef.current = cameraGuideMode;
+  }, [cameraGuideMode]);
+
+  useEffect(() => {
+    zoomLevelRef.current = cameraZoomLevel;
+  }, [cameraZoomLevel]);
+
+  useEffect(() => {
+    defaultStatusRef.current = defaultStatus;
+  }, [defaultStatus]);
+
+  useEffect(() => {
+    isSoundEnabledRef.current = isSoundEnabled;
+  }, [isSoundEnabled]);
+
+  // Multi-frame barcode stability & cooldown refs to prevent partial misreads and multi-scans
+  const scanCooldownUntilRef = useRef<number>(0);
   const lastScannedRef = useRef<{ code: string; timestamp: number }>({
     code: "",
     timestamp: 0,
+  });
+  const pendingCandidateRef = useRef<{
+    code: string;
+    count: number;
+    firstSeen: number;
+    lastSeen: number;
+  }>({
+    code: "",
+    count: 0,
+    firstSeen: 0,
+    lastSeen: 0,
+  });
+  const invalidCandidateRef = useRef<{ code: string; count: number; lastSeen: number }>({
+    code: "",
+    count: 0,
+    lastSeen: 0,
   });
   const scanSuccessTimerRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -232,6 +262,7 @@ export function CameraScanClient() {
   const applyCameraZoom = useCallback((nextZoom: number) => {
     const clamped = Number(Math.min(2.5, Math.max(1.0, nextZoom)).toFixed(2));
     setCameraZoomLevel(clamped);
+    zoomLevelRef.current = clamped;
 
     const stream = cameraStreamRef.current;
     if (!stream) return;
@@ -259,50 +290,59 @@ export function CameraScanClient() {
       cameraStreamRef.current.getTracks().forEach((t) => t.stop());
       cameraStreamRef.current = null;
     }
+    if (audioCtxRef.current) {
+      audioCtxRef.current.close().catch(() => {});
+      audioCtxRef.current = null;
+    }
   }, []);
 
-  // Audio beep feedback on scan (success chime or error tone)
-  const playScanBeep = useCallback(
-    (isSuccess: boolean = true) => {
-      if (!isSoundEnabled || typeof window === "undefined") return;
-      try {
-        const AudioCtx =
-          window.AudioContext ||
-          (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-        if (!AudioCtx) return;
-        const ctx = new AudioCtx();
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
+  // Reusable AudioContext beep feedback on scan (never exhausts browser AudioContext limit)
+  const playScanBeep = useCallback((isSuccess: boolean = true) => {
+    if (!isSoundEnabledRef.current || typeof window === "undefined") return;
+    try {
+      const AudioCtx =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      if (!AudioCtx) return;
 
-        if (isSuccess) {
-          osc.type = "sine";
-          osc.frequency.setValueAtTime(880, ctx.currentTime);
-          osc.frequency.exponentialRampToValueAtTime(1320, ctx.currentTime + 0.09);
-          gain.gain.setValueAtTime(0.12, ctx.currentTime);
-          gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.14);
-          osc.connect(gain);
-          gain.connect(ctx.destination);
-          osc.start();
-          osc.stop(ctx.currentTime + 0.15);
-        } else {
-          osc.type = "sawtooth";
-          osc.frequency.setValueAtTime(220, ctx.currentTime);
-          osc.frequency.setValueAtTime(160, ctx.currentTime + 0.12);
-          gain.gain.setValueAtTime(0.15, ctx.currentTime);
-          gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.24);
-          osc.connect(gain);
-          gain.connect(ctx.destination);
-          osc.start();
-          osc.stop(ctx.currentTime + 0.25);
-        }
-      } catch {
-        // ignore audio errors
+      if (!audioCtxRef.current || audioCtxRef.current.state === "closed") {
+        audioCtxRef.current = new AudioCtx();
       }
-    },
-    [isSoundEnabled]
-  );
+      const ctx = audioCtxRef.current;
+      if (ctx.state === "suspended") {
+        ctx.resume().catch(() => {});
+      }
 
-  // Extract candidate code from barcode or QR payload (while preserving raw text if invalid so format validator can reject it)
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+
+      if (isSuccess) {
+        osc.type = "sine";
+        osc.frequency.setValueAtTime(880, ctx.currentTime);
+        osc.frequency.exponentialRampToValueAtTime(1320, ctx.currentTime + 0.09);
+        gain.gain.setValueAtTime(0.12, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.14);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start();
+        osc.stop(ctx.currentTime + 0.15);
+      } else {
+        osc.type = "sawtooth";
+        osc.frequency.setValueAtTime(220, ctx.currentTime);
+        osc.frequency.setValueAtTime(160, ctx.currentTime + 0.12);
+        gain.gain.setValueAtTime(0.15, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.24);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start();
+        osc.stop(ctx.currentTime + 0.25);
+      }
+    } catch {
+      // ignore audio errors
+    }
+  }, []);
+
+  // Extract candidate code from barcode or QR payload
   const extractCandidateScannedCode = useCallback((rawValue: string): string => {
     const trimmed = rawValue.trim();
     if (!trimmed) return "";
@@ -322,7 +362,6 @@ export function CameraScanClient() {
         if (lastSeg && /^[A-Z0-9-]{8,24}$/i.test(lastSeg)) {
           return lastSeg.toUpperCase();
         }
-        // Return raw URL so format validator rejects non-tracking URLs with an explicit error
         return trimmed;
       } catch {
         return trimmed;
@@ -372,60 +411,57 @@ export function CameraScanClient() {
     return map[status];
   };
 
-  // Stage a scanned consignment with strict format validation
+  // Stage a confirmed scanned consignment with logical format, length & carrier auto-identification
   const handleStageScannedCode = useCallback(
     (candidateCode: string) => {
       const rawTrimmed = candidateCode.trim();
       if (!rawTrimmed) return;
 
-      // STRICT FORMAT VALIDATION: Only allow valid consignment IDs (e.g. EK123456789IN or 8-24 alphanumeric AWB)
-      const validation = validateConsignmentFormat(rawTrimmed);
-      if (!validation.isValid) {
+      const identification = identifyAndValidateConsignment(rawTrimmed);
+      if (!identification.isValid) {
         playScanBeep(false);
         const previewCode =
           rawTrimmed.length > 26 ? `${rawTrimmed.slice(0, 24)}...` : rawTrimmed.toUpperCase();
         setFormatError({
           code: previewCode,
           message:
-            validation.error ||
-            "Invalid Consignment ID format. Expected 8–24 alphanumeric characters (e.g. EK123456789IN).",
+            identification.error ||
+            "Invalid Consignment ID format. Expected 8–22 alphanumeric characters (e.g. EK123456789IN).",
         });
         if (formatErrorTimerRef.current) clearTimeout(formatErrorTimerRef.current);
         formatErrorTimerRef.current = setTimeout(() => {
           setFormatError(null);
-        }, 3200);
+        }, 3000);
         return;
       }
 
-      const cleanNum = validation.normalized;
+      const cleanNum = identification.normalized;
       setFormatError(null);
 
-      const detected = autoDetectCourier(cleanNum);
-      const chosenCourier =
-        defaultCourierId !== "auto" && COURIER_MAP[defaultCourierId]
-          ? COURIER_MAP[defaultCourierId]
-          : detected || COURIER_MAP.speedpost;
+      // Always logically auto-identify carrier from the Consignment ID format & length
+      const chosenCourier = identification.courier || COURIER_MAP.speedpost;
+      const activeStatus = defaultStatusRef.current;
 
       setStagedItems((prev) => {
         if (prev.some((s) => s.trackingNumber === cleanNum)) {
-          setDuplicateAlert(`Already scanned: ${cleanNum}`);
-          setTimeout(() => setDuplicateAlert(null), 2200);
+          setDuplicateAlert(`Already scanned: ${cleanNum} (${chosenCourier.shortName})`);
+          setTimeout(() => setDuplicateAlert(null), 2000);
           return prev;
         }
 
         const dest = "Destination Hub";
-        const meta = getLogicalStatusMeta(defaultStatus, dest);
+        const meta = getLogicalStatusMeta(activeStatus, dest);
 
         const newItem: BulkShipment = {
           id: `staged-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
           trackingNumber: cleanNum,
           courierId: chosenCourier.id,
           courierName: chosenCourier.name,
-          status: defaultStatus,
-          statusText: meta.statusText,
+          status: activeStatus,
+          statusText: `${meta.statusText} • ${identification.formatLabel}`,
           origin: "Origin Booking Hub",
           destination: dest,
-          articleType: defaultStatus === "booked" ? "Booked Consignment" : "Registered Consignment",
+          articleType: activeStatus === "booked" ? "Booked Consignment" : "Registered Consignment",
           weight: "250 g",
           lastUpdated: "Scanned Just Now",
           lastLocation: meta.lastLocation,
@@ -434,17 +470,19 @@ export function CameraScanClient() {
         playScanBeep(true);
         setCameraScanSuccess({
           code: cleanNum,
-          carrier: chosenCourier.shortName || chosenCourier.name,
+          carrier: chosenCourier.name,
+          formatLabel: identification.formatLabel,
+          length: identification.length,
         });
         if (scanSuccessTimerRef.current) clearTimeout(scanSuccessTimerRef.current);
         scanSuccessTimerRef.current = setTimeout(() => {
           setCameraScanSuccess(null);
-        }, 1350);
+        }, 1250);
 
         return [newItem, ...prev];
       });
     },
-    [defaultCourierId, defaultStatus, playScanBeep]
+    [playScanBeep]
   );
 
   // Touch-to-Focus handler inside the Fixed Square Camera Space
@@ -505,7 +543,6 @@ export function CameraScanClient() {
                 advanced: [advancedConstraints as MediaTrackConstraintSet],
               })
               .then(() => {
-                // Restore continuous focus after single-shot lock if supported
                 if (
                   Array.isArray(caps.focusMode) &&
                   caps.focusMode.includes("continuous") &&
@@ -529,146 +566,355 @@ export function CameraScanClient() {
     }
   };
 
-  // Camera stream & STRICT Guide-Box-Only Decoder Loop mapped to the Fixed Square Camera Space
+  // Single Persistent Camera Stream & Non-Overlapping Sequential Decoder Loop
   useEffect(() => {
     let isCancelled = false;
-    let scanIntervalId: NodeJS.Timeout | null = null;
+    let loopTimerId: NodeJS.Timeout | null = null;
+    let isDecoding = false;
 
-    const zxingReader = new MultiFormatReader();
-    const hints = new Map();
-    const formats =
-      cameraGuideMode === "barcode"
-        ? [
-            BarcodeFormat.CODE_128,
-            BarcodeFormat.CODE_39,
-            BarcodeFormat.CODE_93,
-            BarcodeFormat.CODABAR,
-            BarcodeFormat.EAN_13,
-            BarcodeFormat.EAN_8,
-            BarcodeFormat.ITF,
-            BarcodeFormat.UPC_A,
-            BarcodeFormat.UPC_E,
-          ]
-        : cameraGuideMode === "qr"
-        ? [BarcodeFormat.QR_CODE, BarcodeFormat.DATA_MATRIX, BarcodeFormat.PDF_417, BarcodeFormat.AZTEC]
-        : [
-            BarcodeFormat.QR_CODE,
-            BarcodeFormat.CODE_128,
-            BarcodeFormat.CODE_39,
-            BarcodeFormat.CODE_93,
-            BarcodeFormat.CODABAR,
-            BarcodeFormat.EAN_13,
-            BarcodeFormat.EAN_8,
-            BarcodeFormat.ITF,
-            BarcodeFormat.UPC_A,
-            BarcodeFormat.UPC_E,
-            BarcodeFormat.DATA_MATRIX,
-            BarcodeFormat.PDF_417,
-            BarcodeFormat.AZTEC,
-          ];
-    hints.set(DecodeHintType.POSSIBLE_FORMATS, formats);
-    hints.set(DecodeHintType.TRY_HARDER, true);
-    zxingReader.setHints(hints);
+    // Initialize ZXing readers with strict logistics formats (excluding noisy EAN-8 / UPC-E / Codabar partial misreads)
+    const zxingBarcodeReader = new MultiFormatReader();
+    const barcodeHints = new Map();
+    barcodeHints.set(DecodeHintType.POSSIBLE_FORMATS, [
+      BarcodeFormat.CODE_128,
+      BarcodeFormat.CODE_39,
+      BarcodeFormat.CODE_93,
+      BarcodeFormat.EAN_13,
+      BarcodeFormat.ITF,
+    ]);
+    barcodeHints.set(DecodeHintType.TRY_HARDER, true);
+    zxingBarcodeReader.setHints(barcodeHints);
 
+    const zxingQrReader = new MultiFormatReader();
+    const qrHints = new Map();
+    qrHints.set(DecodeHintType.POSSIBLE_FORMATS, [
+      BarcodeFormat.QR_CODE,
+      BarcodeFormat.DATA_MATRIX,
+      BarcodeFormat.PDF_417,
+      BarcodeFormat.AZTEC,
+    ]);
+    qrHints.set(DecodeHintType.TRY_HARDER, true);
+    zxingQrReader.setHints(qrHints);
+
+    const zxingBothReader = new MultiFormatReader();
+    const bothHints = new Map();
+    bothHints.set(DecodeHintType.POSSIBLE_FORMATS, [
+      BarcodeFormat.QR_CODE,
+      BarcodeFormat.CODE_128,
+      BarcodeFormat.CODE_39,
+      BarcodeFormat.CODE_93,
+      BarcodeFormat.EAN_13,
+      BarcodeFormat.ITF,
+      BarcodeFormat.DATA_MATRIX,
+      BarcodeFormat.PDF_417,
+      BarcodeFormat.AZTEC,
+    ]);
+    bothHints.set(DecodeHintType.TRY_HARDER, true);
+    zxingBothReader.setHints(bothHints);
+
+    // Native BarcodeDetector with format & value return
     let nativeDetector: {
-      detect: (source: HTMLCanvasElement) => Promise<Array<{ rawValue?: string }>>;
+      detect: (
+        source: HTMLCanvasElement
+      ) => Promise<Array<{ rawValue?: string; format?: string }>>;
     } | null = null;
+
     if (typeof window !== "undefined" && "BarcodeDetector" in window) {
       try {
         const NativeBarcodeDetector = (window as unknown as {
           BarcodeDetector: new (opts: { formats: string[] }) => {
-            detect: (source: HTMLCanvasElement) => Promise<Array<{ rawValue?: string }>>;
+            detect: (
+              source: HTMLCanvasElement
+            ) => Promise<Array<{ rawValue?: string; format?: string }>>;
           };
         }).BarcodeDetector;
-        const nativeFormats =
-          cameraGuideMode === "barcode"
-            ? ["code_128", "code_39", "code_93", "codabar", "ean_13", "ean_8", "itf", "upc_a", "upc_e"]
-            : cameraGuideMode === "qr"
-            ? ["qr_code", "data_matrix", "pdf417", "aztec"]
-            : [
-                "qr_code",
-                "code_128",
-                "code_39",
-                "code_93",
-                "codabar",
-                "ean_13",
-                "ean_8",
-                "itf",
-                "upc_a",
-                "upc_e",
-                "data_matrix",
-                "pdf417",
-                "aztec",
-              ];
-        nativeDetector = new NativeBarcodeDetector({ formats: nativeFormats });
+        nativeDetector = new NativeBarcodeDetector({
+          formats: [
+            "qr_code",
+            "code_128",
+            "code_39",
+            "code_93",
+            "ean_13",
+            "itf",
+            "data_matrix",
+            "pdf417",
+            "aztec",
+          ],
+        });
       } catch {
         nativeDetector = null;
       }
     }
 
-    const onDetectedRaw = (rawVal: string): boolean => {
+    /**
+     * Process a decoded raw value with:
+     * 1) Post-scan cooldown lock (prevents partial edge reads while moving camera away)
+     * 2) 2-frame consensus for 1D barcodes (prevents motion-blur partial numbers from scanning multiple different things)
+     * 3) Logical Consignment ID format, length & carrier identification
+     */
+    const processDecodedCandidate = (rawVal: string, is2DQr: boolean): boolean => {
+      const now = Date.now();
+
+      // 1. Respect post-scan cooldown window so moving the camera away doesn't scan partial bars
+      if (now < scanCooldownUntilRef.current) {
+        return false;
+      }
+
       const candidate = extractCandidateScannedCode(rawVal);
       if (!candidate) return false;
 
-      const now = Date.now();
+      // 2. Ignore same barcode within 2.8 seconds of last staged scan
       if (
         lastScannedRef.current.code === candidate &&
-        now - lastScannedRef.current.timestamp < 2200
+        now - lastScannedRef.current.timestamp < 2800
       ) {
         return true;
       }
-      lastScannedRef.current = { code: candidate, timestamp: now };
-      handleStageScannedCode(candidate);
+
+      // 3. Check format & length validity first
+      const identification = identifyAndValidateConsignment(candidate);
+
+      if (!identification.isValid) {
+        // Require 2 consecutive frames of the same invalid code within 900ms before showing format error
+        // (so transient motion-blurred 1D frames don't spam false error popups)
+        const inv = invalidCandidateRef.current;
+        if (inv.code === candidate && now - inv.lastSeen < 900) {
+          inv.count += 1;
+          inv.lastSeen = now;
+        } else {
+          invalidCandidateRef.current = { code: candidate, count: 1, lastSeen: now };
+        }
+
+        if (invalidCandidateRef.current.count >= 2) {
+          invalidCandidateRef.current.count = 0;
+          scanCooldownUntilRef.current = now + 950;
+          handleStageScannedCode(candidate);
+          return true;
+        }
+        return false;
+      }
+
+      const normalizedCode = identification.normalized;
+
+      // 4. For 1D barcodes, require 2 consistent frame reads within 850ms to eliminate false partial reads
+      if (!is2DQr) {
+        const pending = pendingCandidateRef.current;
+        if (pending.code === normalizedCode && now - pending.lastSeen < 850) {
+          pending.count += 1;
+          pending.lastSeen = now;
+        } else {
+          pendingCandidateRef.current = {
+            code: normalizedCode,
+            count: 1,
+            firstSeen: now,
+            lastSeen: now,
+          };
+          return false;
+        }
+
+        if (pendingCandidateRef.current.count < 2) {
+          return false;
+        }
+      }
+
+      // Confirmed valid scan! Lock scanner for 1.25s so moving away doesn't trigger false secondary scans
+      pendingCandidateRef.current = { code: "", count: 0, firstSeen: 0, lastSeen: 0 };
+      invalidCandidateRef.current = { code: "", count: 0, lastSeen: 0 };
+      lastScannedRef.current = { code: normalizedCode, timestamp: now };
+      scanCooldownUntilRef.current = now + 1250;
+
+      handleStageScannedCode(normalizedCode);
       return true;
     };
 
     const tryDecodeCanvas = async (
       canvas: HTMLCanvasElement,
-      ctx: CanvasRenderingContext2D
+      ctx: CanvasRenderingContext2D,
+      activeGuideMode: "barcode" | "qr" | "both"
     ): Promise<boolean> => {
       const w = canvas.width;
       const h = canvas.height;
 
-      // 1. Native BarcodeDetector on strictly cropped Guide ROI
+      // 1. Native BarcodeDetector with 250ms timeout guard so it can never hang the loop
       if (nativeDetector) {
         try {
-          const detected = await nativeDetector.detect(canvas);
-          if (detected && detected.length > 0 && detected[0].rawValue) {
-            if (onDetectedRaw(detected[0].rawValue)) return true;
+          const detectPromise = nativeDetector.detect(canvas);
+          const timeoutPromise = new Promise<null>((resolve) =>
+            setTimeout(() => resolve(null), 250)
+          );
+          const detected = await Promise.race([detectPromise, timeoutPromise]);
+          if (detected && detected.length > 0) {
+            for (const item of detected) {
+              if (!item.rawValue) continue;
+              const fmt = (item.format || "").toLowerCase();
+              const is2D =
+                fmt === "qr_code" ||
+                fmt === "data_matrix" ||
+                fmt === "pdf417" ||
+                fmt === "aztec";
+              if (activeGuideMode === "barcode" && is2D) continue;
+              if (activeGuideMode === "qr" && !is2D && fmt !== "") continue;
+
+              if (processDecodedCandidate(item.rawValue, is2D)) {
+                return true;
+              }
+            }
           }
         } catch {
-          // continue
+          // continue to software decoders
         }
       }
 
       // 2. jsQR for 2D QR codes inside Guide ROI
-      if (cameraGuideMode !== "barcode") {
+      if (activeGuideMode !== "barcode") {
         try {
           const imageData = ctx.getImageData(0, 0, w, h);
           const qrResult = jsQR(imageData.data, w, h, {
             inversionAttempts: "attemptBoth",
           });
           if (qrResult && qrResult.data) {
-            if (onDetectedRaw(qrResult.data)) return true;
+            if (processDecodedCandidate(qrResult.data, true)) {
+              return true;
+            }
           }
         } catch {
           // continue
         }
       }
 
-      // 3. ZXing MultiFormatReader inside Guide ROI
+      // 3. ZXing MultiFormatReader inside Guide ROI (always reset in finally)
+      const activeReader =
+        activeGuideMode === "barcode"
+          ? zxingBarcodeReader
+          : activeGuideMode === "qr"
+          ? zxingQrReader
+          : zxingBothReader;
+
       try {
         const luminanceSource = new HTMLCanvasElementLuminanceSource(canvas);
         const binaryBitmap = new BinaryBitmap(new HybridBinarizer(luminanceSource));
-        const result = zxingReader.decodeWithState(binaryBitmap);
+        const result = activeReader.decodeWithState(binaryBitmap);
         if (result && result.getText()) {
-          if (onDetectedRaw(result.getText())) return true;
+          const zFmt = result.getBarcodeFormat();
+          const is2D =
+            zFmt === BarcodeFormat.QR_CODE ||
+            zFmt === BarcodeFormat.DATA_MATRIX ||
+            zFmt === BarcodeFormat.PDF_417 ||
+            zFmt === BarcodeFormat.AZTEC;
+          if (processDecodedCandidate(result.getText(), is2D)) {
+            return true;
+          }
         }
       } catch {
-        // continue
+        // normal when no barcode in frame
+      } finally {
+        try {
+          activeReader.reset();
+        } catch {}
       }
 
       return false;
+    };
+
+    const scheduleNextTick = (delayMs: number = 130) => {
+      if (isCancelled) return;
+      loopTimerId = setTimeout(runDecodeTick, delayMs);
+    };
+
+    const runDecodeTick = async () => {
+      if (isCancelled) return;
+      if (isDecoding) {
+        scheduleNextTick(130);
+        return;
+      }
+
+      isDecoding = true;
+      try {
+        const video = videoRef.current;
+        const canvas = scanCanvasRef.current;
+        if (!video || !canvas) {
+          scheduleNextTick(160);
+          return;
+        }
+
+        // Auto-recover if mobile browser paused the video element
+        if (video.paused && video.srcObject) {
+          video.play().catch(() => {});
+        }
+
+        if (video.readyState < 2 || video.videoWidth === 0 || video.videoHeight === 0) {
+          scheduleNextTick(160);
+          return;
+        }
+
+        // Skip heavy pixel work during post-scan cooldown
+        if (Date.now() < scanCooldownUntilRef.current) {
+          scheduleNextTick(140);
+          return;
+        }
+
+        const vw = video.videoWidth;
+        const vh = video.videoHeight;
+        const squareSide = Math.min(vw, vh);
+
+        const activeGuideMode = guideModeRef.current;
+        let roiWidthRatio = 0.82;
+        let roiHeightRatio = 0.68;
+        if (activeGuideMode === "barcode") {
+          roiWidthRatio = 0.84;
+          roiHeightRatio = 0.38;
+        } else if (activeGuideMode === "qr") {
+          roiWidthRatio = 0.68;
+          roiHeightRatio = 0.68;
+        }
+
+        const effectiveDigitalZoom = hwZoomSupportedRef.current.supported
+          ? 1.0
+          : zoomLevelRef.current;
+
+        const cropW = Math.max(
+          64,
+          Math.floor((squareSide * roiWidthRatio) / effectiveDigitalZoom)
+        );
+        const cropH = Math.max(
+          64,
+          Math.floor((squareSide * roiHeightRatio) / effectiveDigitalZoom)
+        );
+        const cropX = Math.max(0, Math.floor((vw - cropW) / 2));
+        const cropY = Math.max(0, Math.floor((vh - cropH) / 2));
+
+        const maxTargetDim = 680;
+        const scale = Math.min(1.5, maxTargetDim / Math.max(cropW, cropH));
+        const targetW = Math.max(64, Math.floor(cropW * scale));
+        const targetH = Math.max(64, Math.floor(cropH * scale));
+
+        if (canvas.width !== targetW) canvas.width = targetW;
+        if (canvas.height !== targetH) canvas.height = targetH;
+
+        const ctx = canvas.getContext("2d", { willReadFrequently: true });
+        if (!ctx) {
+          scheduleNextTick(150);
+          return;
+        }
+
+        // Draw ONLY the Guide Box ROI from the square camera space
+        ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, targetW, targetH);
+
+        // PASS 1: Standard decode on the Guide Box ROI
+        const decodedPass1 = await tryDecodeCanvas(canvas, ctx, activeGuideMode);
+        if (!decodedPass1) {
+          // PASS 2: Enhance contrast & sharpness for wrinkled / damaged labels inside Guide Box
+          const { hasLabelCandidate } = enhanceDamagedLabelROI(ctx, targetW, targetH);
+          if (hasLabelCandidate) {
+            await tryDecodeCanvas(canvas, ctx, activeGuideMode);
+          }
+        }
+      } catch {
+        // Ensure any unexpected frame error never stops future scans
+      } finally {
+        isDecoding = false;
+        scheduleNextTick(120);
+      }
     };
 
     const startCamera = async () => {
@@ -731,69 +977,7 @@ export function CameraScanClient() {
           scanCanvasRef.current = document.createElement("canvas");
         }
 
-        scanIntervalId = setInterval(async () => {
-          if (isCancelled || !videoRef.current || !scanCanvasRef.current) return;
-          const video = videoRef.current;
-          if (video.readyState < 2 || video.videoWidth === 0 || video.videoHeight === 0) return;
-
-          const vw = video.videoWidth;
-          const vh = video.videoHeight;
-
-          // Because the video is displayed with object-cover inside a 1:1 fixed square frame,
-          // first determine the center square of the video stream:
-          const squareSide = Math.min(vw, vh);
-
-          // Next, strictly crop to the active guide box inside that square frame:
-          let roiWidthRatio = 0.82;
-          let roiHeightRatio = 0.68;
-          if (cameraGuideMode === "barcode") {
-            roiWidthRatio = 0.84;
-            roiHeightRatio = 0.38;
-          } else if (cameraGuideMode === "qr") {
-            roiWidthRatio = 0.68;
-            roiHeightRatio = 0.68;
-          }
-
-          const effectiveDigitalZoom = hwZoomSupportedRef.current.supported
-            ? 1.0
-            : cameraZoomLevel;
-
-          const cropW = Math.max(
-            64,
-            Math.floor((squareSide * roiWidthRatio) / effectiveDigitalZoom)
-          );
-          const cropH = Math.max(
-            64,
-            Math.floor((squareSide * roiHeightRatio) / effectiveDigitalZoom)
-          );
-          const cropX = Math.max(0, Math.floor((vw - cropW) / 2));
-          const cropY = Math.max(0, Math.floor((vh - cropH) / 2));
-
-          const canvas = scanCanvasRef.current;
-          const maxTargetDim = 680;
-          const scale = Math.min(1.5, maxTargetDim / Math.max(cropW, cropH));
-          const targetW = Math.max(64, Math.floor(cropW * scale));
-          const targetH = Math.max(64, Math.floor(cropH * scale));
-
-          if (canvas.width !== targetW) canvas.width = targetW;
-          if (canvas.height !== targetH) canvas.height = targetH;
-
-          const ctx = canvas.getContext("2d", { willReadFrequently: true });
-          if (!ctx) return;
-
-          // Draw ONLY the Guide Box ROI from the square camera space
-          ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, targetW, targetH);
-
-          // PASS 1: Standard decode on the Guide Box ROI
-          const decodedPass1 = await tryDecodeCanvas(canvas, ctx);
-          if (decodedPass1) return;
-
-          // PASS 2: Enhance contrast & sharpness for wrinkled / damaged labels inside Guide Box
-          const { hasLabelCandidate } = enhanceDamagedLabelROI(ctx, targetW, targetH);
-          if (hasLabelCandidate) {
-            await tryDecodeCanvas(canvas, ctx);
-          }
-        }, 180);
+        scheduleNextTick(120);
       } catch {
         if (!isCancelled) {
           setCameraError("Camera permission not granted or camera unavailable on this device.");
@@ -805,9 +989,9 @@ export function CameraScanClient() {
 
     return () => {
       isCancelled = true;
-      if (scanIntervalId) clearInterval(scanIntervalId);
+      if (loopTimerId) clearTimeout(loopTimerId);
     };
-  }, [cameraGuideMode, cameraZoomLevel, extractCandidateScannedCode, handleStageScannedCode]);
+  }, [extractCandidateScannedCode, handleStageScannedCode]);
 
   // Cleanup camera tracks on unmount
   useEffect(() => {
@@ -1185,17 +1369,20 @@ export function CameraScanClient() {
               </div>
             )}
 
-            {/* Quick Success Checkmark Overlay */}
+            {/* Quick Success Checkmark Overlay with Auto-Identified Carrier & Format */}
             {cameraScanSuccess && (
-              <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-slate-950/70 backdrop-blur-[2px] animate-in zoom-in-95 duration-150 pointer-events-none">
+              <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-slate-950/75 backdrop-blur-[2px] animate-in zoom-in-95 duration-150 pointer-events-none px-4 text-center">
                 <div className="flex h-14 w-14 items-center justify-center rounded-full bg-emerald-500 text-white shadow-xl shadow-emerald-500/40 ring-4 ring-emerald-400/30">
                   <Check className="h-8 w-8 stroke-[3.5]" />
                 </div>
                 <div className="mt-2.5 rounded-full bg-emerald-500 px-3.5 py-1 text-xs font-black tracking-wider text-white font-mono shadow-lg">
                   ✓ {cameraScanSuccess.code}
                 </div>
-                <div className="mt-1 text-[11px] font-bold text-emerald-300">
+                <div className="mt-1.5 text-xs font-extrabold text-emerald-300">
                   {cameraScanSuccess.carrier}
+                </div>
+                <div className="mt-0.5 text-[10px] font-semibold text-slate-300">
+                  {cameraScanSuccess.formatLabel} • {cameraScanSuccess.length} chars
                 </div>
               </div>
             )}
@@ -1248,15 +1435,18 @@ export function CameraScanClient() {
                   <span className="font-mono font-black text-white">
                     {stagedItems[0].trackingNumber}
                   </span>
-                  <span className="text-indigo-400 font-semibold ml-1.5">
+                  <span className="text-emerald-400 font-bold ml-1.5">
                     • {stagedItems[0].courierName}
+                  </span>
+                  <span className="text-slate-400 text-[10px] font-mono ml-1.5">
+                    ({stagedItems[0].trackingNumber.length} chars)
                   </span>
                 </div>
               </div>
             ) : (
               <span className="text-[11px] text-slate-400 flex items-center gap-1.5 truncate">
                 <Focus className="h-3.5 w-3.5 text-indigo-400 shrink-0" />
-                <span>Tap camera to focus • Only valid Consignment IDs accepted</span>
+                <span>Auto-identifies carrier, format &amp; length on scan</span>
               </span>
             )}
 
@@ -1284,9 +1474,14 @@ export function CameraScanClient() {
                   key={item.id}
                   className="py-1.5 flex items-center justify-between gap-2 text-xs"
                 >
-                  <span className="font-mono font-black text-indigo-400 truncate">
-                    {item.trackingNumber}
-                  </span>
+                  <div className="min-w-0 truncate">
+                    <span className="font-mono font-black text-indigo-400">
+                      {item.trackingNumber}
+                    </span>
+                    <span className="ml-1.5 text-[10px] font-mono text-slate-500">
+                      ({item.trackingNumber.length}c)
+                    </span>
+                  </div>
 
                   <div className="flex items-center gap-1.5 shrink-0">
                     <select
