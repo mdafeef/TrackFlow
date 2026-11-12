@@ -55,7 +55,7 @@ import {
   HybridBinarizer,
 } from "@zxing/library";
 import jsQR from "jsqr";
-import { autoDetectCourier, COURIER_LIST, COURIER_MAP } from "@/lib/couriers";
+import { autoDetectCourier, COURIER_LIST, COURIER_MAP, validateConsignmentFormat } from "@/lib/couriers";
 
 export interface BulkShipment {
   id: string;
@@ -340,7 +340,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
   const intakeCourierSearchRef = useRef<HTMLInputElement | null>(null);
   const [intakeRecipient, setIntakeRecipient] = useState("");
   const [intakeDestination, setIntakeDestination] = useState("");
-  const [intakeStatus, setIntakeStatus] = useState<"booked" | "in_transit" | "out_for_delivery" | "delivered" | "returned">("in_transit");
+  const [intakeStatus, setIntakeStatus] = useState<"booked" | "in_transit" | "out_for_delivery" | "delivered" | "returned">("booked");
   const [isIntakeStatusDropdownOpen, setIsIntakeStatusDropdownOpen] = useState(false);
   const [intakeReturnReason, setIntakeReturnReason] = useState("");
   const [intakeError, setIntakeError] = useState("");
@@ -662,11 +662,17 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
     returnReasonOverride?: string,
     scanSource: "manual" | "camera" = "manual"
   ) => {
-    const cleanNum = awbToStage.trim().toUpperCase();
-    if (!cleanNum || cleanNum.length < 4) {
-      setIntakeError("Please enter or scan a valid consignment / AWB number (min 4 characters).");
+    const validation = validateConsignmentFormat(awbToStage);
+    if (!validation.isValid) {
+      setIntakeError(
+        validation.error ||
+          "Invalid Consignment ID format. Expected 8–24 alphanumeric characters (e.g. EK123456789IN)."
+      );
+      playChime(false);
       return;
     }
+
+    const cleanNum = validation.normalized;
 
     // Check duplicate in currently staged list
     if (stagedConsignments.some((s) => s.trackingNumber === cleanNum)) {
@@ -2699,6 +2705,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
               onClick={() => {
                 setIntakeError("");
                 setIntakeAwb("");
+                setIntakeStatus("booked");
                 setRecentStagedCode(null);
                 setIsCancelIntakeConfirmOpen(false);
                 setIsCameraActive(false);
@@ -2726,17 +2733,6 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
             >
               <FileSpreadsheet className="h-4 w-4 stroke-[2.4] shrink-0" />
               <span className="truncate">Bulk Import</span>
-            </button>
-
-            {/* Dedicated Separate Camera Scan Page (Spans full width below on mobile, inline on sm+) */}
-            <button
-              type="button"
-              onClick={handleOpenSeparateCameraPage}
-              className="col-span-2 sm:col-span-1 inline-flex items-center justify-center gap-1.5 rounded-xl border border-indigo-200 bg-indigo-50/80 px-3.5 py-2.5 text-xs font-bold text-indigo-700 hover:border-indigo-400 hover:bg-indigo-100/80 dark:border-indigo-800/80 dark:bg-indigo-950/60 dark:text-indigo-300 shadow-2xs transition-all cursor-pointer"
-              title="Open standalone full-screen camera scanner page (/scan)"
-            >
-              <Camera className="h-4 w-4 text-indigo-600 dark:text-indigo-400 shrink-0" />
-              <span>Camera Scan Page</span>
             </button>
           </div>
         </div>
@@ -4810,21 +4806,11 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                       <button
                         type="button"
                         onClick={handleOpenSeparateCameraPage}
-                        className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white px-3.5 py-2 text-xs font-bold shadow-xs transition-all cursor-pointer"
-                        title="Open standalone full-screen camera scanner page (/scan)"
+                        className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 text-xs font-extrabold shadow-xs transition-all cursor-pointer"
+                        title="Open dedicated camera scanner page (/scan)"
                       >
-                        <Camera className="h-3.5 w-3.5" />
-                        <span>Separate Camera Page</span>
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={handleToggleCamera}
-                        className="inline-flex items-center gap-1.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 px-3 py-2 text-xs font-bold transition-all cursor-pointer"
-                        title="Open inline camera view inside modal"
-                      >
-                        <QrCode className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" />
-                        <span>Inline Camera</span>
+                        <ScanLine className="h-4 w-4 stroke-[2.5]" />
+                        <span>Scan Barcode / QR</span>
                       </button>
 
                       {/* Auto-Next Switch */}

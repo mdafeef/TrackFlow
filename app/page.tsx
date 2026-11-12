@@ -77,8 +77,25 @@ function TrackingAppContent() {
   // Dark mode
   const [isDark, setIsDark] = useState(false);
 
-  // Active view: single tracker vs bulk dashboard
-  const [activeView, setActiveView] = useState<"single" | "bulk">("single");
+  // Active view: single tracker vs bulk dashboard (defaults to bulk when returning from camera scan page)
+  const [activeView, setActiveView] = useState<"single" | "bulk">(() => {
+    if (typeof window !== "undefined") {
+      try {
+        const rawReturn = sessionStorage.getItem("trackflow_scan_return");
+        if (rawReturn) {
+          const parsed = JSON.parse(rawReturn);
+          if (
+            parsed.target === "bulk_review" ||
+            parsed.target === "bulk_ingested" ||
+            parsed.target === "bulk_dashboard"
+          ) {
+            return "bulk";
+          }
+        }
+      } catch {}
+    }
+    return "single";
+  });
 
   // Track Next Order Action: Clears active results/errors and smoothly focuses input
   const handleTrackNextOrder = useCallback(() => {
@@ -302,9 +319,13 @@ function TrackingAppContent() {
         const rawReturn = sessionStorage.getItem("trackflow_scan_return");
         if (rawReturn) {
           const parsed = JSON.parse(rawReturn);
-          if (parsed.target === "bulk_review" || parsed.target === "bulk_ingested") {
+          if (
+            parsed.target === "bulk_review" ||
+            parsed.target === "bulk_ingested" ||
+            parsed.target === "bulk_dashboard"
+          ) {
             setTimeout(() => setActiveView("bulk"), 0);
-            if (parsed.target === "bulk_ingested") {
+            if (parsed.target !== "bulk_review") {
               sessionStorage.removeItem("trackflow_scan_return");
             }
           } else if (parsed.target === "single_track" && parsed.trackingNumber) {
@@ -591,7 +612,19 @@ function TrackingAppContent() {
   );
 }
 
-export default function HomePage() {
+interface HomePageProps {
+  params?: Promise<Record<string, string | string[]>>;
+  searchParams?: Promise<Record<string, string | string[]>>;
+}
+
+export default function HomePage(props: HomePageProps) {
+  if (props?.params) {
+    React.use(props.params);
+  }
+  if (props?.searchParams) {
+    React.use(props.searchParams);
+  }
+
   return (
     <Suspense
       fallback={

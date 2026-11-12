@@ -494,3 +494,53 @@ export function autoDetectCourier(trackingNumber: string): CourierConfig | null 
 
   return null;
 }
+
+/**
+ * Strict Consignment ID validation:
+ * Validates whether a consignment/tracking code matches either:
+ * 1. Standard Postal UPU S10 format: 2 letters + 9 digits + 2 letters (e.g., EK123456789IN, RM123456789IN)
+ * 2. Standard courier consignment / AWB format: 8 to 24 alphanumeric characters (A-Z, 0-9, and optional hyphens).
+ * Rejects random short strings (< 8 chars), strings > 24 chars, strings with spaces, special characters, commas, slashes, or non-tracking payloads.
+ */
+export function validateConsignmentFormat(code: string): { isValid: boolean; normalized: string; error?: string } {
+  if (!code || typeof code !== "string") {
+    return { isValid: false, normalized: "", error: "Consignment ID cannot be empty." };
+  }
+  const clean = code.trim().toUpperCase().replace(/\s+/g, "");
+  if (clean.length < 8) {
+    return {
+      isValid: false,
+      normalized: clean,
+      error: `Too short (${clean.length} chars). Valid consignment IDs have at least 8 characters (e.g. EK123456789IN).`,
+    };
+  }
+  if (clean.length > 24) {
+    return {
+      isValid: false,
+      normalized: clean,
+      error: `Too long (${clean.length} chars). Valid consignment IDs are between 8 and 24 characters.`,
+    };
+  }
+  if (/[^A-Z0-9-]/.test(clean)) {
+    return {
+      isValid: false,
+      normalized: clean,
+      error: "Invalid format. Only letters, digits, and hyphens are permitted (e.g. EK123456789IN).",
+    };
+  }
+
+  // Must match either standard postal format or standard courier AWB format
+  const isPostFormat = /^[A-Z]{2}\d{9}[A-Z]{2}$/.test(clean);
+  const isCourierFormat = /^[A-Z0-9-]{8,24}$/.test(clean);
+
+  if (isPostFormat || isCourierFormat) {
+    return { isValid: true, normalized: clean };
+  }
+
+  return {
+    isValid: false,
+    normalized: clean,
+    error: "Invalid consignment format. Expected format e.g. EK123456789IN or 8–24 alphanumeric digits.",
+  };
+}
+

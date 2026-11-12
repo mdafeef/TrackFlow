@@ -1,0 +1,1439 @@
+"use client";
+
+import React, { useState, useEffect, useRef, useCallback } from "react";
+import { useRouter } from "next/navigation";
+import {
+  Check,
+  ArrowLeft,
+  Trash2,
+  ShieldAlert,
+  Volume2,
+  VolumeX,
+  ChevronUp,
+  ChevronDown,
+  ZoomIn,
+  ZoomOut,
+  Focus,
+  ScanLine,
+  AlertTriangle,
+} from "lucide-react";
+import {
+  MultiFormatReader,
+  BarcodeFormat,
+  DecodeHintType,
+  HTMLCanvasElementLuminanceSource,
+  BinaryBitmap,
+  HybridBinarizer,
+} from "@zxing/library";
+import jsQR from "jsqr";
+import {
+  autoDetectCourier,
+  COURIER_LIST,
+  COURIER_MAP,
+  validateConsignmentFormat,
+} from "@/lib/couriers";
+import type { BulkShipment } from "@/components/BulkDashboard";
+
+const STAGED_STORAGE_KEY = "trackflow_staged_consignments";
+const BULK_STORAGE_KEY = "trackflow_bulk_shipments";
+const SCAN_CONTEXT_KEY = "trackflow_scan_context";
+const SCAN_RETURN_KEY = "trackflow_scan_return";
+
+type StatusOption = "booked" | "in_transit" | "out_for_delivery" | "delivered" | "returned";
+
+const STATUS_OPTIONS: Array<{ value: StatusOption; label: string; dot: string }> = [
+  { value: "booked", label: "Booked", dot: "bg-violet-400" },
+  { value: "in_transit", label: "In Transit", dot: "bg-sky-400" },
+  { value: "out_for_delivery", label: "Out for Delivery", dot: "bg-amber-400" },
+  { value: "delivered", label: "Delivered", dot: "bg-emerald-400" },
+  { value: "returned", label: "Returned", dot: "bg-rose-400" },
+];
+
+/**
+ * Enhance the cropped guide region for barcode/QR edge contrast and sharpness,
+ * applying contrast stretching + unsharp-mask sharpening for wrinkled or damaged labels
+ * without auto-zooming the camera.
+ */
+function enhanceDamagedLabelROI(
+  ctx: CanvasRenderingContext2D,
+  w: number,
+  h: number
+): { hasLabelCandidate: boolean } {
+  const imgData = ctx.getImageData(0, 0, w, h);
+  const data = imgData.data;
+  const pixelCount = w * h;
+  if (pixelCount === 0) return { hasLabelCandidate: false };
+
+  const lum = new Uint8Array(pixelCount);
+  let minLum = 255;
+  let maxLum = 0;
+
+  for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+    const y = (data[i] * 77 + data[i + 1] * 150 + data[i + 2] * 29) >> 8;
+    lum[p] = y;
+    if (y < minLum) minLum = y;
+    if (y > maxLum) maxLum = y;
+  }
+
+  const contrastSpan = maxLum - minLum;
+  let edgeTransitions = 0;
+  let sampleCount = 0;
+
+  const startY = Math.floor(h * 0.2);
+  const endY = Math.floor(h * 0.8);
+  const startX = Math.floor(w * 0.15);
+  const endX = Math.floor(w * 0.85);
+
+  for (let y = startY; y < endY; y += 2) {
+    const rowOffset = y * w;
+    for (let x = startX; x < endX - 1; x += 2) {
+      const idx = rowOffset + x;
+      const diffX = Math.abs(lum[idx] - lum[idx + 1]);
+      const diffY = y + 1 < h ? Math.abs(lum[idx] - lum[idx + w]) : 0;
+      const grad = Math.max(diffX, diffY);
+      sampleCount++;
+      if (grad > 18) {
+        edgeTransitions++;
+      }
+    }
+  }
+
+  const edgeDensity = sampleCount > 0 ? edgeTransitions / sampleCount : 0;
+  const hasLabelCandidate = edgeDensity > 0.065 && contrastSpan > 28;
+
+  const range = Math.max(1, maxLum - minLum);
+  const stretched = new Uint8ClampedArray(pixelCount);
+  for (let p = 0; p < pixelCount; p++) {
+    stretched[p] = ((lum[p] - minLum) * 255) / range;
+  }
+
+  for (let y = 1; y < h - 1; y++) {
+    const row = y * w;
+    for (let x = 1; x < w - 1; x++) {
+      const p = row + x;
+      const center = stretched[p];
+      const neighbors =
+        (stretched[p - 1] + stretched[p + 1] + stretched[p - w] + stretched[p + w]) >> 2;
+      const sharpened = Math.min(255, Math.max(0, center + (center - neighbors) * 2));
+      const finalVal = sharpened < 120 ? Math.max(0, sharpened - 22) : Math.min(255, sharpened + 22);
+      const idx = p * 4;
+      data[idx] = finalVal;
+      data[idx + 1] = finalVal;
+      data[idx + 2] = finalVal;
+    }
+  }
+
+  ctx.putImageData(imgData, 0, 0);
+  return { hasLabelCandidate };
+}
+
+export function CameraScanClient() {
+  const router = useRouter();
+
+  // Camera & Decoder state
+  const [cameraGuideMode, setCameraGuideMode] = useState<"barcode" | "qr" | "both">("both");
+  const [isAutoNextEnabled, setIsAutoNextEnabled] = useState<boolean>(true);
+  const [isSoundEnabled, setIsSoundEnabled] = useState<boolean>(true);
+  const [cameraError, setCameraError] = useState<string | null>(null);
+  const [cameraScanSuccess, setCameraScanSuccess] = useState<{
+    code: string;
+    carrier: string;
+  } | null>(null);
+
+  // Manual zoom control only (no auto-zoom)
+  const [cameraZoomLevel, setCameraZoomLevel] = useState<number>(1.0);
+  const [isHwZoomSupported, setIsHwZoomSupported] = useState<boolean>(false);
+  const hwZoomSupportedRef = useRef<{ supported: boolean; min: number; max: number }>({
+    supported: false,
+    min: 1,
+    max: 1,
+  });
+
+  // Touch-to-Focus state
+  const [focusRing, setFocusRing] = useState<{ x: number; y: number; id: number } | null>(null);
+  const [isFocusing, setIsFocusing] = useState<boolean>(false);
+  const focusRingTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Consignment ID Format Error state
+  const [formatError, setFormatError] = useState<{ code: string; message: string } | null>(null);
+  const formatErrorTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Default Status: ALWAYS "booked" by default when adding new consignments
+  const [defaultStatus, setDefaultStatus] = useState<StatusOption>(() => {
+    if (typeof window !== "undefined") {
+      try {
+        const rawCtx = sessionStorage.getItem(SCAN_CONTEXT_KEY);
+        if (rawCtx) {
+          const parsed = JSON.parse(rawCtx);
+          if (parsed.defaultStatus) return parsed.defaultStatus;
+        }
+      } catch {}
+    }
+    return "booked";
+  });
+  const [isStatusMenuOpen, setIsStatusMenuOpen] = useState<boolean>(false);
+
+  const [defaultCourierId] = useState<string>(() => {
+    if (typeof window !== "undefined") {
+      try {
+        const rawCtx = sessionStorage.getItem(SCAN_CONTEXT_KEY);
+        if (rawCtx) {
+          const parsed = JSON.parse(rawCtx);
+          if (parsed.defaultCourierId) return parsed.defaultCourierId;
+        }
+      } catch {}
+    }
+    return "auto";
+  });
+
+  // Staged Consignments scanned during session
+  const [stagedItems, setStagedItems] = useState<BulkShipment[]>(() => {
+    if (typeof window !== "undefined") {
+      try {
+        const existingStaged = localStorage.getItem(STAGED_STORAGE_KEY);
+        if (existingStaged) {
+          const parsedStaged = JSON.parse(existingStaged);
+          if (Array.isArray(parsedStaged)) return parsedStaged;
+        }
+      } catch {}
+    }
+    return [];
+  });
+  const [isQueueExpanded, setIsQueueExpanded] = useState<boolean>(false);
+  const [isCancelConfirmOpen, setIsCancelConfirmOpen] = useState<boolean>(false);
+  const [duplicateAlert, setDuplicateAlert] = useState<string | null>(null);
+
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const cameraStreamRef = useRef<MediaStream | null>(null);
+  const scanCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const lastScannedRef = useRef<{ code: string; timestamp: number }>({
+    code: "",
+    timestamp: 0,
+  });
+  const scanSuccessTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Ensure no element has focus on mount so mobile keyboard never opens
+  useEffect(() => {
+    if (typeof document !== "undefined" && document.activeElement instanceof HTMLElement) {
+      document.activeElement.blur();
+    }
+  }, []);
+
+  // Persist staged items whenever they change
+  useEffect(() => {
+    try {
+      localStorage.setItem(STAGED_STORAGE_KEY, JSON.stringify(stagedItems));
+    } catch {
+      // ignore
+    }
+  }, [stagedItems]);
+
+  // Apply manual camera zoom
+  const applyCameraZoom = useCallback((nextZoom: number) => {
+    const clamped = Number(Math.min(2.5, Math.max(1.0, nextZoom)).toFixed(2));
+    setCameraZoomLevel(clamped);
+
+    const stream = cameraStreamRef.current;
+    if (!stream) return;
+    const [track] = stream.getVideoTracks();
+    if (!track || typeof track.applyConstraints !== "function") return;
+
+    try {
+      if (hwZoomSupportedRef.current.supported) {
+        const { min, max } = hwZoomSupportedRef.current;
+        const hwZoom = Math.min(max, Math.max(min, clamped));
+        track
+          .applyConstraints({
+            advanced: [{ zoom: hwZoom } as MediaTrackConstraintSet],
+          })
+          .catch(() => {});
+      }
+    } catch {
+      // fallback to digital CSS scale
+    }
+  }, []);
+
+  // Stop camera stream helper
+  const stopCameraStream = useCallback(() => {
+    if (cameraStreamRef.current) {
+      cameraStreamRef.current.getTracks().forEach((t) => t.stop());
+      cameraStreamRef.current = null;
+    }
+  }, []);
+
+  // Audio beep feedback on scan (success chime or error tone)
+  const playScanBeep = useCallback(
+    (isSuccess: boolean = true) => {
+      if (!isSoundEnabled || typeof window === "undefined") return;
+      try {
+        const AudioCtx =
+          window.AudioContext ||
+          (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+        if (!AudioCtx) return;
+        const ctx = new AudioCtx();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+
+        if (isSuccess) {
+          osc.type = "sine";
+          osc.frequency.setValueAtTime(880, ctx.currentTime);
+          osc.frequency.exponentialRampToValueAtTime(1320, ctx.currentTime + 0.09);
+          gain.gain.setValueAtTime(0.12, ctx.currentTime);
+          gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.14);
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+          osc.start();
+          osc.stop(ctx.currentTime + 0.15);
+        } else {
+          osc.type = "sawtooth";
+          osc.frequency.setValueAtTime(220, ctx.currentTime);
+          osc.frequency.setValueAtTime(160, ctx.currentTime + 0.12);
+          gain.gain.setValueAtTime(0.15, ctx.currentTime);
+          gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.24);
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+          osc.start();
+          osc.stop(ctx.currentTime + 0.25);
+        }
+      } catch {
+        // ignore audio errors
+      }
+    },
+    [isSoundEnabled]
+  );
+
+  // Extract candidate code from barcode or QR payload (while preserving raw text if invalid so format validator can reject it)
+  const extractCandidateScannedCode = useCallback((rawValue: string): string => {
+    const trimmed = rawValue.trim();
+    if (!trimmed) return "";
+
+    if (/^https?:\/\//i.test(trimmed)) {
+      try {
+        const url = new URL(trimmed);
+        const paramKeys = ["awb", "track", "tracking", "id", "consignment", "number", "code", "q"];
+        for (const key of paramKeys) {
+          const val = url.searchParams.get(key) || url.searchParams.get(key.toUpperCase());
+          if (val && val.trim().length >= 4) {
+            return val.trim().toUpperCase();
+          }
+        }
+        const segments = url.pathname.split("/").filter(Boolean);
+        const lastSeg = segments[segments.length - 1];
+        if (lastSeg && /^[A-Z0-9-]{8,24}$/i.test(lastSeg)) {
+          return lastSeg.toUpperCase();
+        }
+        // Return raw URL so format validator rejects non-tracking URLs with an explicit error
+        return trimmed;
+      } catch {
+        return trimmed;
+      }
+    }
+
+    if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        const candidate =
+          parsed.trackingNumber || parsed.awb || parsed.consignment || parsed.id || parsed.code;
+        if (candidate && String(candidate).trim().length > 0) {
+          return String(candidate).trim().toUpperCase();
+        }
+      } catch {
+        return trimmed;
+      }
+    }
+
+    return trimmed.toUpperCase();
+  }, []);
+
+  // Build logical status metadata
+  const getLogicalStatusMeta = (status: StatusOption, dest: string) => {
+    const map: Record<StatusOption, { statusText: string; lastLocation: string }> = {
+      booked: {
+        statusText: "Consignment Booked at Origin",
+        lastLocation: "Origin Booking Office",
+      },
+      in_transit: {
+        statusText: "Active In-Transit Scan",
+        lastLocation: "Regional Sortation Hub",
+      },
+      out_for_delivery: {
+        statusText: "Out for Delivery Today",
+        lastLocation: `${dest} Delivery Hub`,
+      },
+      delivered: {
+        statusText: "Delivered to Recipient",
+        lastLocation: dest,
+      },
+      returned: {
+        statusText: "Returned to Shipper (RTO)",
+        lastLocation: "Return Processing Center",
+      },
+    };
+    return map[status];
+  };
+
+  // Stage a scanned consignment with strict format validation
+  const handleStageScannedCode = useCallback(
+    (candidateCode: string) => {
+      const rawTrimmed = candidateCode.trim();
+      if (!rawTrimmed) return;
+
+      // STRICT FORMAT VALIDATION: Only allow valid consignment IDs (e.g. EK123456789IN or 8-24 alphanumeric AWB)
+      const validation = validateConsignmentFormat(rawTrimmed);
+      if (!validation.isValid) {
+        playScanBeep(false);
+        const previewCode =
+          rawTrimmed.length > 26 ? `${rawTrimmed.slice(0, 24)}...` : rawTrimmed.toUpperCase();
+        setFormatError({
+          code: previewCode,
+          message:
+            validation.error ||
+            "Invalid Consignment ID format. Expected 8–24 alphanumeric characters (e.g. EK123456789IN).",
+        });
+        if (formatErrorTimerRef.current) clearTimeout(formatErrorTimerRef.current);
+        formatErrorTimerRef.current = setTimeout(() => {
+          setFormatError(null);
+        }, 3200);
+        return;
+      }
+
+      const cleanNum = validation.normalized;
+      setFormatError(null);
+
+      const detected = autoDetectCourier(cleanNum);
+      const chosenCourier =
+        defaultCourierId !== "auto" && COURIER_MAP[defaultCourierId]
+          ? COURIER_MAP[defaultCourierId]
+          : detected || COURIER_MAP.speedpost;
+
+      setStagedItems((prev) => {
+        if (prev.some((s) => s.trackingNumber === cleanNum)) {
+          setDuplicateAlert(`Already scanned: ${cleanNum}`);
+          setTimeout(() => setDuplicateAlert(null), 2200);
+          return prev;
+        }
+
+        const dest = "Destination Hub";
+        const meta = getLogicalStatusMeta(defaultStatus, dest);
+
+        const newItem: BulkShipment = {
+          id: `staged-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+          trackingNumber: cleanNum,
+          courierId: chosenCourier.id,
+          courierName: chosenCourier.name,
+          status: defaultStatus,
+          statusText: meta.statusText,
+          origin: "Origin Booking Hub",
+          destination: dest,
+          articleType: defaultStatus === "booked" ? "Booked Consignment" : "Registered Consignment",
+          weight: "250 g",
+          lastUpdated: "Scanned Just Now",
+          lastLocation: meta.lastLocation,
+        };
+
+        playScanBeep(true);
+        setCameraScanSuccess({
+          code: cleanNum,
+          carrier: chosenCourier.shortName || chosenCourier.name,
+        });
+        if (scanSuccessTimerRef.current) clearTimeout(scanSuccessTimerRef.current);
+        scanSuccessTimerRef.current = setTimeout(() => {
+          setCameraScanSuccess(null);
+        }, 1350);
+
+        return [newItem, ...prev];
+      });
+    },
+    [defaultCourierId, defaultStatus, playScanBeep]
+  );
+
+  // Touch-to-Focus handler inside the Fixed Square Camera Space
+  const handleTouchToFocus = (
+    e: React.MouseEvent<HTMLDivElement> | React.TouchEvent<HTMLDivElement>
+  ) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    let clientX = 0;
+    let clientY = 0;
+
+    if ("touches" in e) {
+      if (e.touches.length === 0) return;
+      clientX = e.touches[0].clientX;
+      clientY = e.touches[0].clientY;
+    } else {
+      clientX = e.clientX;
+      clientY = e.clientY;
+    }
+
+    const x = Math.max(28, Math.min(rect.width - 28, clientX - rect.left));
+    const y = Math.max(28, Math.min(rect.height - 28, clientY - rect.top));
+    const normX = Math.max(0, Math.min(1, x / rect.width));
+    const normY = Math.max(0, Math.min(1, y / rect.height));
+
+    const id = Date.now();
+    setFocusRing({ x, y, id });
+    setIsFocusing(true);
+    if (focusRingTimerRef.current) clearTimeout(focusRingTimerRef.current);
+    focusRingTimerRef.current = setTimeout(() => {
+      setFocusRing(null);
+      setIsFocusing(false);
+    }, 1100);
+
+    // Trigger hardware camera focus / point-of-interest refocus
+    const stream = cameraStreamRef.current;
+    if (stream) {
+      const [track] = stream.getVideoTracks();
+      if (track && typeof track.applyConstraints === "function") {
+        try {
+          const caps =
+            typeof track.getCapabilities === "function"
+              ? (track.getCapabilities() as Record<string, unknown>)
+              : {};
+          const advancedConstraints: Record<string, unknown> = {};
+          if (caps.pointsOfInterest) {
+            advancedConstraints.pointsOfInterest = [{ x: normX, y: normY }];
+          }
+          if (Array.isArray(caps.focusMode)) {
+            if (caps.focusMode.includes("single-shot")) {
+              advancedConstraints.focusMode = "single-shot";
+            } else if (caps.focusMode.includes("continuous")) {
+              advancedConstraints.focusMode = "continuous";
+            }
+          }
+          if (Object.keys(advancedConstraints).length > 0) {
+            track
+              .applyConstraints({
+                advanced: [advancedConstraints as MediaTrackConstraintSet],
+              })
+              .then(() => {
+                // Restore continuous focus after single-shot lock if supported
+                if (
+                  Array.isArray(caps.focusMode) &&
+                  caps.focusMode.includes("continuous") &&
+                  advancedConstraints.focusMode === "single-shot"
+                ) {
+                  setTimeout(() => {
+                    track
+                      .applyConstraints({
+                        advanced: [{ focusMode: "continuous" } as unknown as MediaTrackConstraintSet],
+                      })
+                      .catch(() => {});
+                  }, 700);
+                }
+              })
+              .catch(() => {});
+          }
+        } catch {
+          // ignore
+        }
+      }
+    }
+  };
+
+  // Camera stream & STRICT Guide-Box-Only Decoder Loop mapped to the Fixed Square Camera Space
+  useEffect(() => {
+    let isCancelled = false;
+    let scanIntervalId: NodeJS.Timeout | null = null;
+
+    const zxingReader = new MultiFormatReader();
+    const hints = new Map();
+    const formats =
+      cameraGuideMode === "barcode"
+        ? [
+            BarcodeFormat.CODE_128,
+            BarcodeFormat.CODE_39,
+            BarcodeFormat.CODE_93,
+            BarcodeFormat.CODABAR,
+            BarcodeFormat.EAN_13,
+            BarcodeFormat.EAN_8,
+            BarcodeFormat.ITF,
+            BarcodeFormat.UPC_A,
+            BarcodeFormat.UPC_E,
+          ]
+        : cameraGuideMode === "qr"
+        ? [BarcodeFormat.QR_CODE, BarcodeFormat.DATA_MATRIX, BarcodeFormat.PDF_417, BarcodeFormat.AZTEC]
+        : [
+            BarcodeFormat.QR_CODE,
+            BarcodeFormat.CODE_128,
+            BarcodeFormat.CODE_39,
+            BarcodeFormat.CODE_93,
+            BarcodeFormat.CODABAR,
+            BarcodeFormat.EAN_13,
+            BarcodeFormat.EAN_8,
+            BarcodeFormat.ITF,
+            BarcodeFormat.UPC_A,
+            BarcodeFormat.UPC_E,
+            BarcodeFormat.DATA_MATRIX,
+            BarcodeFormat.PDF_417,
+            BarcodeFormat.AZTEC,
+          ];
+    hints.set(DecodeHintType.POSSIBLE_FORMATS, formats);
+    hints.set(DecodeHintType.TRY_HARDER, true);
+    zxingReader.setHints(hints);
+
+    let nativeDetector: {
+      detect: (source: HTMLCanvasElement) => Promise<Array<{ rawValue?: string }>>;
+    } | null = null;
+    if (typeof window !== "undefined" && "BarcodeDetector" in window) {
+      try {
+        const NativeBarcodeDetector = (window as unknown as {
+          BarcodeDetector: new (opts: { formats: string[] }) => {
+            detect: (source: HTMLCanvasElement) => Promise<Array<{ rawValue?: string }>>;
+          };
+        }).BarcodeDetector;
+        const nativeFormats =
+          cameraGuideMode === "barcode"
+            ? ["code_128", "code_39", "code_93", "codabar", "ean_13", "ean_8", "itf", "upc_a", "upc_e"]
+            : cameraGuideMode === "qr"
+            ? ["qr_code", "data_matrix", "pdf417", "aztec"]
+            : [
+                "qr_code",
+                "code_128",
+                "code_39",
+                "code_93",
+                "codabar",
+                "ean_13",
+                "ean_8",
+                "itf",
+                "upc_a",
+                "upc_e",
+                "data_matrix",
+                "pdf417",
+                "aztec",
+              ];
+        nativeDetector = new NativeBarcodeDetector({ formats: nativeFormats });
+      } catch {
+        nativeDetector = null;
+      }
+    }
+
+    const onDetectedRaw = (rawVal: string): boolean => {
+      const candidate = extractCandidateScannedCode(rawVal);
+      if (!candidate) return false;
+
+      const now = Date.now();
+      if (
+        lastScannedRef.current.code === candidate &&
+        now - lastScannedRef.current.timestamp < 2200
+      ) {
+        return true;
+      }
+      lastScannedRef.current = { code: candidate, timestamp: now };
+      handleStageScannedCode(candidate);
+      return true;
+    };
+
+    const tryDecodeCanvas = async (
+      canvas: HTMLCanvasElement,
+      ctx: CanvasRenderingContext2D
+    ): Promise<boolean> => {
+      const w = canvas.width;
+      const h = canvas.height;
+
+      // 1. Native BarcodeDetector on strictly cropped Guide ROI
+      if (nativeDetector) {
+        try {
+          const detected = await nativeDetector.detect(canvas);
+          if (detected && detected.length > 0 && detected[0].rawValue) {
+            if (onDetectedRaw(detected[0].rawValue)) return true;
+          }
+        } catch {
+          // continue
+        }
+      }
+
+      // 2. jsQR for 2D QR codes inside Guide ROI
+      if (cameraGuideMode !== "barcode") {
+        try {
+          const imageData = ctx.getImageData(0, 0, w, h);
+          const qrResult = jsQR(imageData.data, w, h, {
+            inversionAttempts: "attemptBoth",
+          });
+          if (qrResult && qrResult.data) {
+            if (onDetectedRaw(qrResult.data)) return true;
+          }
+        } catch {
+          // continue
+        }
+      }
+
+      // 3. ZXing MultiFormatReader inside Guide ROI
+      try {
+        const luminanceSource = new HTMLCanvasElementLuminanceSource(canvas);
+        const binaryBitmap = new BinaryBitmap(new HybridBinarizer(luminanceSource));
+        const result = zxingReader.decodeWithState(binaryBitmap);
+        if (result && result.getText()) {
+          if (onDetectedRaw(result.getText())) return true;
+        }
+      } catch {
+        // continue
+      }
+
+      return false;
+    };
+
+    const startCamera = async () => {
+      try {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          setCameraError("Camera access is not supported in this browser.");
+          return;
+        }
+
+        let stream = cameraStreamRef.current;
+        if (!stream || !stream.active) {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+              facingMode: { ideal: "environment" },
+              width: { ideal: 1280 },
+              height: { ideal: 1280 },
+            },
+            audio: false,
+          });
+        }
+
+        if (isCancelled) {
+          stream.getTracks().forEach((t) => t.stop());
+          return;
+        }
+
+        cameraStreamRef.current = stream;
+
+        const [videoTrack] = stream.getVideoTracks();
+        if (videoTrack && typeof videoTrack.getCapabilities === "function") {
+          try {
+            const caps = videoTrack.getCapabilities() as Record<string, unknown>;
+            if (caps.zoom && typeof caps.zoom === "object") {
+              const z = caps.zoom as { min?: number; max?: number };
+              hwZoomSupportedRef.current = {
+                supported: true,
+                min: z.min ?? 1,
+                max: Math.min(z.max ?? 3, 3),
+              };
+              setIsHwZoomSupported(true);
+            }
+            if (Array.isArray(caps.focusMode) && caps.focusMode.includes("continuous")) {
+              videoTrack
+                .applyConstraints({
+                  advanced: [{ focusMode: "continuous" } as unknown as MediaTrackConstraintSet],
+                })
+                .catch(() => {});
+            }
+          } catch {
+            // ignore
+          }
+        }
+
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          await videoRef.current.play().catch(() => {});
+        }
+
+        if (!scanCanvasRef.current) {
+          scanCanvasRef.current = document.createElement("canvas");
+        }
+
+        scanIntervalId = setInterval(async () => {
+          if (isCancelled || !videoRef.current || !scanCanvasRef.current) return;
+          const video = videoRef.current;
+          if (video.readyState < 2 || video.videoWidth === 0 || video.videoHeight === 0) return;
+
+          const vw = video.videoWidth;
+          const vh = video.videoHeight;
+
+          // Because the video is displayed with object-cover inside a 1:1 fixed square frame,
+          // first determine the center square of the video stream:
+          const squareSide = Math.min(vw, vh);
+
+          // Next, strictly crop to the active guide box inside that square frame:
+          let roiWidthRatio = 0.82;
+          let roiHeightRatio = 0.68;
+          if (cameraGuideMode === "barcode") {
+            roiWidthRatio = 0.84;
+            roiHeightRatio = 0.38;
+          } else if (cameraGuideMode === "qr") {
+            roiWidthRatio = 0.68;
+            roiHeightRatio = 0.68;
+          }
+
+          const effectiveDigitalZoom = hwZoomSupportedRef.current.supported
+            ? 1.0
+            : cameraZoomLevel;
+
+          const cropW = Math.max(
+            64,
+            Math.floor((squareSide * roiWidthRatio) / effectiveDigitalZoom)
+          );
+          const cropH = Math.max(
+            64,
+            Math.floor((squareSide * roiHeightRatio) / effectiveDigitalZoom)
+          );
+          const cropX = Math.max(0, Math.floor((vw - cropW) / 2));
+          const cropY = Math.max(0, Math.floor((vh - cropH) / 2));
+
+          const canvas = scanCanvasRef.current;
+          const maxTargetDim = 680;
+          const scale = Math.min(1.5, maxTargetDim / Math.max(cropW, cropH));
+          const targetW = Math.max(64, Math.floor(cropW * scale));
+          const targetH = Math.max(64, Math.floor(cropH * scale));
+
+          if (canvas.width !== targetW) canvas.width = targetW;
+          if (canvas.height !== targetH) canvas.height = targetH;
+
+          const ctx = canvas.getContext("2d", { willReadFrequently: true });
+          if (!ctx) return;
+
+          // Draw ONLY the Guide Box ROI from the square camera space
+          ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, targetW, targetH);
+
+          // PASS 1: Standard decode on the Guide Box ROI
+          const decodedPass1 = await tryDecodeCanvas(canvas, ctx);
+          if (decodedPass1) return;
+
+          // PASS 2: Enhance contrast & sharpness for wrinkled / damaged labels inside Guide Box
+          const { hasLabelCandidate } = enhanceDamagedLabelROI(ctx, targetW, targetH);
+          if (hasLabelCandidate) {
+            await tryDecodeCanvas(canvas, ctx);
+          }
+        }, 180);
+      } catch {
+        if (!isCancelled) {
+          setCameraError("Camera permission not granted or camera unavailable on this device.");
+        }
+      }
+    };
+
+    startCamera();
+
+    return () => {
+      isCancelled = true;
+      if (scanIntervalId) clearInterval(scanIntervalId);
+    };
+  }, [cameraGuideMode, cameraZoomLevel, extractCandidateScannedCode, handleStageScannedCode]);
+
+  // Cleanup camera tracks on unmount
+  useEffect(() => {
+    return () => {
+      stopCameraStream();
+    };
+  }, [stopCameraStream]);
+
+  // Remove item from staged queue
+  const handleRemoveItem = (id: string) => {
+    setStagedItems((prev) => prev.filter((item) => item.id !== id));
+  };
+
+  // Update item carrier
+  const handleUpdateItemCarrier = (id: string, courierId: string) => {
+    const c = COURIER_MAP[courierId];
+    if (!c) return;
+    setStagedItems((prev) =>
+      prev.map((item) =>
+        item.id === id ? { ...item, courierId: c.id, courierName: c.name } : item
+      )
+    );
+  };
+
+  // Update item status
+  const handleUpdateItemStatus = (id: string, status: StatusOption) => {
+    setStagedItems((prev) =>
+      prev.map((item) => {
+        if (item.id !== id) return item;
+        const meta = getLogicalStatusMeta(status, item.destination);
+        return {
+          ...item,
+          status,
+          statusText: meta.statusText,
+          lastLocation: meta.lastLocation,
+        };
+      })
+    );
+  };
+
+  // Return to Bulk Dashboard & open Review Modal
+  const handleReturnToReview = () => {
+    stopCameraStream();
+    try {
+      localStorage.setItem(STAGED_STORAGE_KEY, JSON.stringify(stagedItems));
+      sessionStorage.setItem(
+        SCAN_RETURN_KEY,
+        JSON.stringify({
+          target: "bulk_review",
+        })
+      );
+    } catch {}
+    router.push("/");
+  };
+
+  // Directly Confirm & Ingest all scanned consignments into Bulk Dashboard
+  const handleDirectConfirmIngest = () => {
+    if (stagedItems.length === 0) return;
+    stopCameraStream();
+
+    try {
+      const rawExisting = localStorage.getItem(BULK_STORAGE_KEY);
+      const existingList: BulkShipment[] = rawExisting ? JSON.parse(rawExisting) : [];
+      const deduplicated = stagedItems.filter(
+        (s) => !existingList.some((live) => live.trackingNumber === s.trackingNumber)
+      );
+
+      if (deduplicated.length > 0) {
+        const now = new Date();
+        const timeStr = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        const newBatchId = `batch-cam-${Date.now()}`;
+        const newBatchName = `Camera Scan Batch • ${timeStr}`;
+        const importedAtStr = `Today, ${timeStr}`;
+
+        const tagged: BulkShipment[] = deduplicated.map((item) => ({
+          ...item,
+          isImported: true,
+          batchId: newBatchId,
+          batchName: newBatchName,
+          importedAt: importedAtStr,
+        }));
+
+        const updated = [...tagged, ...existingList];
+        localStorage.setItem(BULK_STORAGE_KEY, JSON.stringify(updated));
+      }
+
+      localStorage.removeItem(STAGED_STORAGE_KEY);
+      sessionStorage.setItem(
+        SCAN_RETURN_KEY,
+        JSON.stringify({
+          target: "bulk_ingested",
+          count: deduplicated.length,
+        })
+      );
+    } catch {}
+
+    router.push("/");
+  };
+
+  // Request Cancel / Back -> ALWAYS go back to Bulk Data Dashboard page
+  const handleRequestCancel = () => {
+    if (stagedItems.length > 0) {
+      setIsCancelConfirmOpen(true);
+      return;
+    }
+    stopCameraStream();
+    try {
+      sessionStorage.setItem(
+        SCAN_RETURN_KEY,
+        JSON.stringify({ target: "bulk_dashboard" })
+      );
+    } catch {}
+    router.push("/");
+  };
+
+  const handleConfirmDiscardAndExit = () => {
+    stopCameraStream();
+    try {
+      localStorage.removeItem(STAGED_STORAGE_KEY);
+      sessionStorage.setItem(
+        SCAN_RETURN_KEY,
+        JSON.stringify({ target: "bulk_dashboard" })
+      );
+    } catch {}
+    router.push("/");
+  };
+
+  const activeStatusObj =
+    STATUS_OPTIONS.find((s) => s.value === defaultStatus) || STATUS_OPTIONS[0];
+
+  return (
+    <div className="fixed inset-0 z-50 bg-slate-950 text-white flex flex-col overflow-hidden select-none">
+      {/* ================================================================= */}
+      {/* 1. UNCLUTTERED, MOBILE-RESPONSIVE CAMERA HEADER                   */}
+      {/* ================================================================= */}
+      <header className="border-b border-slate-800/90 bg-slate-900/95 px-3.5 sm:px-6 py-2.5 shrink-0">
+        <div className="mx-auto max-w-2xl flex items-center justify-between gap-2">
+          {/* Left: Back to Bulk Dashboard + Title */}
+          <div className="flex items-center gap-2.5 min-w-0">
+            <button
+              type="button"
+              onClick={handleRequestCancel}
+              className="inline-flex items-center gap-1.5 rounded-xl border border-slate-700/90 bg-slate-800/90 hover:bg-slate-700 px-2.5 py-1.5 text-xs font-bold text-slate-200 transition-colors cursor-pointer shrink-0"
+              title="Back to Bulk Data Dashboard"
+            >
+              <ArrowLeft className="h-4 w-4" />
+              <span>Dashboard</span>
+            </button>
+
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="hidden xs:flex h-7 w-7 items-center justify-center rounded-lg bg-indigo-500/20 text-indigo-400 border border-indigo-500/30 shrink-0">
+                <ScanLine className="h-3.5 w-3.5" />
+              </span>
+              <h1 className="text-xs sm:text-sm font-extrabold text-white tracking-tight truncate">
+                Barcode &amp; QR Scanner
+              </h1>
+            </div>
+          </div>
+
+          {/* Right: Scanned Count Badge + Sound Toggle */}
+          <div className="flex items-center gap-2 shrink-0">
+            <span className="rounded-full bg-emerald-500/15 border border-emerald-500/35 px-2.5 py-1 text-[11px] font-mono font-black text-emerald-300">
+              {stagedItems.length} Scanned
+            </span>
+
+            <button
+              type="button"
+              onClick={() => setIsSoundEnabled((prev) => !prev)}
+              className="rounded-xl border border-slate-800 bg-slate-950 p-1.5 text-slate-300 hover:text-white cursor-pointer"
+              title={isSoundEnabled ? "Mute scan beep" : "Unmute scan beep"}
+            >
+              {isSoundEnabled ? (
+                <Volume2 className="h-4 w-4 text-emerald-400" />
+              ) : (
+                <VolumeX className="h-4 w-4 text-slate-500" />
+              )}
+            </button>
+          </div>
+        </div>
+      </header>
+
+      {/* ================================================================= */}
+      {/* 2. CENTERED FIXED SQUARE CAMERA SPACE & COMPACT CONTROLS          */}
+      {/* ================================================================= */}
+      <div className="flex-1 flex flex-col items-center justify-between px-3.5 sm:px-6 py-3 overflow-y-auto gap-3">
+        {/* Top Control Strip Above Square Camera: Guide Mode + Default Status (Booked) + Zoom */}
+        <div className="w-full max-w-md flex flex-wrap items-center justify-between gap-2 shrink-0">
+          {/* Guide Mode Selector */}
+          <div className="inline-flex items-center gap-0.5 rounded-xl bg-slate-900 p-1 border border-slate-800">
+            {(["barcode", "qr", "both"] as const).map((m) => (
+              <button
+                key={m}
+                type="button"
+                onClick={() => setCameraGuideMode(m)}
+                className={`px-2.5 py-1 rounded-lg text-[11px] font-bold capitalize transition-all cursor-pointer ${
+                  cameraGuideMode === m
+                    ? "bg-indigo-600 text-white shadow-2xs"
+                    : "text-slate-400 hover:text-slate-200"
+                }`}
+              >
+                {m === "qr" ? "QR" : m}
+              </button>
+            ))}
+          </div>
+
+          {/* Default Status Dropdown (Defaults to Booked, never opens keyboard) */}
+          <div className="relative">
+            <button
+              type="button"
+              onClick={() => setIsStatusMenuOpen((prev) => !prev)}
+              className="inline-flex items-center gap-1.5 rounded-xl bg-slate-900 border border-slate-800 hover:border-slate-700 px-2.5 py-1.5 text-[11px] font-bold text-slate-200 cursor-pointer"
+              title="Default status for scanned consignments"
+            >
+              <span className={`h-2 w-2 rounded-full ${activeStatusObj.dot}`} />
+              <span>{activeStatusObj.label}</span>
+              <ChevronDown className="h-3 w-3 text-slate-400" />
+            </button>
+
+            {isStatusMenuOpen && (
+              <>
+                <div
+                  className="fixed inset-0 z-40"
+                  onClick={() => setIsStatusMenuOpen(false)}
+                />
+                <div className="absolute right-0 mt-1.5 z-50 w-44 rounded-xl border border-slate-700 bg-slate-900 p-1 shadow-2xl space-y-0.5">
+                  {STATUS_OPTIONS.map((st) => (
+                    <button
+                      key={st.value}
+                      type="button"
+                      onClick={() => {
+                        setDefaultStatus(st.value);
+                        setIsStatusMenuOpen(false);
+                      }}
+                      className={`w-full flex items-center justify-between rounded-lg px-2.5 py-1.5 text-xs font-bold transition-colors cursor-pointer ${
+                        defaultStatus === st.value
+                          ? "bg-indigo-600 text-white"
+                          : "text-slate-300 hover:bg-slate-800"
+                      }`}
+                    >
+                      <span className="flex items-center gap-2">
+                        <span className={`h-2 w-2 rounded-full ${st.dot}`} />
+                        <span>{st.label}</span>
+                      </span>
+                      {defaultStatus === st.value && <Check className="h-3.5 w-3.5" />}
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+
+          {/* Manual Zoom Controls */}
+          <div className="inline-flex items-center gap-0.5 rounded-xl bg-slate-900 px-1.5 py-1 border border-slate-800 text-[11px] font-bold">
+            <button
+              type="button"
+              onClick={() => applyCameraZoom(cameraZoomLevel - 0.25)}
+              disabled={cameraZoomLevel <= 1.0}
+              className="p-1 rounded text-slate-400 hover:text-white disabled:opacity-30 cursor-pointer"
+              title="Zoom Out"
+            >
+              <ZoomOut className="h-3.5 w-3.5" />
+            </button>
+            <span className="font-mono text-[11px] font-black text-indigo-300 tabular-nums px-1">
+              {cameraZoomLevel.toFixed(1)}x
+            </span>
+            <button
+              type="button"
+              onClick={() => applyCameraZoom(cameraZoomLevel + 0.25)}
+              disabled={cameraZoomLevel >= 2.5}
+              className="p-1 rounded text-slate-400 hover:text-white disabled:opacity-30 cursor-pointer"
+              title="Zoom In"
+            >
+              <ZoomIn className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        </div>
+
+        {/* Fixed Square Camera Space */}
+        <div className="relative flex flex-col items-center justify-center w-full my-auto">
+          {cameraError && (
+            <div className="mb-2.5 w-full max-w-[340px] sm:max-w-[380px] rounded-xl border border-amber-700/80 bg-amber-950/90 px-3.5 py-2 text-xs font-semibold text-amber-200 text-center">
+              {cameraError}
+            </div>
+          )}
+
+          {/* Dedicated Fixed Square Camera Container */}
+          <div
+            onClick={handleTouchToFocus}
+            onTouchStart={handleTouchToFocus}
+            className={`relative aspect-square w-[min(85vw,330px)] sm:w-[370px] rounded-3xl bg-black overflow-hidden flex items-center justify-center border-2 transition-all duration-200 cursor-crosshair shadow-2xl ${
+              cameraScanSuccess
+                ? "border-emerald-500 shadow-[0_0_32px_rgba(16,185,129,0.45)]"
+                : formatError
+                ? "border-rose-500 shadow-[0_0_28px_rgba(244,63,94,0.45)]"
+                : isFocusing
+                ? "border-indigo-400/90"
+                : "border-slate-800"
+            }`}
+          >
+            <video
+              ref={videoRef}
+              style={{
+                transform: isHwZoomSupported
+                  ? undefined
+                  : `scale(${cameraZoomLevel})`,
+                transition: "transform 150ms ease-out",
+              }}
+              className="absolute inset-0 w-full h-full object-cover pointer-events-none"
+              playsInline
+              muted
+              autoPlay
+            />
+
+            {/* Touch-to-Focus Reticle at Tap Point */}
+            {focusRing && (
+              <div
+                key={focusRing.id}
+                style={{
+                  left: focusRing.x - 26,
+                  top: focusRing.y - 26,
+                }}
+                className="absolute z-30 h-13 w-13 pointer-events-none rounded-xl border-2 border-amber-400 shadow-[0_0_12px_rgba(251,191,36,0.7)] flex items-center justify-center animate-pulse"
+              >
+                <div className="h-1.5 w-1.5 rounded-full bg-amber-300" />
+              </div>
+            )}
+
+            {/* Guide Frame (Strictly scans inside this frame; no text note overlay) */}
+            {cameraGuideMode === "barcode" && (
+              <div
+                className={`relative z-10 w-[84%] h-[38%] rounded-2xl border-2 pointer-events-none shadow-[0_0_0_9999px_rgba(2,6,23,0.58)] flex items-center justify-center transition-colors ${
+                  cameraScanSuccess
+                    ? "border-emerald-400 bg-emerald-500/15"
+                    : formatError
+                    ? "border-rose-500 bg-rose-500/15"
+                    : "border-white/85"
+                }`}
+              >
+                {!cameraScanSuccess && !formatError && (
+                  <div className="w-[92%] h-0.5 bg-red-500 shadow-[0_0_14px_#ef4444] animate-pulse" />
+                )}
+              </div>
+            )}
+
+            {cameraGuideMode === "qr" && (
+              <div
+                className={`relative z-10 w-[68%] h-[68%] rounded-2xl border-2 pointer-events-none shadow-[0_0_0_9999px_rgba(2,6,23,0.58)] flex items-center justify-center transition-colors ${
+                  cameraScanSuccess
+                    ? "border-emerald-400 bg-emerald-500/15"
+                    : formatError
+                    ? "border-rose-500 bg-rose-500/15"
+                    : "border-white/85"
+                }`}
+              >
+                {!cameraScanSuccess && !formatError && (
+                  <div className="w-[88%] h-0.5 bg-red-500 shadow-[0_0_14px_#ef4444] animate-pulse" />
+                )}
+              </div>
+            )}
+
+            {cameraGuideMode === "both" && (
+              <div
+                className={`relative z-10 w-[82%] h-[68%] rounded-2xl border-2 pointer-events-none shadow-[0_0_0_9999px_rgba(2,6,23,0.58)] flex items-center justify-center transition-colors ${
+                  cameraScanSuccess
+                    ? "border-emerald-400 bg-emerald-500/15"
+                    : formatError
+                    ? "border-rose-500 bg-rose-500/15"
+                    : "border-white/85"
+                }`}
+              >
+                <div className="w-[62%] aspect-square rounded-xl border border-white/40" />
+                {!cameraScanSuccess && !formatError && (
+                  <div className="absolute left-3 right-3 h-0.5 bg-red-500 shadow-[0_0_14px_#ef4444] animate-pulse" />
+                )}
+              </div>
+            )}
+
+            {/* Quick Success Checkmark Overlay */}
+            {cameraScanSuccess && (
+              <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-slate-950/70 backdrop-blur-[2px] animate-in zoom-in-95 duration-150 pointer-events-none">
+                <div className="flex h-14 w-14 items-center justify-center rounded-full bg-emerald-500 text-white shadow-xl shadow-emerald-500/40 ring-4 ring-emerald-400/30">
+                  <Check className="h-8 w-8 stroke-[3.5]" />
+                </div>
+                <div className="mt-2.5 rounded-full bg-emerald-500 px-3.5 py-1 text-xs font-black tracking-wider text-white font-mono shadow-lg">
+                  ✓ {cameraScanSuccess.code}
+                </div>
+                <div className="mt-1 text-[11px] font-bold text-emerald-300">
+                  {cameraScanSuccess.carrier}
+                </div>
+              </div>
+            )}
+
+            {/* Invalid Consignment ID Format Overlay inside Square Camera */}
+            {formatError && (
+              <div className="absolute inset-x-3 bottom-3 z-30 rounded-2xl border border-rose-500/90 bg-rose-950/95 p-3 text-white shadow-2xl backdrop-blur-md animate-in fade-in">
+                <div className="flex items-start gap-2">
+                  <AlertTriangle className="h-4 w-4 text-rose-400 shrink-0 mt-0.5" />
+                  <div className="min-w-0 flex-1 text-left">
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="text-[11px] font-black uppercase tracking-wider text-rose-300">
+                        Invalid Format Rejected
+                      </span>
+                      <span className="rounded bg-rose-900/80 px-1.5 py-0.5 font-mono text-[10px] font-bold text-rose-200 truncate max-w-[120px]">
+                        {formatError.code}
+                      </span>
+                    </div>
+                    <p className="mt-0.5 text-[11px] text-rose-200 leading-snug">
+                      {formatError.message}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Duplicate Scan Alert Pill */}
+            {duplicateAlert && !formatError && (
+              <div className="absolute bottom-3 inset-x-4 z-30 rounded-xl border border-amber-500/70 bg-amber-950/95 px-3 py-1.5 text-center text-xs font-bold text-amber-300 shadow-lg">
+                {duplicateAlert}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Collapsible Scanned Queue Strip */}
+        <div className="w-full max-w-md rounded-2xl border border-slate-800 bg-slate-900/95 overflow-hidden shrink-0">
+          <div
+            onClick={() => stagedItems.length > 0 && setIsQueueExpanded((prev) => !prev)}
+            className={`px-3.5 py-2.5 flex items-center justify-between gap-2 ${
+              stagedItems.length > 0 ? "cursor-pointer hover:bg-slate-800/60" : ""
+            }`}
+          >
+            {stagedItems.length > 0 ? (
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-emerald-500/20 text-emerald-400">
+                  <Check className="h-3 w-3 stroke-[3]" />
+                </span>
+                <div className="truncate text-xs">
+                  <span className="font-mono font-black text-white">
+                    {stagedItems[0].trackingNumber}
+                  </span>
+                  <span className="text-indigo-400 font-semibold ml-1.5">
+                    • {stagedItems[0].courierName}
+                  </span>
+                </div>
+              </div>
+            ) : (
+              <span className="text-[11px] text-slate-400 flex items-center gap-1.5 truncate">
+                <Focus className="h-3.5 w-3.5 text-indigo-400 shrink-0" />
+                <span>Tap camera to focus • Only valid Consignment IDs accepted</span>
+              </span>
+            )}
+
+            <div className="flex items-center gap-2 shrink-0">
+              {stagedItems.length > 0 && (
+                <button
+                  type="button"
+                  className="inline-flex items-center gap-1 rounded-lg bg-slate-800 px-2.5 py-1 text-[11px] font-bold text-indigo-300 hover:bg-slate-700 cursor-pointer"
+                >
+                  <span>{isQueueExpanded ? "Hide" : `List (${stagedItems.length})`}</span>
+                  {isQueueExpanded ? (
+                    <ChevronDown className="h-3.5 w-3.5" />
+                  ) : (
+                    <ChevronUp className="h-3.5 w-3.5" />
+                  )}
+                </button>
+              )}
+            </div>
+          </div>
+
+          {isQueueExpanded && stagedItems.length > 0 && (
+            <div className="border-t border-slate-800 max-h-36 overflow-y-auto divide-y divide-slate-800/70 px-3 py-1 bg-slate-950/80">
+              {stagedItems.map((item) => (
+                <div
+                  key={item.id}
+                  className="py-1.5 flex items-center justify-between gap-2 text-xs"
+                >
+                  <span className="font-mono font-black text-indigo-400 truncate">
+                    {item.trackingNumber}
+                  </span>
+
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <select
+                      value={item.courierId}
+                      onChange={(e) => handleUpdateItemCarrier(item.id, e.target.value)}
+                      className="rounded-lg border border-slate-700 bg-slate-900 px-2 py-1 text-[10px] font-semibold text-slate-200 cursor-pointer"
+                    >
+                      {COURIER_LIST.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.shortName}
+                        </option>
+                      ))}
+                    </select>
+
+                    <select
+                      value={item.status}
+                      onChange={(e) =>
+                        handleUpdateItemStatus(item.id, e.target.value as StatusOption)
+                      }
+                      className="rounded-lg border border-slate-700 bg-slate-900 px-2 py-1 text-[10px] font-bold text-slate-200 cursor-pointer"
+                    >
+                      <option value="booked">Booked</option>
+                      <option value="in_transit">In Transit</option>
+                      <option value="out_for_delivery">Out for Del</option>
+                      <option value="delivered">Delivered</option>
+                      <option value="returned">Returned</option>
+                    </select>
+
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveItem(item.id)}
+                      className="p-1 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-950/50 cursor-pointer"
+                      title="Remove item"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ================================================================= */}
+      {/* 3. MOBILE-RESPONSIVE BOTTOM ACTION FOOTER                          */}
+      {/* ================================================================= */}
+      <footer className="border-t border-slate-800/90 px-3.5 sm:px-6 py-3 bg-slate-900/95 shrink-0">
+        <div className="mx-auto max-w-2xl">
+          {stagedItems.length > 0 ? (
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+              <div className="grid grid-cols-2 sm:flex items-center gap-2 order-2 sm:order-1">
+                <button
+                  type="button"
+                  onClick={handleRequestCancel}
+                  className="rounded-xl border border-slate-700 bg-slate-800 hover:bg-slate-700 px-4 py-2.5 text-xs font-bold text-slate-200 transition-colors cursor-pointer text-center"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleReturnToReview}
+                  className="rounded-xl border border-indigo-500/40 bg-indigo-950/60 hover:bg-indigo-900/70 px-4 py-2.5 text-xs font-bold text-indigo-200 transition-colors cursor-pointer text-center"
+                >
+                  Review ({stagedItems.length})
+                </button>
+              </div>
+
+              <button
+                type="button"
+                onClick={handleDirectConfirmIngest}
+                className="order-1 sm:order-2 w-full sm:w-auto inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 px-5 py-2.5 text-xs font-extrabold text-white shadow-lg shadow-emerald-950/50 transition-all cursor-pointer"
+              >
+                <Check className="h-4 w-4 stroke-[3]" />
+                <span>Confirm &amp; Add ({stagedItems.length})</span>
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-center justify-between gap-2">
+              <button
+                type="button"
+                onClick={handleRequestCancel}
+                className="flex-1 sm:flex-none rounded-xl border border-slate-700 bg-slate-800 hover:bg-slate-700 px-5 py-2.5 text-xs font-bold text-slate-200 transition-colors cursor-pointer text-center"
+              >
+                Cancel &amp; Back to Dashboard
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setIsAutoNextEnabled((prev) => !prev)}
+                className={`rounded-xl px-3.5 py-2.5 text-xs font-bold border transition-colors cursor-pointer shrink-0 ${
+                  isAutoNextEnabled
+                    ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-300"
+                    : "border-slate-800 bg-slate-950 text-slate-400"
+                }`}
+              >
+                Auto-Next: {isAutoNextEnabled ? "ON" : "OFF"}
+              </button>
+            </div>
+          )}
+        </div>
+      </footer>
+
+      {/* Safe Discard Confirmation Modal */}
+      {isCancelConfirmOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-xs animate-in fade-in">
+          <div className="w-full max-w-md rounded-2xl border border-slate-800 bg-slate-900 p-5 shadow-2xl space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-rose-950/80 text-rose-400 border border-rose-800/60">
+                <ShieldAlert className="h-5 w-5" />
+              </div>
+              <div>
+                <h3 className="text-sm font-black text-white">
+                  Discard {stagedItems.length} Scanned Consignment{stagedItems.length === 1 ? "" : "s"}?
+                </h3>
+                <p className="mt-1 text-xs text-slate-400">
+                  You have {stagedItems.length} scanned consignment{stagedItems.length === 1 ? "" : "s"} waiting to be added. Do you want to keep scanning, review them, or discard them?
+                </p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:flex sm:flex-wrap items-center justify-end gap-2 pt-2 border-t border-slate-800">
+              <button
+                type="button"
+                onClick={() => setIsCancelConfirmOpen(false)}
+                className="rounded-xl border border-slate-700 bg-slate-800 hover:bg-slate-700 px-3.5 py-2.5 text-xs font-bold text-slate-200 cursor-pointer"
+              >
+                Keep Scanning
+              </button>
+              <button
+                type="button"
+                onClick={handleReturnToReview}
+                className="rounded-xl bg-indigo-600 hover:bg-indigo-500 px-3.5 py-2.5 text-xs font-bold text-white cursor-pointer"
+              >
+                Review ({stagedItems.length})
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmDiscardAndExit}
+                className="rounded-xl bg-rose-600 hover:bg-rose-500 px-3.5 py-2.5 text-xs font-extrabold text-white cursor-pointer"
+              >
+                Discard &amp; Exit
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

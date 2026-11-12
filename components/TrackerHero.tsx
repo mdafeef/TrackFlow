@@ -1,9 +1,8 @@
 "use client";
 
 import React, { useState, useEffect } from "react";
-import { useRouter } from "next/navigation";
-import { Search, X, ChevronDown, CheckCircle2, ShieldCheck, Zap, Camera } from "lucide-react";
-import { COURIER_LIST, COURIER_MAP, autoDetectCourier, CourierConfig } from "@/lib/couriers";
+import { Search, X, ChevronDown, CheckCircle2, ShieldCheck, Zap, ClipboardPaste, Check } from "lucide-react";
+import { COURIER_LIST, COURIER_MAP, autoDetectCourier, CourierConfig, validateConsignmentFormat } from "@/lib/couriers";
 import { AnimatedSpiralBg } from "@/components/AnimatedSpiralBg";
 
 interface TrackerHeroProps {
@@ -19,8 +18,8 @@ export function TrackerHero({
   initialTracking = "",
   initialCourier = "",
 }: TrackerHeroProps) {
-  const router = useRouter();
   const [trackingNumber, setTrackingNumber] = useState(initialTracking);
+  const [isJustPasted, setIsJustPasted] = useState(false);
   const [selectedCourierId, setSelectedCourierId] = useState<string>(() => {
     if (initialCourier && COURIER_MAP[initialCourier]) return initialCourier;
     if (initialTracking) {
@@ -116,6 +115,34 @@ export function TrackerHero({
     }
   };
 
+  // Handle pasting from clipboard
+  const handlePasteFromClipboard = async () => {
+    try {
+      if (typeof navigator !== "undefined" && navigator.clipboard && navigator.clipboard.readText) {
+        const text = await navigator.clipboard.readText();
+        if (text && text.trim()) {
+          const cleaned = text.trim().toUpperCase().replace(/\s+/g, "");
+          setTrackingNumber(cleaned);
+          const validation = validateConsignmentFormat(cleaned);
+          if (!validation.isValid) {
+            setErrorText(validation.error || "Invalid consignment format.");
+          } else {
+            setErrorText("");
+          }
+          const detected = autoDetectCourier(cleaned);
+          setDetectedCourier(detected);
+          if (detected && !selectedCourierId) {
+            setSelectedCourierId(detected.id);
+          }
+          setIsJustPasted(true);
+          setTimeout(() => setIsJustPasted(false), 1600);
+        }
+      }
+    } catch {
+      setErrorText("Clipboard access denied. Please paste manually into the search box.");
+    }
+  };
+
   const handleClear = () => {
     setTrackingNumber("");
     setDetectedCourier(null);
@@ -125,9 +152,15 @@ export function TrackerHero({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    const clean = trackingNumber.trim();
+    const clean = trackingNumber.trim().toUpperCase().replace(/\s+/g, "");
     if (!clean) {
       setErrorText("Please enter a valid tracking or consignment number.");
+      return;
+    }
+
+    const validation = validateConsignmentFormat(clean);
+    if (!validation.isValid) {
+      setErrorText(validation.error || "Invalid consignment ID format.");
       return;
     }
 
@@ -310,22 +343,21 @@ export function TrackerHero({
               )}
               <button
                 type="button"
-                onClick={() => {
-                  try {
-                    sessionStorage.setItem(
-                      "trackflow_scan_context",
-                      JSON.stringify({
-                        mode: "single",
-                        defaultCourierId: selectedCourierId || "auto",
-                      })
-                    );
-                  } catch {}
-                  router.push("/scan");
-                }}
-                className="ml-1 inline-flex items-center justify-center rounded-xl border border-slate-200 bg-slate-50 p-2 text-slate-600 hover:border-indigo-400 hover:bg-indigo-50 hover:text-indigo-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300 dark:hover:border-indigo-500 dark:hover:text-indigo-400 transition-colors cursor-pointer shrink-0"
-                title="Open Separate Camera Scan Page"
+                onClick={handlePasteFromClipboard}
+                className="ml-1.5 inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs font-bold text-slate-700 hover:border-indigo-400 hover:bg-indigo-50 hover:text-indigo-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:border-indigo-500 dark:hover:text-indigo-400 transition-colors cursor-pointer shrink-0"
+                title="Paste Consignment or AWB Number from Clipboard"
               >
-                <Camera className="h-4 w-4" />
+                {isJustPasted ? (
+                  <>
+                    <Check className="h-3.5 w-3.5 text-emerald-500 stroke-[3]" />
+                    <span className="hidden sm:inline text-emerald-600 dark:text-emerald-400 font-bold">Pasted</span>
+                  </>
+                ) : (
+                  <>
+                    <ClipboardPaste className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" />
+                    <span className="hidden sm:inline">Paste</span>
+                  </>
+                )}
               </button>
             </div>
 
