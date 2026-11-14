@@ -1,5 +1,5 @@
 export type PublicTabId = "track" | "carriers" | "features" | "faq";
-export type WorkspaceTabId = "dashboard" | "data" | "batches" | "analytics" | "settings" | "profile";
+export type WorkspaceTabId = "dashboard" | "data" | "batches" | "labels" | "analytics" | "settings" | "profile";
 
 export const PUBLIC_TAB_PATHS: Record<PublicTabId, string> = {
   track: "/",
@@ -12,6 +12,7 @@ export const WORKSPACE_TAB_PATHS: Record<WorkspaceTabId, string> = {
   dashboard: "/dashboard",
   data: "/consignments",
   batches: "/batches",
+  labels: "/labels",
   analytics: "/analytics",
   settings: "/settings",
   profile: "/profile",
@@ -72,6 +73,13 @@ export function resolveRouteFromPathname(pathname: string): ResolvedTabRoute {
         workspaceTab: "batches",
         canonicalPath: "/batches",
       };
+    case "/labels":
+      return {
+        view: "bulk",
+        publicTab: "track",
+        workspaceTab: "labels",
+        canonicalPath: "/labels",
+      };
     case "/analytics":
       return {
         view: "bulk",
@@ -110,10 +118,15 @@ export function silentNavigateTab(targetPath: string, replace: boolean = false) 
   try {
     const currentPath = window.location.pathname;
     if (currentPath !== targetPath || window.location.search) {
+      const nextState = {
+        ...(window.history.state || {}),
+        __NA: true,
+        trackflowTab: targetPath,
+      };
       if (replace) {
-        window.history.replaceState({ trackflowTab: targetPath }, "", targetPath);
+        window.history.replaceState(nextState, "", targetPath);
       } else {
-        window.history.pushState({ trackflowTab: targetPath }, "", targetPath);
+        window.history.pushState(nextState, "", targetPath);
       }
     }
   } catch {

@@ -90,6 +90,12 @@ import {
   resolveRouteFromPathname,
   silentNavigateTab,
 } from "@/lib/tabRoutes";
+import BulkLabelPrintTool from "@/components/BulkLabelPrintTool";
+import {
+  decryptCustomerMiniQR,
+  validateIndianPhone,
+  validateIndianPincode,
+} from "@/lib/customerQrCrypto";
 
 export interface BulkShipment {
   id: string;
@@ -256,7 +262,7 @@ const DEFAULT_SHIPMENTS: BulkShipment[] = [
   },
 ];
 
-export type SidebarMenuId = "dashboard" | "data" | "batches" | "analytics" | "settings" | "profile";
+export type SidebarMenuId = "dashboard" | "data" | "batches" | "labels" | "analytics" | "settings" | "profile";
 
 interface BulkDashboardProps {
   onOpenTrackingResult: (trackingNumber: string, courierId: string) => void;
@@ -308,15 +314,16 @@ export function BulkDashboard({
 
   const [searchFilter, setSearchFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | "delivered" | "in_transit" | "out_for_delivery" | "returned" | "booked">("all");
-  const [activeMenu, setActiveMenuState] = useState<SidebarMenuId>(() => {
+  const [activeMenu, setActiveMenuState] = useState<SidebarMenuId>("dashboard");
+
+  useEffect(() => {
     if (typeof window !== "undefined") {
       const resolved = resolveRouteFromPathname(window.location.pathname);
       if (resolved.view === "bulk") {
-        return resolved.workspaceTab;
+        setActiveMenuState(resolved.workspaceTab);
       }
     }
-    return "dashboard";
-  });
+  }, []);
 
   const setActiveMenu = React.useCallback((next: SidebarMenuId, skipUrlPush: boolean = false) => {
     setActiveMenuState(next);
@@ -326,14 +333,14 @@ export function BulkDashboard({
   }, []);
 
   // Collapsible Left Sidebar & Mobile Drawer State
-  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => {
-    if (typeof window !== "undefined") {
-      try {
-        return localStorage.getItem("trackflow_sidebar_collapsed") === "true";
-      } catch {}
-    }
-    return false;
-  });
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(false);
+  useEffect(() => {
+    try {
+      if (localStorage.getItem("trackflow_sidebar_collapsed") === "true") {
+        setIsSidebarCollapsed(true);
+      }
+    } catch {}
+  }, []);
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState<boolean>(false);
 
   const toggleSidebarCollapse = React.useCallback(() => {
@@ -642,6 +649,21 @@ export function BulkDashboard({
   const [isAutoNextEnabled, setIsAutoNextEnabled] = useState(true);
   const [isPasteAnywayEnabled, setIsPasteAnywayEnabled] = useState<boolean>(false);
   const isPasteAnywayEnabledRef = useRef<boolean>(false);
+  // ON/OFF toggle for 2-Step Customer Data Mini QR Scan (1st scan AWB -> 2nd scan Customer Data QR -> auto next AWB)
+  const [isScanCustomerQrEnabled, setIsScanCustomerQrEnabled] = useState<boolean>(true);
+  const isScanCustomerQrEnabledRef = useRef<boolean>(true);
+  const [customerQrScanStep, setCustomerQrScanStep] = useState<{
+    step: "awaiting_awb" | "awaiting_customer_qr";
+    pendingAwb: string;
+    pendingCourierId: string;
+    pendingCourierName: string;
+  }>({
+    step: "awaiting_awb",
+    pendingAwb: "",
+    pendingCourierId: "",
+    pendingCourierName: "",
+  });
+  const customerQrScanStepRef = useRef(customerQrScanStep);
   const [recentStagedCode, setRecentStagedCode] = useState<string | null>(null);
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [cameraGuideMode, setCameraGuideMode] = useState<"barcode" | "qr" | "both">("both");
@@ -678,6 +700,26 @@ export function BulkDashboard({
   useEffect(() => {
     isPasteAnywayEnabledRef.current = isPasteAnywayEnabled;
   }, [isPasteAnywayEnabled]);
+
+  useEffect(() => {
+    isScanCustomerQrEnabledRef.current = isScanCustomerQrEnabled;
+    try {
+      localStorage.setItem("trackflow_scan_customer_qr", String(isScanCustomerQrEnabled));
+    } catch {}
+  }, [isScanCustomerQrEnabled]);
+
+  useEffect(() => {
+    customerQrScanStepRef.current = customerQrScanStep;
+  }, [customerQrScanStep]);
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem("trackflow_scan_customer_qr");
+      if (saved === "false") {
+        setIsScanCustomerQrEnabled(false);
+      }
+    } catch {}
+  }, []);
 
   // Auto-filter when typing any letters while Add Consignments carrier dropdown is open
   useEffect(() => {
@@ -974,13 +1016,65 @@ export function BulkDashboard({
     statusOverride?: "booked" | "in_transit" | "out_for_delivery" | "delivered" | "returned",
     returnReasonOverride?: string,
     scanSource: "manual" | "camera" = "manual",
-    forcePasteAnyway: boolean = false
+    forcePasteAnyway: boolean = false,
+    customerQrDataOverride?: {
+      customerName: string;
+      customerPhone: string;
+      pincode: string;
+      itemCode: string;
+    }
   ) => {
     const rawTrimmed = awbToStage.trim();
     if (!rawTrimmed) {
       setIntakeError("Consignment ID cannot be empty.");
       playChime(false);
       return;
+    }
+
+    // Check if the user scanned or pasted an Encrypted Office Customer Mini QR ("TFQR1:...") directly
+    const qrCheck = decryptCustomerMiniQR(rawTrimmed);
+    if (qrCheck.isCustomerQR) {
+      if (!qrCheck.isValid || !qrCheck.data) {
+        setFlaggedInvalidCode(null);
+        setIntakeError(qrCheck.error || "Invalid Encrypted Customer Mini QR.");
+        playChime(false);
+        return;
+      }
+      // Auto-fill customer fields from the decrypted Mini QR
+      setIntakeRecipient(qrCheck.data.customerName);
+      setIntakePhone(qrCheck.data.customerPhone);
+      setIntakePincode(qrCheck.data.pincode);
+      setIntakeItemCode(qrCheck.data.itemCode);
+      setIntakeError("");
+
+      // If we were waiting for the 2nd scan (Customer QR) for a pending AWB, complete & stage immediately!
+      const pendingAwb = customerQrScanStepRef.current.pendingAwb;
+      if (pendingAwb) {
+        setCustomerQrScanStep({
+          step: "awaiting_awb",
+          pendingAwb: "",
+          pendingCourierId: "",
+          pendingCourierName: "",
+        });
+        handleStageConsignment(
+          pendingAwb,
+          customerQrScanStepRef.current.pendingCourierId || undefined,
+          qrCheck.data.customerName,
+          `Pin ${qrCheck.data.pincode}`,
+          undefined,
+          undefined,
+          scanSource,
+          true,
+          qrCheck.data
+        );
+        return;
+      } else {
+        setIntakeAwb("");
+        playChime(true);
+        setRecentStagedCode(`Customer QR Filled (${qrCheck.data.customerName})`);
+        setTimeout(() => setRecentStagedCode(null), 3000);
+        return;
+      }
     }
 
     const identification = identifyAndValidateConsignment(rawTrimmed);
@@ -1005,9 +1099,6 @@ export function BulkDashboard({
       return;
     }
 
-    setFlaggedInvalidCode(null);
-    setIntakeError("");
-
     const detected = identification.courier || autoDetectCourier(cleanNum);
     // Logically identify carrier from Consignment ID format & length unless explicitly overridden
     const chosenCourier = courierOverride
@@ -1018,17 +1109,50 @@ export function BulkDashboard({
       setIntakeCourier(detected.id);
     }
 
+    // Validate Indian Phone Number (+91 / 91 or 10-digit) and 6-Digit Indian Pincode when provided
+    const effectivePhone = (customerQrDataOverride?.customerPhone ?? intakePhone).trim();
+    const effectivePin = (customerQrDataOverride?.pincode ?? intakePincode).trim();
+    const effectiveName = (customerQrDataOverride?.customerName ?? recipientOverride ?? intakeRecipient).trim();
+    const effectiveItemCode = (customerQrDataOverride?.itemCode ?? intakeItemCode).trim();
+
+    if (effectivePhone) {
+      const phoneCheck = validateIndianPhone(effectivePhone);
+      if (!phoneCheck.isValid) {
+        setFlaggedInvalidCode(null);
+        setIntakeError(`Customer Phone Error: ${phoneCheck.error}`);
+        playChime(false);
+        return;
+      }
+    }
+
+    if (effectivePin) {
+      const pinCheck = validateIndianPincode(effectivePin);
+      if (!pinCheck.isValid) {
+        setFlaggedInvalidCode(null);
+        setIntakeError(`Pincode Error: ${pinCheck.error}`);
+        playChime(false);
+        return;
+      }
+    }
+
+    setFlaggedInvalidCode(null);
+    setIntakeError("");
+
     const isReturnedSim = cleanNum.includes("RT") || cleanNum.includes("RETURN");
-    // Respect user-selected status in Add Consignment dropdown (including Booked), unless RTO prefix is scanned in camera mode
     const finalStatus: BulkShipment["status"] =
       statusOverride ||
       (scanSource === "camera" && isReturnedSim ? "returned" : intakeStatus);
 
-    const resolvedPin = intakePincode.trim();
-    const resolvedItemCode = intakeItemCode.trim();
+    const normalizedPhoneFinal = effectivePhone
+      ? (() => {
+          const p = validateIndianPhone(effectivePhone);
+          return p.isValid ? (p.had91Prefix ? p.formattedWith91 : p.normalized10) : effectivePhone;
+        })()
+      : "";
+
     const resolvedDest =
       destinationOverride?.trim() ||
-      (resolvedPin ? `Pin ${resolvedPin}` : "Destination Center");
+      (effectivePin ? `Pin ${effectivePin}` : "Destination Center");
     const resolvedOrigin = userProfile.hubCity
       ? `${userProfile.hubCity}${userProfile.hubPincode ? ` (${userProfile.hubPincode})` : ""}`
       : "Origin Booking Facility";
@@ -1070,26 +1194,40 @@ export function BulkDashboard({
       statusText: meta.statusText,
       origin: resolvedOrigin,
       destination: resolvedDest,
-      pincode: resolvedPin || undefined,
-      itemCode: resolvedItemCode || undefined,
+      pincode: effectivePin || undefined,
+      itemCode: effectiveItemCode || undefined,
       articleType: finalStatus === "booked" ? "Booked Consignment" : "Registered Consignment",
       weight: "250 g",
       lastUpdated: "Staged Just Now",
       lastLocation: meta.lastLocation,
-      recipientName: recipientOverride?.trim() || intakeRecipient.trim() || undefined,
-      customerPhone: intakePhone.trim() || undefined,
+      recipientName: effectiveName || undefined,
+      customerPhone: normalizedPhoneFinal || undefined,
       returnReason: finalStatus === "returned" ? (returnReasonOverride || intakeReturnReason.trim() || "Delivery Attempt Failed") : undefined,
     };
 
     setStagedConsignments((prev) => [newStaged, ...prev]);
     playChime(true);
-    setRecentStagedCode(cleanNum);
+    setRecentStagedCode(
+      effectiveName ? `${cleanNum} • ${effectiveName} (${effectivePin})` : cleanNum
+    );
     setTimeout(() => setRecentStagedCode(null), 3000);
+
+    // Reset 2-step customer QR state to awaiting_awb for the next customer
+    setCustomerQrScanStep({
+      step: "awaiting_awb",
+      pendingAwb: "",
+      pendingCourierId: "",
+      pendingCourierName: "",
+    });
 
     // If scanned from camera, NEVER focus the text input so the mobile keyboard does not open!
     if (scanSource === "camera" || isCameraActive) {
       if (isAutoNextEnabled) {
         setIntakeAwb("");
+        setIntakeRecipient("");
+        setIntakePhone("");
+        setIntakePincode("");
+        setIntakeItemCode("");
       }
       if (typeof document !== "undefined" && document.activeElement instanceof HTMLElement) {
         document.activeElement.blur();
@@ -1115,10 +1253,53 @@ export function BulkDashboard({
     }
   }, [stagedConsignments, intakeCourier, intakeStatus, intakeItemCode, intakeRecipient, intakePhone, intakePincode, intakeReturnReason, userProfile.hubCity, userProfile.hubPincode, isAutoNextEnabled, isCameraActive, playChime]);
 
-  // Handle hardware scanner or manual Enter in input
+  // Handle hardware scanner or manual Enter in input (supports 2-step AWB -> Customer QR scan cycle)
   const handleIntakeKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter") {
       e.preventDefault();
+      const trimmed = intakeAwb.trim();
+      if (!trimmed) return;
+
+      // Check if it's an Encrypted Customer Mini QR ("TFQR1:...")
+      const qrRes = decryptCustomerMiniQR(trimmed);
+      if (qrRes.isCustomerQR) {
+        handleStageConsignment(trimmed);
+        return;
+      }
+
+      // If Scan Customer Data QR mode is ON and we are in Step 1 (awaiting_awb) and customer fields are empty:
+      if (
+        isScanCustomerQrEnabled &&
+        customerQrScanStep.step === "awaiting_awb" &&
+        !intakeRecipient.trim() &&
+        !intakePhone.trim() &&
+        !intakePincode.trim()
+      ) {
+        const identification = identifyAndValidateConsignment(trimmed);
+        if (!identification.isValid && !isPasteAnywayEnabled) {
+          setFlaggedInvalidCode(identification.normalized || trimmed.toUpperCase());
+          setIntakeError(
+            identification.error || "Invalid Consignment ID format."
+          );
+          playChime(false);
+          return;
+        }
+        const cleanNum = identification.normalized || trimmed.toUpperCase().replace(/\s+/g, "");
+        const detected = identification.courier || autoDetectCourier(cleanNum) || COURIER_LIST[0];
+        setIntakeCourier(detected.id);
+        setIntakeError("");
+        setFlaggedInvalidCode(null);
+        setCustomerQrScanStep({
+          step: "awaiting_customer_qr",
+          pendingAwb: cleanNum,
+          pendingCourierId: detected.id,
+          pendingCourierName: detected.name,
+        });
+        setIntakeAwb("");
+        playChime(true);
+        return;
+      }
+
       // If Auto-Next is OFF and this ID was already staged, pressing Enter advances to next scan
       if (!isAutoNextEnabled && recentStagedCode && intakeAwb === recentStagedCode) {
         setIntakeAwb("");
@@ -1356,11 +1537,12 @@ export function BulkDashboard({
           mode: "bulk",
           defaultStatus: intakeStatus,
           defaultCourierId: "auto",
+          scanCustomerQr: isScanCustomerQrEnabled,
         })
       );
     } catch {}
     router.push("/scan");
-  }, [stopCameraStreamOnly, stagedConsignments, intakeStatus, router]);
+  }, [stopCameraStreamOnly, stagedConsignments, intakeStatus, isScanCustomerQrEnabled, router]);
 
   // Check if returning from the dedicated /scan camera page with staged consignments for review
   useEffect(() => {
@@ -1550,10 +1732,78 @@ export function BulkDashboard({
     }
 
     const handleDetectedValue = (rawVal: string): boolean => {
-      const code = extractCleanScannedCode(rawVal);
-      if (!code || code.length < 4) return false;
+      const trimmedRaw = (rawVal || "").trim();
+      if (!trimmedRaw) return false;
 
       const now = Date.now();
+      if (
+        lastScannedRef.current.code === trimmedRaw &&
+        now - lastScannedRef.current.timestamp < 2200
+      ) {
+        return true;
+      }
+
+      // Check if scanned code is an Encrypted Office Customer Mini QR ("TFQR1:...")
+      const customerQr = decryptCustomerMiniQR(trimmedRaw);
+      if (customerQr.isCustomerQR) {
+        lastScannedRef.current = { code: trimmedRaw, timestamp: now };
+        lowQualityStreakRef.current = 0;
+        setIsEnhancingDamagedLabel(false);
+
+        if (!customerQr.isValid || !customerQr.data) {
+          setIntakeError(customerQr.error || "Invalid Encrypted Customer Mini QR.");
+          playChime(false);
+          return true;
+        }
+
+        const pendingAwb = customerQrScanStepRef.current.pendingAwb;
+        if (pendingAwb) {
+          // Complete Step 2: Fill customer details for pendingAwb, stage consignment, and auto-reset to Step 1 for next AWB!
+          const pendingCourier = customerQrScanStepRef.current.pendingCourierId;
+          setCustomerQrScanStep({
+            step: "awaiting_awb",
+            pendingAwb: "",
+            pendingCourierId: "",
+            pendingCourierName: "",
+          });
+          handleStageConsignment(
+            pendingAwb,
+            pendingCourier || undefined,
+            customerQr.data.customerName,
+            `Pin ${customerQr.data.pincode}`,
+            undefined,
+            undefined,
+            "camera",
+            true,
+            customerQr.data
+          );
+          setCameraScanSuccess({
+            code: `${pendingAwb} • ${customerQr.data.customerName}`,
+            carrier: `PIN ${customerQr.data.pincode} • ${customerQr.data.itemCode}`,
+          });
+        } else {
+          // Fill customer details into form
+          setIntakeRecipient(customerQr.data.customerName);
+          setIntakePhone(customerQr.data.customerPhone);
+          setIntakePincode(customerQr.data.pincode);
+          setIntakeItemCode(customerQr.data.itemCode);
+          playChime(true);
+          setCameraScanSuccess({
+            code: customerQr.data.customerName,
+            carrier: `${customerQr.data.formattedPhone91} • PIN ${customerQr.data.pincode}`,
+          });
+        }
+
+        if (scanSuccessTimerRef.current) clearTimeout(scanSuccessTimerRef.current);
+        scanSuccessTimerRef.current = setTimeout(() => {
+          setCameraScanSuccess(null);
+        }, 1400);
+        return true;
+      }
+
+      const code = extractCleanScannedCode(trimmedRaw);
+      if (!code || code.length < 4) return false;
+
       if (
         lastScannedRef.current.code === code &&
         now - lastScannedRef.current.timestamp < 2200
@@ -1564,14 +1814,59 @@ export function BulkDashboard({
       lowQualityStreakRef.current = 0;
       setIsEnhancingDamagedLabel(false);
 
-      const detectedCarrier = autoDetectCourier(code);
-      if (!isAutoNextEnabled) {
-        setIntakeAwb(code);
+      const identification = identifyAndValidateConsignment(code);
+      const allowUnrecognized = isPasteAnywayEnabledRef.current;
+
+      if (!identification.isValid && !allowUnrecognized) {
+        setFlaggedInvalidCode(identification.normalized || code);
+        setIntakeError(
+          identification.error || "Invalid Consignment ID format."
+        );
+        playChime(false);
+        return true;
       }
-      handleStageConsignment(code, detectedCarrier?.id, undefined, undefined, undefined, undefined, "camera");
+
+      const cleanAwb = identification.normalized || code;
+      const detectedCarrier = identification.courier || autoDetectCourier(cleanAwb);
+
+      // If 2-Step "Scan Customer Data QR" is ON:
+      // 1st scan locks in the Tracking Number (AWB) and automatically switches scanner ready for Step 2 (Customer Data QR)
+      if (isScanCustomerQrEnabledRef.current) {
+        setIntakeError("");
+        setFlaggedInvalidCode(null);
+        setIntakeAwb(cleanAwb);
+        if (detectedCarrier) {
+          setIntakeCourier(detectedCarrier.id);
+        }
+        setCustomerQrScanStep({
+          step: "awaiting_customer_qr",
+          pendingAwb: cleanAwb,
+          pendingCourierId: detectedCarrier?.id || intakeCourier,
+          pendingCourierName:
+            detectedCarrier?.shortName || detectedCarrier?.name || "Auto-Detected",
+        });
+        if (cameraGuideMode === "barcode") {
+          setCameraGuideMode("both");
+        }
+        playChime(true);
+        setCameraScanSuccess({
+          code: `Step 1 OK: ${cleanAwb}`,
+          carrier: "Now Scan Customer Mini QR →",
+        });
+        if (scanSuccessTimerRef.current) clearTimeout(scanSuccessTimerRef.current);
+        scanSuccessTimerRef.current = setTimeout(() => {
+          setCameraScanSuccess(null);
+        }, 1400);
+        return true;
+      }
+
+      if (!isAutoNextEnabled) {
+        setIntakeAwb(cleanAwb);
+      }
+      handleStageConsignment(cleanAwb, detectedCarrier?.id, undefined, undefined, undefined, undefined, "camera");
 
       setCameraScanSuccess({
-        code,
+        code: cleanAwb,
         carrier: detectedCarrier?.shortName || detectedCarrier?.name || "Auto-Detected",
       });
       if (scanSuccessTimerRef.current) clearTimeout(scanSuccessTimerRef.current);
@@ -1834,6 +2129,8 @@ export function BulkDashboard({
     cameraGuideMode,
     isAutoNextEnabled,
     isAutoZoomFocusEnabled,
+    intakeCourier,
+    playChime,
     extractCleanScannedCode,
     handleStageConsignment,
     applyInlineCameraZoomAndFocus,
@@ -3136,6 +3433,11 @@ export function BulkDashboard({
                     icon: FolderKanban,
                   },
                   {
+                    id: "labels",
+                    label: "Label Print",
+                    icon: QrCode,
+                  },
+                  {
                     id: "analytics",
                     label: "Analytics",
                     icon: BarChart3,
@@ -3299,6 +3601,11 @@ export function BulkDashboard({
                   icon: FolderKanban,
                 },
                 {
+                  id: "labels",
+                  label: "Label Print",
+                  icon: QrCode,
+                },
+                {
                   id: "analytics",
                   label: "Analytics",
                   icon: BarChart3,
@@ -3456,131 +3763,123 @@ export function BulkDashboard({
           )}
 
           {/* ========================================================== */}
-          {/* 1. REDESIGNED WORKSPACE TOP CARD (NO FOLDER ICON)          */}
+          {/* 1. REDESIGNED WORKSPACE TOP CARD (ONLY ON DASHBOARD TAB)   */}
           {/* ========================================================== */}
-          <div className="relative overflow-hidden rounded-2xl border border-slate-200/85 dark:border-slate-800/85 bg-white/95 dark:bg-slate-900/95 p-4 sm:p-5 shadow-2xs">
-            <div className="pointer-events-none absolute -top-24 -right-20 h-48 w-48 rounded-full bg-indigo-500/10 blur-3xl" />
-            <div className="pointer-events-none absolute -bottom-24 -left-20 h-48 w-48 rounded-full bg-emerald-500/10 blur-3xl" />
+          {activeMenu === "dashboard" && (
+            <div className="relative overflow-hidden rounded-2xl border border-slate-200/85 dark:border-slate-800/85 bg-white/95 dark:bg-slate-900/95 p-4 sm:p-5 shadow-2xs">
+              <div className="pointer-events-none absolute -top-24 -right-20 h-48 w-48 rounded-full bg-indigo-500/10 blur-3xl" />
+              <div className="pointer-events-none absolute -bottom-24 -left-20 h-48 w-48 rounded-full bg-emerald-500/10 blur-3xl" />
 
-            <div className="relative z-10 flex flex-col lg:flex-row lg:items-center justify-between gap-3.5">
-              {/* Left: Clean Section Title, Active Count & Live Status Bar (Zero Folder Icons) */}
-              <div className="min-w-0 flex-1 space-y-2">
-                <div className="flex flex-wrap items-center gap-2.5">
-                  <h1 className="text-lg sm:text-xl font-bold tracking-tight text-slate-900 dark:text-white leading-none">
-                    {activeMenu === "dashboard"
-                      ? "Dashboard"
-                      : activeMenu === "data"
-                      ? "Consignments"
-                      : activeMenu === "batches"
-                      ? "Batches"
-                      : activeMenu === "analytics"
-                      ? "Analytics"
-                      : activeMenu === "settings"
-                      ? "Settings"
-                      : "Account"}
-                  </h1>
+              <div className="relative z-10 flex flex-col lg:flex-row lg:items-center justify-between gap-3.5">
+                {/* Left: Clean Section Title, Active Count & Live Status Bar (Zero Folder Icons) */}
+                <div className="min-w-0 flex-1 space-y-2">
+                  <div className="flex flex-wrap items-center gap-2.5">
+                    <h1 className="text-lg sm:text-xl font-bold tracking-tight text-slate-900 dark:text-white leading-none">
+                      Dashboard
+                    </h1>
 
-                  <span className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-50 dark:bg-indigo-950/70 border border-indigo-200/70 dark:border-indigo-800/60 px-2.5 py-0.5 text-[11px] font-bold text-indigo-700 dark:text-indigo-300">
-                    <span className="h-1.5 w-1.5 rounded-full bg-indigo-500" />
-                    <span>{totalCount} Active</span>
-                  </span>
-
-                  {/* Live Sync Time & Instant Sync Pill */}
-                  <div className="inline-flex items-center gap-1.5 rounded-lg bg-slate-50 dark:bg-slate-800/80 border border-slate-200/80 dark:border-slate-700/80 pl-2.5 pr-1 py-0.5 text-[11px]">
-                    <span
-                      className={`h-1.5 w-1.5 rounded-full shrink-0 ${
-                        isAutoCheckEnabled ? "bg-emerald-500 animate-pulse" : "bg-amber-500"
-                      }`}
-                    />
-                    <span className="font-medium text-slate-500 dark:text-slate-400">
-                      {isAutoCheckEnabled ? "Sync" : "Paused"}
+                    <span className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-50 dark:bg-indigo-950/70 border border-indigo-200/70 dark:border-indigo-800/60 px-2.5 py-0.5 text-[11px] font-bold text-indigo-700 dark:text-indigo-300">
+                      <span className="h-1.5 w-1.5 rounded-full bg-indigo-500" />
+                      <span>{totalCount} Active</span>
                     </span>
-                    {isAutoCheckEnabled && (
-                      <span className="font-mono font-bold text-slate-800 dark:text-slate-200 tabular-nums">
-                        {formatTimer(secondsRemaining)}
-                      </span>
-                    )}
-                    <button
-                      type="button"
-                      onClick={handleRunAutoCheck}
-                      disabled={isRefreshing}
-                      className="ml-0.5 inline-flex items-center gap-1 rounded-md bg-white hover:bg-indigo-50 dark:bg-slate-900 dark:hover:bg-indigo-950/80 border border-slate-200/70 dark:border-slate-700 px-2 py-0.5 text-[10px] font-bold text-indigo-600 dark:text-indigo-300 transition-colors cursor-pointer disabled:opacity-50"
-                      title="Sync now"
-                    >
-                      <RefreshCw
-                        className={`h-2.5 w-2.5 ${isRefreshing ? "animate-spin" : ""}`}
+
+                    {/* Live Sync Time & Instant Sync Pill */}
+                    <div className="inline-flex items-center gap-1.5 rounded-lg bg-slate-50 dark:bg-slate-800/80 border border-slate-200/80 dark:border-slate-700/80 pl-2.5 pr-1 py-0.5 text-[11px]">
+                      <span
+                        className={`h-1.5 w-1.5 rounded-full shrink-0 ${
+                          isAutoCheckEnabled ? "bg-emerald-500 animate-pulse" : "bg-amber-500"
+                        }`}
                       />
-                      <span>Sync</span>
-                    </button>
-                  </div>
-                </div>
-
-                {/* Subtitle Metadata Row (Static Location Only — User Name & Click Action Removed) */}
-                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500 dark:text-slate-400">
-                  <div className="inline-flex items-center gap-1.5 font-medium text-slate-600 dark:text-slate-300">
-                    <MapPin className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
-                    <span className="truncate max-w-[200px] sm:max-w-[260px]">
-                      {userProfile.hubCity} ({userProfile.hubPincode})
-                    </span>
-                  </div>
-
-                  {selectedBatchId !== "all" && (
-                    <span className="inline-flex items-center gap-1 rounded-lg bg-emerald-500/10 border border-emerald-500/25 px-2 py-0.5 text-[11px] font-semibold text-emerald-700 dark:text-emerald-300">
-                      <span className="truncate max-w-[140px]">
-                        {selectedBatchId === "imported_all"
-                          ? "All Imported"
-                          : uniqueBatches.find((b) => b.id === selectedBatchId)?.name || "Batch Filter"}
+                      <span className="font-medium text-slate-500 dark:text-slate-400">
+                        {isAutoCheckEnabled ? "Sync" : "Paused"}
                       </span>
+                      {isAutoCheckEnabled && (
+                        <span className="font-mono font-bold text-slate-800 dark:text-slate-200 tabular-nums">
+                          {formatTimer(secondsRemaining)}
+                        </span>
+                      )}
                       <button
                         type="button"
-                        onClick={() => setSelectedBatchId("all")}
-                        className="ml-0.5 hover:text-rose-600 cursor-pointer"
-                        title="Clear batch filter"
+                        onClick={handleRunAutoCheck}
+                        disabled={isRefreshing}
+                        className="ml-0.5 inline-flex items-center gap-1 rounded-md bg-white hover:bg-indigo-50 dark:bg-slate-900 dark:hover:bg-indigo-950/80 border border-slate-200/70 dark:border-slate-700 px-2 py-0.5 text-[10px] font-bold text-indigo-600 dark:text-indigo-300 transition-colors cursor-pointer disabled:opacity-50"
+                        title="Sync now"
                       >
-                        <X className="h-3 w-3" />
+                        <RefreshCw
+                          className={`h-2.5 w-2.5 ${isRefreshing ? "animate-spin" : ""}`}
+                        />
+                        <span>Sync</span>
                       </button>
-                    </span>
-                  )}
+                    </div>
+                  </div>
+
+                  {/* Subtitle Metadata Row (Static Location Only — User Name & Click Action Removed) */}
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500 dark:text-slate-400">
+                    <div className="inline-flex items-center gap-1.5 font-medium text-slate-600 dark:text-slate-300">
+                      <MapPin className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                      <span className="truncate max-w-[200px] sm:max-w-[260px]">
+                        {userProfile.hubCity} ({userProfile.hubPincode})
+                      </span>
+                    </div>
+
+                    {selectedBatchId !== "all" && (
+                      <span className="inline-flex items-center gap-1 rounded-lg bg-emerald-500/10 border border-emerald-500/25 px-2 py-0.5 text-[11px] font-semibold text-emerald-700 dark:text-emerald-300">
+                        <span className="truncate max-w-[140px]">
+                          {selectedBatchId === "imported_all"
+                            ? "All Imported"
+                            : uniqueBatches.find((b) => b.id === selectedBatchId)?.name || "Batch Filter"}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setSelectedBatchId("all")}
+                          className="ml-0.5 hover:text-rose-600 cursor-pointer"
+                          title="Clear batch filter"
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {/* Right: Clean Primary Action Buttons */}
+                <div className="grid grid-cols-2 sm:flex items-center gap-2 sm:gap-2.5 w-full lg:w-auto shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIntakeError("");
+                      setIntakeAwb("");
+                      setIntakeStatus("booked");
+                      setRecentStagedCode(null);
+                      setIsCancelIntakeConfirmOpen(false);
+                      setIsCameraActive(false);
+                      setIsAddConsignmentsModalOpen(true);
+                    }}
+                    className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-200/90 bg-slate-50/80 hover:bg-white px-3.5 py-2.5 text-xs font-bold text-slate-800 shadow-2xs hover:border-indigo-300 dark:border-slate-700 dark:bg-slate-800/90 dark:text-slate-100 dark:hover:border-indigo-500/60 transition-all cursor-pointer whitespace-nowrap"
+                  >
+                    <Plus className="h-4 w-4 text-indigo-600 dark:text-indigo-400 stroke-[2.4] shrink-0" />
+                    <span>Add Consignment</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (autoCloseTimerRef.current) clearTimeout(autoCloseTimerRef.current);
+                      setUploadError(null);
+                      setUploadSuccessMsg(null);
+                      setPreviewShipments(null);
+                      setImportSuccessState(null);
+                      setIsUploadModalOpen(true);
+                    }}
+                    className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-4 py-2.5 text-xs font-bold text-white shadow-xs transition-all cursor-pointer whitespace-nowrap"
+                  >
+                    <FileSpreadsheet className="h-4 w-4 stroke-[2.2] shrink-0" />
+                    <span>Bulk Import</span>
+                  </button>
                 </div>
               </div>
-
-              {/* Right: Clean Primary Action Buttons */}
-              <div className="grid grid-cols-2 sm:flex items-center gap-2 sm:gap-2.5 w-full lg:w-auto shrink-0">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setIntakeError("");
-                    setIntakeAwb("");
-                    setIntakeStatus("booked");
-                    setRecentStagedCode(null);
-                    setIsCancelIntakeConfirmOpen(false);
-                    setIsCameraActive(false);
-                    setIsAddConsignmentsModalOpen(true);
-                  }}
-                  className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-200/90 bg-slate-50/80 hover:bg-white px-3.5 py-2.5 text-xs font-bold text-slate-800 shadow-2xs hover:border-indigo-300 dark:border-slate-700 dark:bg-slate-800/90 dark:text-slate-100 dark:hover:border-indigo-500/60 transition-all cursor-pointer whitespace-nowrap"
-                >
-                  <Plus className="h-4 w-4 text-indigo-600 dark:text-indigo-400 stroke-[2.4] shrink-0" />
-                  <span>Add Consignment</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (autoCloseTimerRef.current) clearTimeout(autoCloseTimerRef.current);
-                    setUploadError(null);
-                    setUploadSuccessMsg(null);
-                    setPreviewShipments(null);
-                    setImportSuccessState(null);
-                    setIsUploadModalOpen(true);
-                  }}
-                  className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-4 py-2.5 text-xs font-bold text-white shadow-xs transition-all cursor-pointer whitespace-nowrap"
-                >
-                  <FileSpreadsheet className="h-4 w-4 stroke-[2.2] shrink-0" />
-                  <span>Bulk Import</span>
-                </button>
-              </div>
             </div>
-          </div>
+          )}
 
           {/* ============================================================ */}
           {/* VIEW 1 & 2: DASHBOARD OVERVIEW & ALL DATA DIRECTORY          */}
@@ -5099,6 +5398,27 @@ export function BulkDashboard({
           )}
 
           {/* ============================================================ */}
+          {/* VIEW 4B: BULK LABEL PRINT & ENCRYPTED OFFICE MINI QR STUDIO  */}
+          {/* ============================================================ */}
+          {activeMenu === "labels" && (
+            <BulkLabelPrintTool
+              shipments={shipments}
+              defaultOfficeName={
+                (userProfile.companyName || userProfile.fullName || "TRACKFLOW DISPATCH").toUpperCase()
+              }
+              defaultOfficeHub={`${userProfile.hubCity} (${userProfile.hubPincode})`}
+              defaultOfficePhone={userProfile.phone}
+              onSimulateScanInIntake={(encryptedQrString) => {
+                setIntakeError("");
+                setIsCancelIntakeConfirmOpen(false);
+                setIsCameraActive(false);
+                setIsAddConsignmentsModalOpen(true);
+                handleStageConsignment(encryptedQrString);
+              }}
+            />
+          )}
+
+          {/* ============================================================ */}
           {/* VIEW 5: SETTINGS & DATE-WISE BACKUP WORKSPACE                */}
           {/* ============================================================ */}
           {activeMenu === "settings" && (
@@ -5155,8 +5475,34 @@ export function BulkDashboard({
                   </div>
                 </div>
 
-                {/* Sliding Toggle Switches for Auto-Next Scan Mode & No Rule */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-slate-100 dark:border-slate-800">
+                {/* Sliding Toggle Switches for Scan Customer Data QR, Auto-Next Scan Mode & No Rule */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2 border-t border-slate-100 dark:border-slate-800">
+                  <div className="flex items-center justify-between rounded-2xl border border-slate-200 p-3.5 dark:border-slate-800">
+                    <div>
+                      <span className="text-xs font-bold text-slate-800 dark:text-slate-200 block">
+                        Scan Customer Data QR
+                      </span>
+                      <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                        1st scan AWB → 2nd scan Mini QR → auto next AWB
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={isScanCustomerQrEnabled}
+                      onClick={() => setIsScanCustomerQrEnabled((prev) => !prev)}
+                      className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out ${
+                        isScanCustomerQrEnabled ? "bg-indigo-600" : "bg-slate-300 dark:bg-slate-600"
+                      }`}
+                    >
+                      <span
+                        className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm transition duration-200 ease-in-out ${
+                          isScanCustomerQrEnabled ? "translate-x-5" : "translate-x-0"
+                        }`}
+                      />
+                    </button>
+                  </div>
+
                   <div className="flex items-center justify-between rounded-2xl border border-slate-200 p-3.5 dark:border-slate-800">
                     <div>
                       <span className="text-xs font-bold text-slate-800 dark:text-slate-200 block">
@@ -6843,6 +7189,30 @@ export function BulkDashboard({
                   </div>
 
                   <div className="flex flex-wrap items-center gap-2.5">
+                    {/* Scan Customer Data QR ON/OFF Toggle */}
+                    <button
+                      type="button"
+                      onClick={() => setIsScanCustomerQrEnabled((prev) => !prev)}
+                      className={`inline-flex items-center gap-1.5 rounded-xl border px-2.5 py-1 text-[11px] font-extrabold transition-colors cursor-pointer ${
+                        isScanCustomerQrEnabled
+                          ? "border-indigo-500/60 bg-indigo-500/15 text-indigo-300"
+                          : "border-slate-800 bg-slate-950 text-slate-300 hover:border-slate-700"
+                      }`}
+                      title="Toggle 2-step scan: 1st scan tracking number -> 2nd scan encrypted customer Mini QR -> auto next AWB"
+                    >
+                      <QrCode className="h-3.5 w-3.5" />
+                      <span>Scan Customer Data:</span>
+                      <span
+                        className={`rounded px-1.5 py-0.5 text-[10px] font-black uppercase ${
+                          isScanCustomerQrEnabled
+                            ? "bg-indigo-500 text-white"
+                            : "bg-slate-800 text-slate-400"
+                        }`}
+                      >
+                        {isScanCustomerQrEnabled ? "ON" : "OFF"}
+                      </span>
+                    </button>
+
                     {/* Fallback 'No Rule' ON/OFF Toggle Button */}
                     <button
                       type="button"
@@ -6898,6 +7268,64 @@ export function BulkDashboard({
 
                 {/* Main Dedicated Camera Viewport */}
                 <div className="flex-1 flex flex-col p-4 sm:p-6 gap-3 overflow-y-auto">
+                  {/* 2-Step Customer QR Scan Step Indicator Banner in Camera View */}
+                  {isScanCustomerQrEnabled && (
+                    <div
+                      className={`rounded-xl border px-3.5 py-2.5 text-xs flex flex-wrap items-center justify-between gap-2 ${
+                        customerQrScanStep.step === "awaiting_customer_qr"
+                          ? "border-indigo-500 bg-indigo-950/80 text-indigo-200"
+                          : "border-slate-800 bg-slate-900/90 text-slate-300"
+                      }`}
+                    >
+                      <div className="flex items-center gap-2">
+                        <span
+                          className={`rounded-md px-2 py-0.5 font-mono text-[10px] font-black uppercase ${
+                            customerQrScanStep.step === "awaiting_customer_qr"
+                              ? "bg-indigo-500 text-white animate-pulse"
+                              : "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40"
+                          }`}
+                        >
+                          {customerQrScanStep.step === "awaiting_customer_qr"
+                            ? "Step 2 / 2 • Scan Customer Mini QR"
+                            : "Step 1 / 2 • Scan Tracking Number"}
+                        </span>
+                        <span className="font-semibold">
+                          {customerQrScanStep.step === "awaiting_customer_qr"
+                            ? `AWB ${customerQrScanStep.pendingAwb} locked (${customerQrScanStep.pendingCourierName}). Now scan Encrypted Customer Mini QR on label!`
+                            : "1st scan Tracking Number (AWB), then scanner auto-switches to scan Customer Data Mini QR."}
+                        </span>
+                      </div>
+                      {customerQrScanStep.step === "awaiting_customer_qr" && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const pending = customerQrScanStep.pendingAwb;
+                            const courier = customerQrScanStep.pendingCourierId;
+                            setCustomerQrScanStep({
+                              step: "awaiting_awb",
+                              pendingAwb: "",
+                              pendingCourierId: "",
+                              pendingCourierName: "",
+                            });
+                            handleStageConsignment(
+                              pending,
+                              courier || undefined,
+                              undefined,
+                              undefined,
+                              undefined,
+                              undefined,
+                              "camera",
+                              true
+                            );
+                          }}
+                          className="rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-600 px-2.5 py-1 text-[11px] font-bold text-white cursor-pointer shrink-0"
+                        >
+                          Skip Customer QR &amp; Stage AWB →
+                        </button>
+                      )}
+                    </div>
+                  )}
+
                   {cameraError && (
                     <div className="text-xs text-amber-300 bg-amber-950/70 p-3 rounded-xl border border-amber-800/80">
                       {cameraError}
@@ -7109,87 +7537,167 @@ export function BulkDashboard({
 
                 {/* Modal Body (Scrollable) */}
                 <div className="overflow-y-auto p-4 sm:p-6 space-y-4 sm:space-y-5 flex-1">
-                  {/* Intake Toolbar: Auto-Next Toggle & Paste Anyway Toggle */}
+                  {/* Intake Toolbar: Scan Customer Data QR Toggle, Auto-Next Toggle & No Rule Toggle */}
                   <div className="flex flex-wrap items-center justify-between gap-2.5 rounded-2xl bg-slate-50 dark:bg-slate-800/60 p-3 sm:p-3.5 border border-slate-200 dark:border-slate-700">
-                    {/* Auto-Next Switch */}
+                    {/* Scan Customer Data QR Switch */}
                     <div className="flex items-center gap-2.5">
-                      <div
-                        className={`flex h-3 w-3 shrink-0 rounded-full ${
-                          isAutoNextEnabled
-                            ? "bg-emerald-500 ring-4 ring-emerald-500/20 animate-pulse"
-                            : "bg-amber-500 ring-4 ring-amber-500/20"
-                        }`}
-                      />
-                      <div className="flex items-center gap-2">
+                      <QrCode className="h-4 w-4 text-indigo-600 dark:text-indigo-400 shrink-0" />
+                      <div className="flex items-center gap-1.5">
                         <span className="text-xs font-bold text-slate-900 dark:text-white">
-                          Auto-Next:
+                          Scan Customer Data:
                         </span>
                         <span
                           className={`rounded-md px-1.5 py-0.5 text-[10px] font-black uppercase tracking-wider ${
-                            isAutoNextEnabled
-                              ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300"
-                              : "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300"
+                            isScanCustomerQrEnabled
+                              ? "bg-indigo-100 text-indigo-800 dark:bg-indigo-950 dark:text-indigo-300"
+                              : "bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-300"
                           }`}
                         >
-                          {isAutoNextEnabled ? "ON" : "OFF"}
+                          {isScanCustomerQrEnabled ? "ON" : "OFF"}
                         </span>
                       </div>
                       <button
                         type="button"
-                        onClick={() => setIsAutoNextEnabled((prev) => !prev)}
+                        role="switch"
+                        aria-checked={isScanCustomerQrEnabled}
+                        onClick={() => setIsScanCustomerQrEnabled((prev) => !prev)}
                         className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                          isAutoNextEnabled ? "bg-emerald-600" : "bg-slate-300 dark:bg-slate-600"
+                          isScanCustomerQrEnabled ? "bg-indigo-600" : "bg-slate-300 dark:bg-slate-600"
                         }`}
-                        title={`Click to switch Auto-Next ${isAutoNextEnabled ? "OFF" : "ON"}`}
+                        title="1st scan tracking number -> 2nd scan encrypted customer Mini QR -> auto next tracking number"
                       >
                         <span
                           className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm ring-0 transition duration-200 ease-in-out ${
-                            isAutoNextEnabled ? "translate-x-5" : "translate-x-0"
+                            isScanCustomerQrEnabled ? "translate-x-5" : "translate-x-0"
                           }`}
                         />
                       </button>
                     </div>
 
-                    {/* Fallback 'No Rule' Sliding Toggle Switch */}
-                    <div className="flex items-center gap-2.5">
-                      <span className="text-xs font-bold text-slate-900 dark:text-white">
-                        No Rule:
-                      </span>
-                      <button
-                        type="button"
-                        role="switch"
-                        aria-checked={isPasteAnywayEnabled}
-                        onClick={() => {
-                          setIsPasteAnywayEnabled((prev) => {
-                            const next = !prev;
-                            if (next) {
-                              setIntakeError("");
-                              setFlaggedInvalidCode(null);
-                            }
-                            return next;
-                          });
-                        }}
-                        className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                          isPasteAnywayEnabled ? "bg-amber-500" : "bg-slate-300 dark:bg-slate-600"
-                        }`}
-                        title="Toggle No Rule mode for unrecognized consignment formats"
-                      >
-                        <span
-                          className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm ring-0 transition duration-200 ease-in-out ${
-                            isPasteAnywayEnabled ? "translate-x-5" : "translate-x-0"
+                    <div className="flex flex-wrap items-center gap-4">
+                      {/* Auto-Next Switch */}
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-bold text-slate-900 dark:text-white">
+                          Auto-Next:
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setIsAutoNextEnabled((prev) => !prev)}
+                          className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                            isAutoNextEnabled ? "bg-emerald-600" : "bg-slate-300 dark:bg-slate-600"
                           }`}
-                        />
-                      </button>
+                          title={`Click to switch Auto-Next ${isAutoNextEnabled ? "OFF" : "ON"}`}
+                        >
+                          <span
+                            className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm ring-0 transition duration-200 ease-in-out ${
+                              isAutoNextEnabled ? "translate-x-5" : "translate-x-0"
+                            }`}
+                          />
+                        </button>
+                      </div>
+
+                      {/* Fallback 'No Rule' Sliding Toggle Switch */}
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-bold text-slate-900 dark:text-white">
+                          No Rule:
+                        </span>
+                        <button
+                          type="button"
+                          role="switch"
+                          aria-checked={isPasteAnywayEnabled}
+                          onClick={() => {
+                            setIsPasteAnywayEnabled((prev) => {
+                              const next = !prev;
+                              if (next) {
+                                setIntakeError("");
+                                setFlaggedInvalidCode(null);
+                              }
+                              return next;
+                            });
+                          }}
+                          className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                            isPasteAnywayEnabled ? "bg-amber-500" : "bg-slate-300 dark:bg-slate-600"
+                          }`}
+                          title="Toggle No Rule mode for unrecognized consignment formats"
+                        >
+                          <span
+                            className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm ring-0 transition duration-200 ease-in-out ${
+                              isPasteAnywayEnabled ? "translate-x-5" : "translate-x-0"
+                            }`}
+                          />
+                        </button>
+                      </div>
                     </div>
                   </div>
+
+                  {/* 2-Step Automated Customer QR Scan Status Banner */}
+                  {isScanCustomerQrEnabled && (
+                    <div
+                      className={`rounded-2xl border px-4 py-2.5 text-xs flex flex-wrap items-center justify-between gap-2 ${
+                        customerQrScanStep.step === "awaiting_customer_qr"
+                          ? "border-indigo-500 bg-indigo-50/90 text-indigo-950 dark:border-indigo-500 dark:bg-indigo-950/60 dark:text-indigo-200"
+                          : "border-slate-200 bg-white text-slate-600 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300"
+                      }`}
+                    >
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span
+                          className={`rounded-md px-2 py-0.5 font-mono text-[10px] font-black uppercase ${
+                            customerQrScanStep.step === "awaiting_customer_qr"
+                              ? "bg-indigo-600 text-white animate-pulse"
+                              : "bg-indigo-100 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300"
+                          }`}
+                        >
+                          {customerQrScanStep.step === "awaiting_customer_qr"
+                            ? "Step 2 / 2 • Ready for Customer Mini QR"
+                            : "Step 1 / 2 • Scan Tracking Number First"}
+                        </span>
+                        <span className="font-semibold">
+                          {customerQrScanStep.step === "awaiting_customer_qr"
+                            ? `AWB #${customerQrScanStep.pendingAwb} (${customerQrScanStep.pendingCourierName}) locked! Scan or paste Encrypted Customer Mini QR to auto-fill & advance.`
+                            : "1st scan Tracking Number → auto-ready for Customer Data Mini QR → auto-next to next Customer Tracking Number."}
+                        </span>
+                      </div>
+                      {customerQrScanStep.step === "awaiting_customer_qr" && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const pending = customerQrScanStep.pendingAwb;
+                            const courier = customerQrScanStep.pendingCourierId;
+                            setCustomerQrScanStep({
+                              step: "awaiting_awb",
+                              pendingAwb: "",
+                              pendingCourierId: "",
+                              pendingCourierName: "",
+                            });
+                            handleStageConsignment(pending, courier || undefined);
+                          }}
+                          className="rounded-lg bg-indigo-600 hover:bg-indigo-700 px-2.5 py-1 text-[11px] font-bold text-white cursor-pointer shrink-0"
+                        >
+                          Stage Without Customer QR →
+                        </button>
+                      )}
+                    </div>
+                  )}
 
                   {/* Unified Typing, Hardware Barcode Reader & Convenient Mobile-Responsive Camera Scan Field */}
                   <div className="rounded-2xl border-2 border-indigo-500/60 bg-white p-4 sm:p-5 dark:border-indigo-500/50 dark:bg-slate-800/70 shadow-xs space-y-3.5">
                     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1.5">
                       <label className="text-xs font-black uppercase tracking-wider text-slate-700 dark:text-slate-200">
-                        Consignment / AWB Number:
+                        {customerQrScanStep.step === "awaiting_customer_qr"
+                          ? `Scan Encrypted Customer Mini QR (For AWB #${customerQrScanStep.pendingAwb}):`
+                          : "Consignment / AWB Number (or Encrypted Mini QR):"}
                       </label>
                       {intakeAwb.trim() && (() => {
+                        const qrCheck = decryptCustomerMiniQR(intakeAwb);
+                        if (qrCheck.isCustomerQR) {
+                          return (
+                            <span className="rounded-md bg-indigo-100 dark:bg-indigo-950/80 px-2 py-0.5 text-[10px] font-extrabold text-indigo-700 dark:text-indigo-300">
+                              {qrCheck.isValid
+                                ? `✓ Encrypted Customer Mini QR (${qrCheck.data?.customerName})`
+                                : "⚠ Invalid Customer Mini QR"}
+                            </span>
+                          );
+                        }
                         const info = identifyAndValidateConsignment(intakeAwb);
                         if (info.isValid && info.courier) {
                           return (
@@ -7220,17 +7728,32 @@ export function BulkDashboard({
                           type="text"
                           value={intakeAwb}
                           onChange={(e) => {
-                            const val = e.target.value.toUpperCase();
+                            const rawVal = e.target.value;
+                            const val = rawVal.trim().toUpperCase().startsWith("TFQR1:")
+                              ? rawVal.trim()
+                              : rawVal.toUpperCase();
                             setIntakeAwb(val);
                             setIntakeError("");
+                            const qrRes = decryptCustomerMiniQR(val);
+                            if (qrRes.isCustomerQR && qrRes.isValid && qrRes.data) {
+                              setIntakeRecipient(qrRes.data.customerName);
+                              setIntakePhone(qrRes.data.customerPhone);
+                              setIntakePincode(qrRes.data.pincode);
+                              setIntakeItemCode(qrRes.data.itemCode);
+                              return;
+                            }
                             const identified = identifyAndValidateConsignment(val);
                             if (identified.courier) {
                               setIntakeCourier(identified.courier.id);
                             }
                           }}
                           onKeyDown={handleIntakeKeyDown}
-                          placeholder="Enter Tracking Number"
-                          className="w-full rounded-xl border border-slate-300 bg-white px-4 py-2.5 font-mono text-sm font-semibold uppercase tracking-wider text-slate-900 focus:border-indigo-600 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+                          placeholder={
+                            customerQrScanStep.step === "awaiting_customer_qr"
+                              ? "Scan Encrypted Customer Mini QR (TFQR1:...)..."
+                              : "Enter Tracking Number or Scan Barcode / Mini QR"
+                          }
+                          className="w-full rounded-xl border border-slate-300 bg-white px-4 py-2.5 font-mono text-sm font-semibold tracking-wider text-slate-900 focus:border-indigo-600 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
                         />
                       </div>
 
@@ -7271,7 +7794,7 @@ export function BulkDashboard({
                       </div>
                     </div>
 
-                    {/* Inline Options Strip: Customer Name, Customer Number, Pincode, Carrier, Destination, Status */}
+                    {/* Inline Options Strip: Customer Name, Customer Number (+91/10-digit validated), Pincode (6-digit validated), Carrier, Item Code, Status */}
                     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5 pt-1 text-xs">
                       {/* Customer Name */}
                       <input
@@ -7282,29 +7805,69 @@ export function BulkDashboard({
                         className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 focus:border-indigo-500 focus:outline-none"
                       />
 
-                      {/* Customer Number */}
-                      <input
-                        type="tel"
-                        placeholder="Customer Number (e.g. 9847012345)"
-                        value={intakePhone}
-                        onChange={(e) =>
-                          setIntakePhone(e.target.value.replace(/[^0-9+\-\s]/g, "").slice(0, 15))
-                        }
-                        className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-mono text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 focus:border-indigo-500 focus:outline-none"
-                      />
+                      {/* Customer Number (with live Indian +91 / 10-digit validation) */}
+                      <div className="relative flex items-center">
+                        <input
+                          type="tel"
+                          placeholder="Indian Mobile (+91 or 10-digit)"
+                          value={intakePhone}
+                          onChange={(e) => {
+                            setIntakePhone(e.target.value.replace(/[^0-9+\-\s]/g, "").slice(0, 16));
+                            setIntakeError("");
+                          }}
+                          className={`w-full rounded-xl border px-3 pr-16 py-2 text-xs font-mono focus:outline-none ${
+                            intakePhone.trim()
+                              ? validateIndianPhone(intakePhone).isValid
+                                ? "border-emerald-400 bg-emerald-50/30 text-slate-900 dark:border-emerald-700 dark:bg-emerald-950/20 dark:text-slate-200"
+                                : "border-rose-400 bg-rose-50/30 text-slate-900 dark:border-rose-700 dark:bg-rose-950/20 dark:text-slate-200"
+                              : "border-slate-200 bg-slate-50 text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+                          }`}
+                        />
+                        {intakePhone.trim() && (
+                          <span
+                            className={`absolute right-2 rounded px-1.5 py-0.5 text-[9px] font-bold pointer-events-none ${
+                              validateIndianPhone(intakePhone).isValid
+                                ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
+                                : "bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300"
+                            }`}
+                          >
+                            {validateIndianPhone(intakePhone).isValid ? "✓ IN OK" : "Invalid"}
+                          </span>
+                        )}
+                      </div>
 
-                      {/* Pincode */}
-                      <input
-                        type="text"
-                        inputMode="numeric"
-                        maxLength={6}
-                        placeholder="Pincode (6-digit e.g. 682001)"
-                        value={intakePincode}
-                        onChange={(e) =>
-                          setIntakePincode(e.target.value.replace(/\D/g, "").slice(0, 6))
-                        }
-                        className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-mono font-bold text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 focus:border-indigo-500 focus:outline-none"
-                      />
+                      {/* Pincode (with live 6-digit Indian PIN validation) */}
+                      <div className="relative flex items-center">
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          maxLength={6}
+                          placeholder="Pincode (6-digit e.g. 682001)"
+                          value={intakePincode}
+                          onChange={(e) => {
+                            setIntakePincode(e.target.value.replace(/\D/g, "").slice(0, 6));
+                            setIntakeError("");
+                          }}
+                          className={`w-full rounded-xl border px-3 pr-16 py-2 text-xs font-mono font-bold focus:outline-none ${
+                            intakePincode.trim()
+                              ? validateIndianPincode(intakePincode).isValid
+                                ? "border-emerald-400 bg-emerald-50/30 text-slate-900 dark:border-emerald-700 dark:bg-emerald-950/20 dark:text-slate-200"
+                                : "border-rose-400 bg-rose-50/30 text-slate-900 dark:border-rose-700 dark:bg-rose-950/20 dark:text-slate-200"
+                              : "border-slate-200 bg-slate-50 text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+                          }`}
+                        />
+                        {intakePincode.trim() && (
+                          <span
+                            className={`absolute right-2 rounded px-1.5 py-0.5 text-[9px] font-bold pointer-events-none ${
+                              validateIndianPincode(intakePincode).isValid
+                                ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
+                                : "bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300"
+                            }`}
+                          >
+                            {validateIndianPincode(intakePincode).isValid ? "✓ 6D PIN" : "Bad PIN"}
+                          </span>
+                        )}
+                      </div>
 
                       {/* Courier Partner Selection with Search + Letter Key Auto-Filter */}
                       <div className="relative">

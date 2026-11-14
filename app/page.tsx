@@ -779,19 +779,7 @@ function TrackingAppContent() {
   );
 }
 
-interface HomePageProps {
-  params?: Promise<Record<string, string | string[]>>;
-  searchParams?: Promise<Record<string, string | string[]>>;
-}
-
-export default function HomePage(props: HomePageProps) {
-  if (props?.params) {
-    React.use(props.params);
-  }
-  if (props?.searchParams) {
-    React.use(props.searchParams);
-  }
-
+export default function HomePage() {
   return (
     <Suspense
       fallback={

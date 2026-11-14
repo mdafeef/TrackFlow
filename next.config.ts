@@ -21,6 +21,40 @@ const nextConfig: NextConfig = {
   },
   output: 'standalone',
   transpilePackages: ['motion'],
+  async rewrites() {
+    const tabPaths = [
+      '/dashboard',
+      '/Dashboard',
+      '/consignments',
+      '/Consignments',
+      '/data',
+      '/Data',
+      '/batches',
+      '/Batches',
+      '/analytics',
+      '/Analytics',
+      '/labels',
+      '/Labels',
+      '/settings',
+      '/Settings',
+      '/profile',
+      '/Profile',
+      '/carriers',
+      '/Carriers',
+      '/couriers',
+      '/Couriers',
+      '/features',
+      '/Features',
+      '/faq',
+      '/FAQ',
+      '/track',
+      '/Track',
+    ];
+    return tabPaths.map((source) => ({
+      source,
+      destination: '/',
+    }));
+  },
   webpack: (config, {dev}) => {
     // HMR is disabled in AI Studio via DISABLE_HMR env var.
     // Do not modify—file watching is disabled to prevent flickering during agent edits.

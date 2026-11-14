@@ -14,6 +14,7 @@ import {
   ZoomOut,
   ScanLine,
   AlertTriangle,
+  QrCode,
 } from "lucide-react";
 import {
   MultiFormatReader,
@@ -29,6 +30,7 @@ import {
   COURIER_MAP,
   identifyAndValidateConsignment,
 } from "@/lib/couriers";
+import { decryptCustomerMiniQR } from "@/lib/customerQrCrypto";
 import type { BulkShipment } from "@/components/BulkDashboard";
 
 const STAGED_STORAGE_KEY = "trackflow_staged_consignments";
@@ -131,6 +133,33 @@ export function CameraScanClient() {
   const [cameraGuideMode, setCameraGuideMode] = useState<"barcode" | "qr" | "both">("both");
   const [isAutoNextEnabled, setIsAutoNextEnabled] = useState<boolean>(true);
   const [isPasteAnywayEnabled, setIsPasteAnywayEnabled] = useState<boolean>(false);
+  const [isScanCustomerQrEnabled, setIsScanCustomerQrEnabled] = useState<boolean>(() => {
+    if (typeof window !== "undefined") {
+      try {
+        const rawCtx = sessionStorage.getItem(SCAN_CONTEXT_KEY);
+        if (rawCtx) {
+          const parsed = JSON.parse(rawCtx);
+          if (typeof parsed.scanCustomerQr === "boolean") return parsed.scanCustomerQr;
+        }
+        const saved = localStorage.getItem("trackflow_scan_customer_qr");
+        if (saved === "false") return false;
+      } catch {}
+    }
+    return true;
+  });
+  const [customerQrScanStep, setCustomerQrScanStep] = useState<{
+    step: "awaiting_awb" | "awaiting_customer_qr";
+    pendingAwb: string;
+    pendingCourierId: string;
+    pendingCourierName: string;
+    pendingFormatLabel: string;
+  }>({
+    step: "awaiting_awb",
+    pendingAwb: "",
+    pendingCourierId: "",
+    pendingCourierName: "",
+    pendingFormatLabel: "",
+  });
   const [isSoundEnabled, setIsSoundEnabled] = useState<boolean>(true);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [cameraScanSuccess, setCameraScanSuccess] = useState<{
@@ -211,6 +240,8 @@ export function CameraScanClient() {
   const defaultStatusRef = useRef<StatusOption>(defaultStatus);
   const isSoundEnabledRef = useRef<boolean>(isSoundEnabled);
   const isPasteAnywayEnabledRef = useRef<boolean>(isPasteAnywayEnabled);
+  const isScanCustomerQrEnabledRef = useRef<boolean>(isScanCustomerQrEnabled);
+  const customerQrScanStepRef = useRef(customerQrScanStep);
 
   useEffect(() => {
     guideModeRef.current = cameraGuideMode;
@@ -231,6 +262,33 @@ export function CameraScanClient() {
   useEffect(() => {
     isPasteAnywayEnabledRef.current = isPasteAnywayEnabled;
   }, [isPasteAnywayEnabled]);
+
+  const toggleScanCustomerQr = useCallback(() => {
+    setIsScanCustomerQrEnabled((prev) => {
+      const next = !prev;
+      if (!next) {
+        setCustomerQrScanStep({
+          step: "awaiting_awb",
+          pendingAwb: "",
+          pendingCourierId: "",
+          pendingCourierName: "",
+          pendingFormatLabel: "",
+        });
+      }
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    isScanCustomerQrEnabledRef.current = isScanCustomerQrEnabled;
+    try {
+      localStorage.setItem("trackflow_scan_customer_qr", String(isScanCustomerQrEnabled));
+    } catch {}
+  }, [isScanCustomerQrEnabled]);
+
+  useEffect(() => {
+    customerQrScanStepRef.current = customerQrScanStep;
+  }, [customerQrScanStep]);
 
   useEffect(() => {
     stagedItemsRef.current = stagedItems;
@@ -458,9 +516,20 @@ export function CameraScanClient() {
   };
 
   // Stage a scanned consignment using regex-based length & pattern identification against known couriers
-  // (Supports immediate invalid flagging AND fallback 'Paste Anyway' mode for unrecognized formats)
+  // (Supports immediate invalid flagging, fallback 'Paste Anyway' mode, AND 2-step Encrypted Customer Mini QR auto-fill)
   const handleStageScannedCode = useCallback(
-    (candidateCode: string, forcePasteAnyway: boolean = false) => {
+    (
+      candidateCode: string,
+      forcePasteAnyway: boolean = false,
+      customerDataOverride?: {
+        customerName: string;
+        customerPhone: string;
+        formattedPhone91: string;
+        pincode: string;
+        itemCode: string;
+      },
+      skipCustomerStep: boolean = false
+    ) => {
       const rawTrimmed = candidateCode.trim();
       if (!rawTrimmed) return;
 
@@ -494,7 +563,6 @@ export function CameraScanClient() {
       setFormatError(null);
 
       const isPastedAnywayFallback = !identification.isValid && allowUnrecognized;
-      // Logically auto-identify carrier from the Consignment ID regex & length, or fallback carrier when Paste Anyway is active
       const chosenCourier =
         identification.courier || COURIER_MAP.dtdc || COURIER_MAP.speedpost;
 
@@ -507,12 +575,43 @@ export function CameraScanClient() {
         return;
       }
 
-      const activeStatus = defaultStatusRef.current;
-      const dest = "Destination Hub";
-      const meta = getLogicalStatusMeta(activeStatus, dest);
       const resolvedFormatLabel = isPastedAnywayFallback
         ? `Pasted Anyway (${cleanNum.length} chars)`
         : identification.formatLabel;
+
+      // If 2-Step "Scan Customer Data QR" is ON and we have not scanned the customer QR yet:
+      if (
+        isScanCustomerQrEnabledRef.current &&
+        !customerDataOverride &&
+        !skipCustomerStep
+      ) {
+        setCustomerQrScanStep({
+          step: "awaiting_customer_qr",
+          pendingAwb: cleanNum,
+          pendingCourierId: chosenCourier.id,
+          pendingCourierName: chosenCourier.name,
+          pendingFormatLabel: resolvedFormatLabel,
+        });
+        if (guideModeRef.current === "barcode") {
+          setCameraGuideMode("both");
+        }
+        playScanBeep(true);
+        setCameraScanSuccess({
+          code: `Step 1 OK: ${cleanNum}`,
+          carrier: `${chosenCourier.name} • Now Scan Customer Mini QR`,
+          formatLabel: resolvedFormatLabel,
+          length: cleanNum.length,
+          pastedAnyway: isPastedAnywayFallback,
+          ts: Date.now(),
+        });
+        return;
+      }
+
+      const activeStatus = defaultStatusRef.current;
+      const dest = customerDataOverride?.pincode
+        ? `Pin ${customerDataOverride.pincode}`
+        : "Destination Hub";
+      const meta = getLogicalStatusMeta(activeStatus, dest);
 
       const newItem: BulkShipment = {
         id: `staged-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
@@ -523,6 +622,10 @@ export function CameraScanClient() {
         statusText: `${meta.statusText} • ${resolvedFormatLabel}`,
         origin: "Origin Booking Hub",
         destination: dest,
+        pincode: customerDataOverride?.pincode || undefined,
+        itemCode: customerDataOverride?.itemCode || undefined,
+        recipientName: customerDataOverride?.customerName || undefined,
+        customerPhone: customerDataOverride?.formattedPhone91 || customerDataOverride?.customerPhone || undefined,
         articleType: isPastedAnywayFallback
           ? "Unrecognized Format (Pasted Anyway)"
           : activeStatus === "booked"
@@ -537,10 +640,22 @@ export function CameraScanClient() {
       stagedItemsRef.current = nextList;
       setStagedItems(nextList);
 
+      setCustomerQrScanStep({
+        step: "awaiting_awb",
+        pendingAwb: "",
+        pendingCourierId: "",
+        pendingCourierName: "",
+        pendingFormatLabel: "",
+      });
+
       playScanBeep(true);
       setCameraScanSuccess({
-        code: cleanNum,
-        carrier: isPastedAnywayFallback
+        code: customerDataOverride
+          ? `${cleanNum} • ${customerDataOverride.customerName}`
+          : cleanNum,
+        carrier: customerDataOverride
+          ? `PIN ${customerDataOverride.pincode} • ${customerDataOverride.itemCode}`
+          : isPastedAnywayFallback
           ? `${chosenCourier.shortName} • Pasted Anyway`
           : chosenCourier.name,
         formatLabel: resolvedFormatLabel,
@@ -634,8 +749,9 @@ export function CameraScanClient() {
     /**
      * Process a decoded raw value with:
      * 1) Post-scan cooldown lock (prevents partial edge reads while moving camera away)
-     * 2) 2-frame consensus for 1D barcodes (prevents motion-blur partial numbers from scanning multiple different things)
-     * 3) Logical Consignment ID format, length & carrier identification
+     * 2) Encrypted Customer Mini QR ("TFQR1:...") detection & Indian phone/pincode validation
+     * 3) 2-frame consensus for 1D barcodes
+     * 4) Logical Consignment ID format, length & carrier identification
      */
     const processDecodedCandidate = (rawVal: string, is2DQr: boolean): boolean => {
       const now = Date.now();
@@ -643,6 +759,54 @@ export function CameraScanClient() {
       // 1. Respect post-scan cooldown window
       if (now < scanCooldownUntilRef.current) {
         return false;
+      }
+
+      const trimmedRaw = (rawVal || "").trim();
+      if (!trimmedRaw) return false;
+
+      // 2. Check if this is an Encrypted Office Customer Mini QR ("TFQR1:...")
+      const customerQr = decryptCustomerMiniQR(trimmedRaw);
+      if (customerQr.isCustomerQR) {
+        if (
+          lastScannedRef.current.code === trimmedRaw &&
+          now - lastScannedRef.current.timestamp < 2400
+        ) {
+          return true;
+        }
+        lastScannedRef.current = { code: trimmedRaw, timestamp: now };
+        scanCooldownUntilRef.current = now + 1100;
+
+        if (!customerQr.isValid || !customerQr.data) {
+          playScanBeep(false);
+          setFormatError({
+            code: "MINI-QR",
+            rawCode: trimmedRaw,
+            length: trimmedRaw.length,
+            formatLabel: "Encrypted Office Mini QR",
+            message: customerQr.error || "Invalid Customer Mini QR data.",
+            ts: now,
+          });
+          return true;
+        }
+
+        const pendingStep = customerQrScanStepRef.current;
+        if (pendingStep.step === "awaiting_customer_qr" && pendingStep.pendingAwb) {
+          handleStageScannedCode(
+            pendingStep.pendingAwb,
+            true,
+            customerQr.data,
+            true
+          );
+          return true;
+        }
+
+        // If scanned when no AWB is pending yet, show prompt to scan AWB first
+        playScanBeep(false);
+        setDuplicateAlert({
+          text: `Customer QR Read (${customerQr.data.customerName}, PIN ${customerQr.data.pincode}). Scan Tracking Number (AWB) 1st!`,
+          ts: now,
+        });
+        return true;
       }
 
       const candidate = extractCandidateScannedCode(rawVal);
@@ -1001,7 +1165,7 @@ export function CameraScanClient() {
       isCancelled = true;
       if (loopTimerId) clearTimeout(loopTimerId);
     };
-  }, [extractCandidateScannedCode, handleStageScannedCode]);
+  }, [extractCandidateScannedCode, handleStageScannedCode, playScanBeep]);
 
   // Cleanup camera tracks on unmount
   useEffect(() => {
@@ -1266,6 +1430,38 @@ export function CameraScanClient() {
             </button>
           </div>
 
+          {/* Scan Customer Data QR ON/OFF Toggle */}
+          <div
+            onClick={toggleScanCustomerQr}
+            className={`inline-flex items-center gap-1.5 rounded-xl border px-2.5 py-1.5 text-[11px] font-bold transition-all cursor-pointer select-none ${
+              isScanCustomerQrEnabled
+                ? "border-indigo-500/60 bg-indigo-500/15 text-indigo-300 shadow-2xs"
+                : "border-slate-800 bg-slate-900 text-slate-300 hover:border-slate-700"
+            }`}
+            title="1st scan tracking number -> 2nd scan encrypted customer Mini QR -> auto next tracking number"
+          >
+            <QrCode className="h-3.5 w-3.5" />
+            <span>Customer QR</span>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={isScanCustomerQrEnabled}
+              onClick={(e) => {
+                e.stopPropagation();
+                toggleScanCustomerQr();
+              }}
+              className={`relative inline-flex h-4.5 w-8 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out ${
+                isScanCustomerQrEnabled ? "bg-indigo-500" : "bg-slate-700"
+              }`}
+            >
+              <span
+                className={`pointer-events-none inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow-xs transition duration-200 ease-in-out ${
+                  isScanCustomerQrEnabled ? "translate-x-3.5" : "translate-x-0"
+                }`}
+              />
+            </button>
+          </div>
+
           {/* Fallback 'No Rule' Sliding Toggle Switch for Unrecognized Formats */}
           <div
             onClick={() => {
@@ -1311,6 +1507,48 @@ export function CameraScanClient() {
             </button>
           </div>
         </div>
+
+        {/* 2-Step Scan Status Strip Above Camera */}
+        {isScanCustomerQrEnabled && (
+          <div
+            className={`w-full max-w-md rounded-xl border px-3 py-2 text-[11px] flex items-center justify-between gap-2 shrink-0 ${
+              customerQrScanStep.step === "awaiting_customer_qr"
+                ? "border-indigo-500 bg-indigo-950/90 text-indigo-200"
+                : "border-slate-800 bg-slate-900/90 text-slate-300"
+            }`}
+          >
+            <div className="min-w-0 flex-1">
+              <span
+                className={`inline-block rounded px-1.5 py-0.5 font-mono text-[9px] font-black uppercase mr-1.5 ${
+                  customerQrScanStep.step === "awaiting_customer_qr"
+                    ? "bg-indigo-500 text-white animate-pulse"
+                    : "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40"
+                }`}
+              >
+                {customerQrScanStep.step === "awaiting_customer_qr"
+                  ? "Step 2/2 • Customer QR"
+                  : "Step 1/2 • Tracking ID"}
+              </span>
+              <span className="font-semibold">
+                {customerQrScanStep.step === "awaiting_customer_qr"
+                  ? `Scan Encrypted Mini QR for AWB ${customerQrScanStep.pendingAwb}`
+                  : "1st scan Tracking Number → 2nd scan Customer Mini QR"}
+              </span>
+            </div>
+            {customerQrScanStep.step === "awaiting_customer_qr" && (
+              <button
+                type="button"
+                onClick={() => {
+                  const awb = customerQrScanStep.pendingAwb;
+                  handleStageScannedCode(awb, true, undefined, true);
+                }}
+                className="rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-600 px-2 py-1 text-[10px] font-bold text-white shrink-0 cursor-pointer"
+              >
+                Skip QR →
+              </button>
+            )}
+          </div>
+        )}
 
         {/* Fixed Square Camera Space (No Focus Option) */}
         <div className="relative flex flex-col items-center justify-center w-full my-auto">
