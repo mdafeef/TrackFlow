@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect } from "react";
+import { AnimatePresence, motion } from "motion/react";
 import { Search, X, ChevronDown, CheckCircle2, ShieldCheck, Zap, ClipboardPaste, Check } from "lucide-react";
 import { COURIER_LIST, COURIER_MAP, autoDetectCourier, CourierConfig, validateConsignmentFormat } from "@/lib/couriers";
 import { AnimatedSpiralBg } from "@/components/AnimatedSpiralBg";
@@ -20,6 +21,7 @@ export function TrackerHero({
 }: TrackerHeroProps) {
   const [trackingNumber, setTrackingNumber] = useState(initialTracking);
   const [isJustPasted, setIsJustPasted] = useState(false);
+  const [isManualCourier, setIsManualCourier] = useState(false);
   const [selectedCourierId, setSelectedCourierId] = useState<string>(() => {
     if (initialCourier && COURIER_MAP[initialCourier]) return initialCourier;
     if (initialTracking) {
@@ -37,12 +39,14 @@ export function TrackerHero({
   const courierSearchInputRef = React.useRef<HTMLInputElement | null>(null);
 
   const [prevTrackingProp, setPrevTrackingProp] = useState(initialTracking);
-  if (initialTracking !== prevTrackingProp) {
+  const [prevCourierProp, setPrevCourierProp] = useState(initialCourier);
+  if (initialTracking !== prevTrackingProp || initialCourier !== prevCourierProp) {
     setPrevTrackingProp(initialTracking);
+    setPrevCourierProp(initialCourier);
     setTrackingNumber(initialTracking);
     const detected = initialTracking ? autoDetectCourier(initialTracking) : null;
     setDetectedCourier(detected);
-    if (initialCourier) {
+    if (initialCourier && COURIER_MAP[initialCourier]) {
       setSelectedCourierId(initialCourier);
     } else if (detected) {
       setSelectedCourierId(detected.id);
@@ -57,6 +61,7 @@ export function TrackerHero({
       const customEvent = e as CustomEvent<{ courierId: string }>;
       if (customEvent.detail?.courierId) {
         setSelectedCourierId(customEvent.detail.courierId);
+        setIsManualCourier(true);
         setDetectedCourier(COURIER_MAP[customEvent.detail.courierId] || null);
       }
     };
@@ -107,11 +112,23 @@ export function TrackerHero({
     if (cleaned.trim()) {
       const detected = autoDetectCourier(cleaned);
       setDetectedCourier(detected);
-      if (detected && !selectedCourierId) {
+      if (!isManualCourier) {
+        setSelectedCourierId(detected ? detected.id : "");
+      } else if (
+        detected &&
+        selectedCourierId &&
+        COURIER_MAP[selectedCourierId] &&
+        !COURIER_MAP[selectedCourierId].regex.test(cleaned.trim().replace(/[\s-]+/g, ""))
+      ) {
+        // If previous carrier regex doesn't match the newly typed number but another carrier matches, switch to detected
         setSelectedCourierId(detected.id);
+        setIsManualCourier(false);
       }
     } else {
       setDetectedCourier(null);
+      if (!isManualCourier) {
+        setSelectedCourierId("");
+      }
     }
   };
 
@@ -131,8 +148,16 @@ export function TrackerHero({
           }
           const detected = autoDetectCourier(cleaned);
           setDetectedCourier(detected);
-          if (detected && !selectedCourierId) {
+          if (!isManualCourier) {
+            setSelectedCourierId(detected ? detected.id : "");
+          } else if (
+            detected &&
+            selectedCourierId &&
+            COURIER_MAP[selectedCourierId] &&
+            !COURIER_MAP[selectedCourierId].regex.test(cleaned.replace(/-/g, ""))
+          ) {
             setSelectedCourierId(detected.id);
+            setIsManualCourier(false);
           }
           setIsJustPasted(true);
           setTimeout(() => setIsJustPasted(false), 1600);
@@ -147,6 +172,7 @@ export function TrackerHero({
     setTrackingNumber("");
     setDetectedCourier(null);
     setSelectedCourierId("");
+    setIsManualCourier(false);
     setErrorText("");
   };
 
@@ -164,13 +190,29 @@ export function TrackerHero({
       return;
     }
 
-    const courierToUse = selectedCourierId || (detectedCourier ? detectedCourier.id : "speedpost");
-    onSearch(clean, courierToUse);
+    const freshDetected = autoDetectCourier(clean);
+    let courierToUse = selectedCourierId;
+
+    if (!isManualCourier && freshDetected) {
+      courierToUse = freshDetected.id;
+    } else if (
+      courierToUse === "speedpost" &&
+      freshDetected &&
+      freshDetected.id !== "speedpost" &&
+      !COURIER_MAP.speedpost.regex.test(clean.replace(/-/g, ""))
+    ) {
+      courierToUse = freshDetected.id;
+    } else if (!courierToUse && freshDetected) {
+      courierToUse = freshDetected.id;
+    }
+
+    onSearch(clean, courierToUse || "");
   };
 
   const handleSelectSample = (sampleNum: string, courierId: string) => {
     setTrackingNumber(sampleNum);
     setSelectedCourierId(courierId);
+    setIsManualCourier(false);
     setDetectedCourier(COURIER_MAP[courierId] || null);
     setErrorText("");
     onSearch(sampleNum, courierId);
@@ -185,18 +227,18 @@ export function TrackerHero({
 
       <div className="relative z-20 mx-auto max-w-5xl px-4 sm:px-6 lg:px-8 text-center">
         {/* Kicker Tag */}
-        <div className="inline-flex items-center gap-2 rounded-full border border-indigo-200 bg-indigo-50/80 px-3.5 py-1 text-xs font-semibold text-indigo-700 dark:border-indigo-900/50 dark:bg-indigo-950/40 dark:text-indigo-300 mb-6">
+        <div className="inline-flex items-center gap-2 rounded-full border border-indigo-200 bg-indigo-50/80 px-3.5 py-1 text-xs font-semibold text-indigo-700 dark:border-indigo-900/50 dark:bg-indigo-950/40 dark:text-indigo-300 mb-5">
           <Zap className="h-3.5 w-3.5" />
-          <span>Universal 20+ Carrier Real-Time Engine</span>
+          <span>20+ Couriers Supported</span>
         </div>
 
-        {/* Headline */}
-        <h1 className="text-3xl font-bold tracking-tight text-slate-900 sm:text-5xl dark:text-white max-w-3xl mx-auto text-balance">
-          Track Any Shipment, Courier, or Post in One Place
+        {/* Simple Headline */}
+        <h1 className="text-3xl font-bold tracking-tight text-slate-900 sm:text-5xl dark:text-white max-w-2xl mx-auto text-balance">
+          Track Your Shipment
         </h1>
 
-        <p className="mt-4 text-base sm:text-lg text-slate-600 dark:text-slate-400 max-w-2xl mx-auto">
-          Fast, free parcel tracking with auto-carrier detection, journey route visualizer, and instant WhatsApp status cards.
+        <p className="mt-3 text-sm sm:text-base text-slate-600 dark:text-slate-400 max-w-xl mx-auto">
+          Enter your tracking number for instant delivery updates across all major couriers.
         </p>
 
         {/* Main Search Box */}
@@ -226,14 +268,22 @@ export function TrackerHero({
               </button>
 
               {/* Dropdown Menu */}
-              {isDropdownOpen && (
-                <>
-                  <div
-                    className="fixed inset-0 z-40"
-                    onClick={() => setIsDropdownOpen(false)}
-                  />
-                  <div className="absolute left-0 top-full mt-2 z-[60] w-72 rounded-2xl border border-slate-200 bg-white p-2 shadow-2xl dark:border-slate-800 dark:bg-slate-900 text-left">
-                    {/* Search Input Inside Dropdown */}
+              <AnimatePresence>
+                {isDropdownOpen && (
+                  <>
+                    <div
+                      className="fixed inset-0 z-40"
+                      onClick={() => setIsDropdownOpen(false)}
+                    />
+                    <motion.div
+                      initial={{ opacity: 0, scale: 0.94, y: -8 }}
+                      animate={{ opacity: 1, scale: 1, y: 0 }}
+                      exit={{ opacity: 0, scale: 0.95, y: -6 }}
+                      transition={{ type: "spring", stiffness: 420, damping: 28 }}
+                      style={{ transformOrigin: "top left" }}
+                      className="absolute left-0 top-full mt-2 z-[60] w-72 rounded-2xl border border-slate-200 bg-white p-2 shadow-2xl dark:border-slate-800 dark:bg-slate-900 text-left"
+                    >
+                      {/* Search Input Inside Dropdown */}
                     <div className="relative mb-2">
                       <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-slate-400" />
                       <input
@@ -246,6 +296,7 @@ export function TrackerHero({
                             e.preventDefault();
                             if (filteredCouriers.length > 0) {
                               setSelectedCourierId(filteredCouriers[0].id);
+                              setIsManualCourier(true);
                               setIsDropdownOpen(false);
                             }
                           }
@@ -270,17 +321,18 @@ export function TrackerHero({
                           <button
                             type="button"
                             onClick={() => {
-                              setSelectedCourierId("");
+                              setSelectedCourierId(detectedCourier ? detectedCourier.id : "");
+                              setIsManualCourier(false);
                               setIsDropdownOpen(false);
                             }}
                             className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-xs font-medium transition-colors cursor-pointer ${
-                              !selectedCourierId
+                              !isManualCourier
                                 ? "bg-indigo-50 text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300 font-semibold"
                                 : "text-slate-700 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
                             }`}
                           >
                             <span>Auto-Detect (Any Carrier)</span>
-                            {!selectedCourierId && <CheckCircle2 className="h-3.5 w-3.5 text-indigo-600" />}
+                            {!isManualCourier && <CheckCircle2 className="h-3.5 w-3.5 text-indigo-600" />}
                           </button>
                           <div className="my-1 border-t border-slate-100 dark:border-slate-800" />
                         </>
@@ -297,6 +349,7 @@ export function TrackerHero({
                             type="button"
                             onClick={() => {
                               setSelectedCourierId(c.id);
+                              setIsManualCourier(true);
                               setIsDropdownOpen(false);
                             }}
                             className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-xs font-medium transition-colors cursor-pointer ${
@@ -314,9 +367,10 @@ export function TrackerHero({
                         ))
                       )}
                     </div>
-                  </div>
+                  </motion.div>
                 </>
               )}
+              </AnimatePresence>
             </div>
 
             {/* Input field */}

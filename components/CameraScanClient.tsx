@@ -151,6 +151,12 @@ export function CameraScanClient() {
     max: 1,
   });
 
+  // Custom dropdown state for scanned queue strip
+  const [queueOpenDropdown, setQueueOpenDropdown] = useState<{
+    id: string;
+    field: "courier" | "status";
+  } | null>(null);
+
   // Consignment ID Regex / Length Format Error state
   const [formatError, setFormatError] = useState<{
     code: string;
@@ -1260,9 +1266,8 @@ export function CameraScanClient() {
             </button>
           </div>
 
-          {/* Fallback 'No Rule' ON/OFF Toggle Button for Unrecognized Formats */}
-          <button
-            type="button"
+          {/* Fallback 'No Rule' Sliding Toggle Switch for Unrecognized Formats */}
+          <div
             onClick={() => {
               setIsPasteAnywayEnabled((prev) => {
                 const next = !prev;
@@ -1272,24 +1277,39 @@ export function CameraScanClient() {
                 return next;
               });
             }}
-            className={`inline-flex items-center gap-2 rounded-xl border px-2.5 py-1.5 text-[11px] font-extrabold transition-all cursor-pointer ${
+            className={`inline-flex items-center gap-2 rounded-xl border px-2.5 py-1.5 text-[11px] font-bold transition-all cursor-pointer select-none ${
               isPasteAnywayEnabled
                 ? "border-amber-500/60 bg-amber-500/15 text-amber-300 shadow-2xs"
                 : "border-slate-800 bg-slate-900 text-slate-300 hover:border-slate-700"
             }`}
             title="Toggle No Rule mode for unrecognized barcode/QR formats"
           >
-            <span>No Rule:</span>
-            <span
-              className={`rounded px-1.5 py-0.5 text-[10px] font-black uppercase ${
-                isPasteAnywayEnabled
-                  ? "bg-amber-500 text-slate-950"
-                  : "bg-slate-800 text-slate-400"
+            <span>No Rule</span>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={isPasteAnywayEnabled}
+              onClick={(e) => {
+                e.stopPropagation();
+                setIsPasteAnywayEnabled((prev) => {
+                  const next = !prev;
+                  if (next && formatError) {
+                    setFormatError(null);
+                  }
+                  return next;
+                });
+              }}
+              className={`relative inline-flex h-4.5 w-8 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out ${
+                isPasteAnywayEnabled ? "bg-amber-500" : "bg-slate-700"
               }`}
             >
-              {isPasteAnywayEnabled ? "ON" : "OFF"}
-            </span>
-          </button>
+              <span
+                className={`pointer-events-none inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow-xs transition duration-200 ease-in-out ${
+                  isPasteAnywayEnabled ? "translate-x-3.5" : "translate-x-0"
+                }`}
+              />
+            </button>
+          </div>
         </div>
 
         {/* Fixed Square Camera Space (No Focus Option) */}
@@ -1433,8 +1453,7 @@ export function CameraScanClient() {
                     <span>No Rule ({formatError.code})</span>
                   </button>
 
-                  <button
-                    type="button"
+                  <div
                     onClick={() => {
                       const nextState = !isPasteAnywayEnabled;
                       setIsPasteAnywayEnabled(nextState);
@@ -1444,14 +1463,38 @@ export function CameraScanClient() {
                         handleStageScannedCode(codeToPaste, true);
                       }
                     }}
-                    className={`inline-flex items-center gap-1 rounded-xl border px-2.5 py-1.5 text-[10px] font-extrabold cursor-pointer transition-colors ${
+                    className={`inline-flex items-center gap-2 rounded-xl border px-2.5 py-1.5 text-[10px] font-bold cursor-pointer transition-colors select-none ${
                       isPasteAnywayEnabled
                         ? "border-amber-400 bg-amber-500/20 text-amber-200"
                         : "border-rose-700 bg-rose-900/70 text-rose-200 hover:bg-rose-800"
                     }`}
                   >
-                    <span>No Rule: {isPasteAnywayEnabled ? "ON" : "OFF"}</span>
-                  </button>
+                    <span>No Rule</span>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={isPasteAnywayEnabled}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        const nextState = !isPasteAnywayEnabled;
+                        setIsPasteAnywayEnabled(nextState);
+                        if (nextState) {
+                          const codeToPaste = formatError.rawCode;
+                          setFormatError(null);
+                          handleStageScannedCode(codeToPaste, true);
+                        }
+                      }}
+                      className={`relative inline-flex h-4 w-7 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out ${
+                        isPasteAnywayEnabled ? "bg-amber-500" : "bg-rose-950"
+                      }`}
+                    >
+                      <span
+                        className={`pointer-events-none inline-block h-3 w-3 transform rounded-full bg-white shadow-xs transition duration-200 ease-in-out ${
+                          isPasteAnywayEnabled ? "translate-x-3" : "translate-x-0"
+                        }`}
+                      />
+                    </button>
+                  </div>
                 </div>
               </div>
             )}
@@ -1534,36 +1577,124 @@ export function CameraScanClient() {
                   </div>
 
                   <div className="flex items-center gap-1.5 shrink-0">
+                    {/* Custom Styled Courier Dropdown */}
                     <div className="relative inline-flex items-center">
-                      <select
-                        value={item.courierId}
-                        onChange={(e) => handleUpdateItemCarrier(item.id, e.target.value)}
-                        className="appearance-none rounded-lg border border-slate-700 bg-slate-900 hover:border-indigo-500/60 pl-2 pr-6 py-1 text-[10px] font-semibold text-slate-200 focus:border-indigo-500 focus:outline-none cursor-pointer"
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setQueueOpenDropdown((prev) =>
+                            prev?.id === item.id && prev.field === "courier"
+                              ? null
+                              : { id: item.id, field: "courier" }
+                          )
+                        }
+                        className="inline-flex items-center justify-between gap-1.5 rounded-lg border border-slate-700 bg-slate-900 hover:border-indigo-500/60 px-2 py-1 text-[10px] font-semibold text-slate-200 cursor-pointer"
                       >
-                        {COURIER_LIST.map((c) => (
-                          <option key={c.id} value={c.id}>
-                            {c.shortName}
-                          </option>
-                        ))}
-                      </select>
-                      <ChevronDown className="pointer-events-none absolute right-1.5 h-3 w-3 text-slate-400" />
+                        <span className="truncate max-w-[78px]">
+                          {COURIER_MAP[item.courierId]?.shortName || item.courierName}
+                        </span>
+                        <ChevronDown className="h-3 w-3 text-slate-400 shrink-0" />
+                      </button>
+
+                      {queueOpenDropdown?.id === item.id &&
+                        queueOpenDropdown.field === "courier" && (
+                          <>
+                            <div
+                              className="fixed inset-0 z-40"
+                              onClick={() => setQueueOpenDropdown(null)}
+                            />
+                            <div className="absolute right-0 bottom-full mb-1 z-50 w-44 max-h-40 overflow-y-auto rounded-xl border border-slate-700 bg-slate-900 p-1 shadow-2xl space-y-0.5">
+                              {COURIER_LIST.map((c) => (
+                                <button
+                                  key={c.id}
+                                  type="button"
+                                  onClick={() => {
+                                    handleUpdateItemCarrier(item.id, c.id);
+                                    setQueueOpenDropdown(null);
+                                  }}
+                                  className={`w-full flex items-center justify-between rounded-lg px-2 py-1 text-[10px] font-semibold text-left cursor-pointer ${
+                                    item.courierId === c.id
+                                      ? "bg-indigo-600 text-white"
+                                      : "text-slate-200 hover:bg-slate-800"
+                                  }`}
+                                >
+                                  <span className="truncate">{c.shortName}</span>
+                                  {item.courierId === c.id && (
+                                    <Check className="h-3 w-3 shrink-0" />
+                                  )}
+                                </button>
+                              ))}
+                            </div>
+                          </>
+                        )}
                     </div>
 
+                    {/* Custom Styled Status Dropdown */}
                     <div className="relative inline-flex items-center">
-                      <select
-                        value={item.status}
-                        onChange={(e) =>
-                          handleUpdateItemStatus(item.id, e.target.value as StatusOption)
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setQueueOpenDropdown((prev) =>
+                            prev?.id === item.id && prev.field === "status"
+                              ? null
+                              : { id: item.id, field: "status" }
+                          )
                         }
-                        className="appearance-none rounded-lg border border-slate-700 bg-slate-900 hover:border-indigo-500/60 pl-2 pr-6 py-1 text-[10px] font-semibold text-slate-200 focus:border-indigo-500 focus:outline-none cursor-pointer"
+                        className="inline-flex items-center justify-between gap-1.5 rounded-lg border border-slate-700 bg-slate-900 hover:border-indigo-500/60 px-2 py-1 text-[10px] font-semibold text-slate-200 cursor-pointer"
                       >
-                        <option value="booked">Booked</option>
-                        <option value="in_transit">In Transit</option>
-                        <option value="out_for_delivery">Out for Del</option>
-                        <option value="delivered">Delivered</option>
-                        <option value="returned">Returned</option>
-                      </select>
-                      <ChevronDown className="pointer-events-none absolute right-1.5 h-3 w-3 text-slate-400" />
+                        <span className="truncate">
+                          {item.status === "booked"
+                            ? "Booked"
+                            : item.status === "in_transit"
+                            ? "In Transit"
+                            : item.status === "out_for_delivery"
+                            ? "Out for Del"
+                            : item.status === "delivered"
+                            ? "Delivered"
+                            : "Returned"}
+                        </span>
+                        <ChevronDown className="h-3 w-3 text-slate-400 shrink-0" />
+                      </button>
+
+                      {queueOpenDropdown?.id === item.id &&
+                        queueOpenDropdown.field === "status" && (
+                          <>
+                            <div
+                              className="fixed inset-0 z-40"
+                              onClick={() => setQueueOpenDropdown(null)}
+                            />
+                            <div className="absolute right-0 bottom-full mb-1 z-50 w-36 rounded-xl border border-slate-700 bg-slate-900 p-1 shadow-2xl space-y-0.5">
+                              {(
+                                [
+                                  { value: "booked", label: "Booked" },
+                                  { value: "in_transit", label: "In Transit" },
+                                  { value: "out_for_delivery", label: "Out for Del" },
+                                  { value: "delivered", label: "Delivered" },
+                                  { value: "returned", label: "Returned" },
+                                ] as const
+                              ).map((st) => (
+                                <button
+                                  key={st.value}
+                                  type="button"
+                                  onClick={() => {
+                                    handleUpdateItemStatus(item.id, st.value as StatusOption);
+                                    setQueueOpenDropdown(null);
+                                  }}
+                                  className={`w-full flex items-center justify-between rounded-lg px-2 py-1 text-[10px] font-semibold text-left cursor-pointer ${
+                                    item.status === st.value
+                                      ? "bg-indigo-600 text-white"
+                                      : "text-slate-200 hover:bg-slate-800"
+                                  }`}
+                                >
+                                  <span>{st.label}</span>
+                                  {item.status === st.value && (
+                                    <Check className="h-3 w-3 shrink-0" />
+                                  )}
+                                </button>
+                              ))}
+                            </div>
+                          </>
+                        )}
                     </div>
 
                     <button

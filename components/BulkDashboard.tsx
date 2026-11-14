@@ -4,6 +4,7 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from "react"
 import { useRouter } from "next/navigation";
 import {
   Package,
+  PackageSearch,
   CheckCircle2,
   Truck,
   Clock,
@@ -52,18 +53,21 @@ import {
   Mail,
   BadgeCheck,
   PanelLeftClose,
-  PanelLeftOpen,
   Menu,
   Minus,
   Filter,
   Sparkles,
   Layers,
   Calendar,
+  ChevronLeft,
+  ChevronRight,
+  Tag,
   LayoutGrid,
   UserCheck,
   AlertTriangle,
-  ArrowUpRight,
+  LogOut,
 } from "lucide-react";
+import { AuthUserProfile } from "@/app/api/auth/route";
 import * as XLSX from "xlsx";
 import {
   MultiFormatReader,
@@ -81,6 +85,11 @@ import {
   identifyAndValidateConsignment,
   validateConsignmentFormat,
 } from "@/lib/couriers";
+import {
+  WORKSPACE_TAB_PATHS,
+  resolveRouteFromPathname,
+  silentNavigateTab,
+} from "@/lib/tabRoutes";
 
 export interface BulkShipment {
   id: string;
@@ -99,6 +108,7 @@ export interface BulkShipment {
   recipientName?: string;
   customerPhone?: string;
   pincode?: string;
+  itemCode?: string;
   isImported?: boolean;
   batchId?: string;
   batchName?: string;
@@ -135,6 +145,7 @@ const DEFAULT_SHIPMENTS: BulkShipment[] = [
     origin: "Ayyanthole SO (680003)",
     destination: "Nedumkunnam SO",
     pincode: "686542",
+    itemCode: "ITM-1042",
     articleType: "Speed Post Doc",
     weight: "45 g",
     lastUpdated: "Today, 01:44 PM",
@@ -249,9 +260,17 @@ export type SidebarMenuId = "dashboard" | "data" | "batches" | "analytics" | "se
 
 interface BulkDashboardProps {
   onOpenTrackingResult: (trackingNumber: string, courierId: string) => void;
+  authUser?: AuthUserProfile | null;
+  onLogout?: () => void;
+  onProfileUpdated?: (profile: AuthUserProfile) => void;
 }
 
-export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
+export function BulkDashboard({
+  onOpenTrackingResult,
+  authUser,
+  onLogout,
+  onProfileUpdated,
+}: BulkDashboardProps) {
   const router = useRouter();
   // Shipments state with batch metadata normalization
   const [shipments, setShipments] = useState<BulkShipment[]>(() => {
@@ -289,7 +308,22 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
 
   const [searchFilter, setSearchFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | "delivered" | "in_transit" | "out_for_delivery" | "returned" | "booked">("all");
-  const [activeMenu, setActiveMenu] = useState<SidebarMenuId>("dashboard");
+  const [activeMenu, setActiveMenuState] = useState<SidebarMenuId>(() => {
+    if (typeof window !== "undefined") {
+      const resolved = resolveRouteFromPathname(window.location.pathname);
+      if (resolved.view === "bulk") {
+        return resolved.workspaceTab;
+      }
+    }
+    return "dashboard";
+  });
+
+  const setActiveMenu = React.useCallback((next: SidebarMenuId, skipUrlPush: boolean = false) => {
+    setActiveMenuState(next);
+    if (!skipUrlPush && WORKSPACE_TAB_PATHS[next]) {
+      silentNavigateTab(WORKSPACE_TAB_PATHS[next]);
+    }
+  }, []);
 
   // Collapsible Left Sidebar & Mobile Drawer State
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => {
@@ -302,16 +336,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
   });
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState<boolean>(false);
 
-  // Listen for mobile menu button click from top Navbar when in Workspace view
-  useEffect(() => {
-    const handleToggleDrawer = () => {
-      setIsMobileSidebarOpen((prev) => !prev);
-    };
-    window.addEventListener("trackflow:toggle-workspace-drawer", handleToggleDrawer);
-    return () => window.removeEventListener("trackflow:toggle-workspace-drawer", handleToggleDrawer);
-  }, []);
-
-  const toggleSidebarCollapse = () => {
+  const toggleSidebarCollapse = React.useCallback(() => {
     setIsSidebarCollapsed((prev) => {
       const next = !prev;
       try {
@@ -319,7 +344,65 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
       } catch {}
       return next;
     });
-  };
+  }, []);
+
+  // Sync workspace menu & sidebar state with top Navbar
+  useEffect(() => {
+    const handleToggleDrawer = () => {
+      setIsMobileSidebarOpen((prev) => !prev);
+    };
+    const handleToggleCollapse = () => {
+      toggleSidebarCollapse();
+    };
+    const handleSetMenu = (e: Event) => {
+      const detail = (e as CustomEvent)?.detail;
+      const menu = detail?.menu as SidebarMenuId | undefined;
+      if (menu) {
+        setActiveMenu(menu, Boolean(detail?.skipUrlPush));
+        setIsMobileSidebarOpen(false);
+      }
+    };
+    window.addEventListener("trackflow:toggle-workspace-drawer", handleToggleDrawer);
+    window.addEventListener("trackflow:toggle-sidebar-collapse", handleToggleCollapse);
+    window.addEventListener("trackflow:set-workspace-menu", handleSetMenu);
+    return () => {
+      window.removeEventListener("trackflow:toggle-workspace-drawer", handleToggleDrawer);
+      window.removeEventListener("trackflow:toggle-sidebar-collapse", handleToggleCollapse);
+      window.removeEventListener("trackflow:set-workspace-menu", handleSetMenu);
+    };
+  }, [toggleSidebarCollapse, setActiveMenu]);
+
+  const mobileDrawerRef = React.useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    if (!isMobileSidebarOpen) return;
+    const handlePointerDown = (e: MouseEvent | TouchEvent) => {
+      const target = e.target as Node | null;
+      if (!target) return;
+      if (mobileDrawerRef.current?.contains(target)) return;
+      const hamburgerBtn = document.getElementById("trackflow-hamburger-btn");
+      if (hamburgerBtn && hamburgerBtn.contains(target)) return;
+      setIsMobileSidebarOpen(false);
+    };
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("touchstart", handlePointerDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("touchstart", handlePointerDown);
+    };
+  }, [isMobileSidebarOpen]);
+
+  useEffect(() => {
+    window.dispatchEvent(
+      new CustomEvent("trackflow:workspace-state", {
+        detail: {
+          isMobileSidebarOpen,
+          isSidebarCollapsed,
+          activeMenu,
+        },
+      })
+    );
+  }, [isMobileSidebarOpen, isSidebarCollapsed, activeMenu]);
 
   // Custom Styled Dropdown States
   const [isFilterBatchDropdownOpen, setIsFilterBatchDropdownOpen] = useState<boolean>(false);
@@ -346,6 +429,22 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
   >("all");
   const [customStartDate, setCustomStartDate] = useState<string>(() => getYesterdayIso());
   const [customEndDate, setCustomEndDate] = useState<string>(() => getTodayIso());
+  const [isCustomCalendarOpen, setIsCustomCalendarOpen] = useState<boolean>(false);
+  const [calendarMonthCursor, setCalendarMonthCursor] = useState<{ year: number; month: number }>(() => {
+    const now = new Date();
+    return { year: now.getFullYear(), month: now.getMonth() };
+  });
+  const [calendarPickingField, setCalendarPickingField] = useState<"start" | "end">("start");
+
+  // Date-Wise Backup States (in Settings Tab)
+  const [backupDateFilter, setBackupDateFilter] = useState<
+    "all" | "today" | "yesterday" | "last_7_days" | "custom"
+  >("all");
+  const [backupStartDate, setBackupStartDate] = useState<string>(() => getYesterdayIso());
+  const [backupEndDate, setBackupEndDate] = useState<string>(() => getTodayIso());
+  const [isBackupCalendarOpen, setIsBackupCalendarOpen] = useState<boolean>(false);
+  const [backupCalendarPickingField, setBackupCalendarPickingField] = useState<"start" | "end">("start");
+
   const [exportStatusTarget, setExportStatusTarget] = useState<
     "all" | "booked" | "in_transit" | "out_for_delivery" | "delivered" | "returned"
   >("all");
@@ -360,6 +459,17 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
     hubCity: string;
     hubPincode: string;
   }>(() => {
+    if (authUser) {
+      return {
+        fullName: authUser.fullName,
+        email: authUser.email,
+        phone: authUser.phone,
+        companyName: authUser.companyName,
+        role: authUser.role,
+        hubCity: authUser.hubCity,
+        hubPincode: authUser.hubPincode,
+      };
+    }
     if (typeof window !== "undefined") {
       try {
         const raw = localStorage.getItem("trackflow_user_profile");
@@ -378,11 +488,26 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
   });
   const [profileSavedMsg, setProfileSavedMsg] = useState<string | null>(null);
 
+  const [prevAuthEmail, setPrevAuthEmail] = useState<string | undefined>(authUser?.email);
+  if (authUser && authUser.email !== prevAuthEmail) {
+    setPrevAuthEmail(authUser.email);
+    setUserProfile({
+      fullName: authUser.fullName,
+      email: authUser.email,
+      phone: authUser.phone,
+      companyName: authUser.companyName,
+      role: authUser.role,
+      hubCity: authUser.hubCity,
+      hubPincode: authUser.hubPincode,
+    });
+  }
+
   // Inline Customer & Consignment Edit Modal State
   const [editingShipment, setEditingShipment] = useState<BulkShipment | null>(null);
   const [editCustomerName, setEditCustomerName] = useState("");
   const [editCustomerPhone, setEditCustomerPhone] = useState("");
   const [editPincode, setEditPincode] = useState("");
+  const [editItemCode, setEditItemCode] = useState("");
   const [editDestination, setEditDestination] = useState("");
   const [editStatus, setEditStatus] = useState<BulkShipment["status"]>("booked");
 
@@ -508,7 +633,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
   const [intakeRecipient, setIntakeRecipient] = useState("");
   const [intakePhone, setIntakePhone] = useState("");
   const [intakePincode, setIntakePincode] = useState("");
-  const [intakeDestination, setIntakeDestination] = useState("");
+  const [intakeItemCode, setIntakeItemCode] = useState("");
   const [intakeStatus, setIntakeStatus] = useState<"booked" | "in_transit" | "out_for_delivery" | "delivered" | "returned">("booked");
   const [isIntakeStatusDropdownOpen, setIsIntakeStatusDropdownOpen] = useState(false);
   const [intakeReturnReason, setIntakeReturnReason] = useState("");
@@ -647,7 +772,6 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
     isBackupModalOpen ||
     isBulkDeleteModalOpen ||
     isDeleteExportedModalOpen ||
-    isMobileSidebarOpen ||
     Boolean(editingShipment) ||
     Boolean(selectedDetailShipment) ||
     Boolean(batchPendingDeleteId);
@@ -901,9 +1025,9 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
       (scanSource === "camera" && isReturnedSim ? "returned" : intakeStatus);
 
     const resolvedPin = intakePincode.trim();
+    const resolvedItemCode = intakeItemCode.trim();
     const resolvedDest =
       destinationOverride?.trim() ||
-      intakeDestination.trim() ||
       (resolvedPin ? `Pin ${resolvedPin}` : "Destination Center");
     const resolvedOrigin = userProfile.hubCity
       ? `${userProfile.hubCity}${userProfile.hubPincode ? ` (${userProfile.hubPincode})` : ""}`
@@ -947,6 +1071,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
       origin: resolvedOrigin,
       destination: resolvedDest,
       pincode: resolvedPin || undefined,
+      itemCode: resolvedItemCode || undefined,
       articleType: finalStatus === "booked" ? "Booked Consignment" : "Registered Consignment",
       weight: "250 g",
       lastUpdated: "Staged Just Now",
@@ -978,7 +1103,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
       setIntakeRecipient("");
       setIntakePhone("");
       setIntakePincode("");
-      setIntakeDestination("");
+      setIntakeItemCode("");
       setIntakeReturnReason("");
       if (intakeInputRef.current) {
         intakeInputRef.current.focus();
@@ -988,7 +1113,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
         intakeInputRef.current.select();
       }
     }
-  }, [stagedConsignments, intakeCourier, intakeStatus, intakeDestination, intakeRecipient, intakePhone, intakePincode, intakeReturnReason, userProfile.hubCity, userProfile.hubPincode, isAutoNextEnabled, isCameraActive, playChime]);
+  }, [stagedConsignments, intakeCourier, intakeStatus, intakeItemCode, intakeRecipient, intakePhone, intakePincode, intakeReturnReason, userProfile.hubCity, userProfile.hubPincode, isAutoNextEnabled, isCameraActive, playChime]);
 
   // Handle hardware scanner or manual Enter in input
   const handleIntakeKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -1021,10 +1146,10 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
     );
   };
 
-  // Update customer fields (Name, Number, Pincode, Destination) for a staged item
+  // Update customer fields (Name, Number, Pincode, Item Code, Destination) for a staged item
   const handleUpdateStagedCustomerField = (
     id: string,
-    field: "recipientName" | "customerPhone" | "pincode" | "destination",
+    field: "recipientName" | "customerPhone" | "pincode" | "itemCode" | "destination",
     value: string
   ) => {
     setStagedConsignments((prev) =>
@@ -1038,6 +1163,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
     setEditCustomerName(item.recipientName || "");
     setEditCustomerPhone(item.customerPhone || "");
     setEditPincode(item.pincode || "");
+    setEditItemCode(item.itemCode || "");
     setEditDestination(item.destination || "");
     setEditStatus(item.status);
   };
@@ -1062,6 +1188,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
         recipientName: editCustomerName.trim() || undefined,
         customerPhone: editCustomerPhone.trim() || undefined,
         pincode: editPincode.trim() || undefined,
+        itemCode: editItemCode.trim() || undefined,
         destination: editDestination.trim() || s.destination,
         status: editStatus,
         statusText: editStatus !== s.status ? statusText : s.statusText,
@@ -1073,10 +1200,29 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
   };
 
   // Save User Profile & Account Details
-  const handleSaveProfile = (e: React.FormEvent) => {
+  const handleSaveProfile = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
       localStorage.setItem("trackflow_user_profile", JSON.stringify(userProfile));
+      const res = await fetch("/api/auth", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "update_profile",
+          profile: {
+            id: authUser?.id || "usr-demo-01",
+            loginId: authUser?.loginId || "TF-DEMO-01",
+            ...userProfile,
+          },
+        }),
+      });
+      const json = await res.json();
+      if (json.success && json.user) {
+        localStorage.setItem("trackflow_auth_user", JSON.stringify(json.user));
+        if (onProfileUpdated) {
+          onProfileUpdated(json.user);
+        }
+      }
     } catch {}
     setProfileSavedMsg("Profile and hub settings saved.");
     playChime(false);
@@ -1705,7 +1851,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
     setStagedConsignments([]);
     setIntakeAwb("");
     setIntakeRecipient("");
-    setIntakeDestination("");
+    setIntakeItemCode("");
     setIntakeReturnReason("");
     setIsCancelIntakeConfirmOpen(false);
     setIsAddConsignmentsModalOpen(false);
@@ -2226,29 +2372,84 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
     setEditingBatchName("");
   };
 
-  // Full Data Backup Export (.json)
+  // Date-Filtered Shipments for Backup in Settings
+  const backupScopedShipments = useMemo(() => {
+    const todayIso = getTodayIso();
+    const yesterdayIso = getYesterdayIso();
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 6);
+    const sevenDaysIso = sevenDaysAgo.toISOString().split("T")[0];
+
+    return shipments.filter((s) => {
+      const d = resolveShipmentIsoDate(s);
+      if (backupDateFilter === "today") return d === todayIso;
+      if (backupDateFilter === "yesterday") return d === yesterdayIso;
+      if (backupDateFilter === "last_7_days") return d >= sevenDaysIso && d <= todayIso;
+      if (backupDateFilter === "custom") {
+        const start = backupStartDate || "0000-00-00";
+        const end = backupEndDate || "9999-12-31";
+        return d >= start && d <= end;
+      }
+      return true;
+    });
+  }, [shipments, backupDateFilter, backupStartDate, backupEndDate]);
+
+  // Helper to build calendar days for a given year/month
+  const buildCalendarDays = useCallback((year: number, month: number) => {
+    const firstDayOfWeek = new Date(year, month, 1).getDay();
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
+    const cells: (string | null)[] = [];
+    for (let i = 0; i < firstDayOfWeek; i++) {
+      cells.push(null);
+    }
+    for (let d = 1; d <= daysInMonth; d++) {
+      const iso = `${year}-${String(month + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+      cells.push(iso);
+    }
+    return cells;
+  }, []);
+
+  // Full or Date-Wise Data Backup Export (.json)
   const handleExportBackup = () => {
     try {
+      setBackupError(null);
+      if (backupScopedShipments.length === 0) {
+        setBackupError("No consignments match the selected backup date range.");
+        return;
+      }
+      const dateScopeLabel =
+        backupDateFilter === "all"
+          ? "Full_Dataset"
+          : backupDateFilter === "today"
+          ? `Today_${getTodayIso()}`
+          : backupDateFilter === "yesterday"
+          ? `Yesterday_${getYesterdayIso()}`
+          : backupDateFilter === "last_7_days"
+          ? "Last_7_Days"
+          : `${backupStartDate}_to_${backupEndDate}`;
+
       const backupPayload = {
         version: "1.0",
         app: "TrackFlow Logistics",
         exportedAt: new Date().toISOString(),
-        totalShipments: shipments.length,
+        dateScope: dateScopeLabel,
+        totalShipments: backupScopedShipments.length,
         totalBatches: uniqueBatches.length,
-        shipments,
+        shipments: backupScopedShipments,
       };
       const blob = new Blob([JSON.stringify(backupPayload, null, 2)], { type: "application/json" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
-      const dateStr = new Date().toISOString().split("T")[0];
       a.href = url;
-      a.download = `TrackFlow_Data_Backup_${dateStr}.json`;
+      a.download = `TrackFlow_Backup_${dateScopeLabel}.json`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
       playChime(false);
-      setBackupSuccessMsg(`Backup exported successfully! File downloaded.`);
+      setBackupSuccessMsg(
+        `Backup exported (${backupScopedShipments.length} consignment${backupScopedShipments.length === 1 ? "" : "s"}).`
+      );
     } catch (e) {
       console.error("Backup export failed:", e);
       setBackupError("Failed to generate backup JSON file.");
@@ -2297,10 +2498,12 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
             recipientName: item.recipientName ? String(item.recipientName) : undefined,
             customerPhone: item.customerPhone ? String(item.customerPhone) : undefined,
             pincode: item.pincode ? String(item.pincode) : undefined,
+            itemCode: item.itemCode ? String(item.itemCode) : undefined,
             isImported: item.isImported !== undefined ? Boolean(item.isImported) : true,
             batchId: item.batchId ? String(item.batchId) : undefined,
             batchName: item.batchName ? String(item.batchName) : undefined,
             importedAt: item.importedAt ? String(item.importedAt) : undefined,
+            importedDate: item.importedDate ? String(item.importedDate) : undefined,
           }));
 
         if (validItems.length === 0) {
@@ -2841,8 +3044,8 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
   }, [activeShipments, exportBatchTargetId, exportStatusTarget, matchesDateFilter]);
 
   return (
-    /* Full-Screen SaaS Platform Shell with Left-Side End Menu Bar */
-    <div className="w-full min-h-[calc(100vh-3.5rem)] sm:min-h-[calc(100vh-4rem)] flex flex-col bg-slate-50/70 dark:bg-slate-950">
+    /* Full-Screen Fixed Viewport SaaS Platform Shell with Left-Side End Menu Bar */
+    <div className="w-full h-[calc(100vh-3.5rem)] sm:h-[calc(100vh-4rem)] flex flex-col overflow-hidden bg-slate-50/70 dark:bg-slate-950">
       {/* ============================================================== */}
       {/* TOP-RIGHT STACKED AUTO-HIDING DELIVERED NOTIFICATION CARDS     */}
       {/* ============================================================== */}
@@ -2901,388 +3104,244 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
       )}
 
       {/* ============================================================== */}
-      {/* FULL-SCREEN SAAS SHELL: LEFT-END MENU BAR + MAIN WORKSPACE     */}
+      {/* FULL-SCREEN SAAS SHELL: FIXED LEFT MENU BAR + SCROLLING MAIN   */}
       {/* ============================================================== */}
-      <div className="flex flex-col lg:flex-row flex-1 min-h-[calc(100vh-3.5rem)] sm:min-h-[calc(100vh-4rem)] w-full items-stretch">
+      <div className="flex flex-1 min-h-0 w-full overflow-hidden items-stretch">
         {/* ============================================================ */}
-        {/* MOBILE SLIDE-OVER LEFT-END SIDEBAR DRAWER                    */}
+        {/* FLOATING TOP-RIGHT COMPACT MOBILE MENU POPOVER               */}
+        {/* (No header fade; click anywhere outside closes immediately)  */}
         {/* ============================================================ */}
         {isMobileSidebarOpen && (
-          <div className="fixed inset-0 z-50 lg:hidden flex">
-            <div
-              className="fixed inset-0 bg-slate-950/70 backdrop-blur-xs animate-in fade-in duration-150"
-              onClick={() => setIsMobileSidebarOpen(false)}
-              aria-hidden="true"
-            />
-            <aside className="relative z-10 w-72 max-w-[82vw] h-full bg-white dark:bg-slate-900 border-r border-slate-200/90 dark:border-slate-800 shadow-2xl flex flex-col justify-between overflow-y-auto animate-in slide-in-from-left duration-200">
-              <div className="p-4 space-y-5">
-                {/* Mobile Drawer Header */}
-                <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
-                  <div className="flex items-center gap-2.5">
-                    <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-600 to-violet-600 text-white shadow-xs">
-                      <Layers className="h-4 w-4" />
-                    </span>
-                    <div>
-                      <div className="text-xs font-black tracking-tight text-slate-900 dark:text-white">
-                        Workspace
-                      </div>
-                      <div className="text-[10px] font-medium text-slate-500 dark:text-slate-400">
-                        {userProfile.hubCity}
-                      </div>
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setIsMobileSidebarOpen(false)}
-                    className="rounded-xl p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-slate-800 cursor-pointer"
-                    aria-label="Close menu"
-                  >
-                    <X className="h-4 w-4" />
-                  </button>
-                </div>
-
-                {/* Mobile Drawer Navigation Items (Clean Single-Word Logical Menu Names) */}
-                <div className="space-y-1">
-                  <div className="px-2.5 pb-1 text-[10px] font-extrabold uppercase tracking-wider text-slate-400 dark:text-slate-500">
-                    Menu
-                  </div>
-                  {(
-                    [
-                      {
-                        id: "dashboard",
-                        label: "Dashboard",
-                        icon: LayoutDashboard,
-                        badge: totalCount,
-                      },
-                      {
-                        id: "data",
-                        label: "Consignments",
-                        icon: Package,
-                        badge: filteredShipments.length,
-                      },
-                      {
-                        id: "batches",
-                        label: "Batches",
-                        icon: FolderKanban,
-                        badge: uniqueBatches.length,
-                      },
-                      {
-                        id: "analytics",
-                        label: "Analytics",
-                        icon: BarChart3,
-                        badge: dataAnalytics.formattedSize,
-                      },
-                      {
-                        id: "settings",
-                        label: "Settings",
-                        icon: Settings,
-                        badge: `${Math.round(checkIntervalSec / 60)}m`,
-                      },
-                    ] as const
-                  ).map((nav) => {
-                    const Icon = nav.icon;
-                    const isActive = activeMenu === nav.id;
-                    return (
-                      <button
-                        key={nav.id}
-                        type="button"
-                        onClick={() => {
-                          setActiveMenu(nav.id);
-                          setIsMobileSidebarOpen(false);
-                        }}
-                        className={`w-full flex items-center justify-between gap-2.5 rounded-xl px-3 py-2.5 text-xs font-bold transition-all cursor-pointer ${
-                          isActive
-                            ? "bg-gradient-to-r from-indigo-600 to-violet-600 text-white shadow-sm shadow-indigo-500/20"
-                            : "text-slate-700 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800/70"
-                        }`}
-                      >
-                        <div className="flex items-center gap-2.5 min-w-0">
-                          <Icon
-                            className={`h-4 w-4 shrink-0 ${
-                              isActive ? "text-white" : "text-indigo-600 dark:text-indigo-400"
-                            }`}
-                          />
-                          <span className="truncate">{nav.label}</span>
-                        </div>
-                        <span
-                          className={`rounded-lg px-2 py-0.5 font-mono text-[10px] font-black tabular-nums shrink-0 ${
-                            isActive
-                              ? "bg-white/20 text-white"
-                              : "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400"
-                          }`}
-                        >
-                          {nav.badge}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-
-                {/* Status Filter inside Mobile Drawer */}
-                <div className="pt-3 border-t border-slate-100 dark:border-slate-800 space-y-2">
-                  <div className="flex items-center justify-between px-2">
-                    <span className="text-[10px] font-extrabold uppercase tracking-wider text-slate-400 dark:text-slate-500">
-                      Status Filter
-                    </span>
-                    {statusFilter !== "all" && (
-                      <button
-                        type="button"
-                        onClick={() => setStatusFilter("all")}
-                        className="text-[10px] font-bold text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer"
-                      >
-                        Reset
-                      </button>
-                    )}
-                  </div>
-                  <div className="grid grid-cols-2 gap-1.5">
-                    {(
-                      [
-                        { id: "all", label: "All", count: scopedTotalCount },
-                        { id: "booked", label: "Booked", count: scopedBookedCount },
-                        { id: "in_transit", label: "In Transit", count: scopedInTransitCount },
-                        { id: "out_for_delivery", label: "Out Deliv.", count: scopedOutCount },
-                        { id: "delivered", label: "Delivered", count: scopedDeliveredCount },
-                        { id: "returned", label: "Returned", count: scopedReturnedCount },
-                      ] as const
-                    ).map((st) => (
-                      <button
-                        key={st.id}
-                        type="button"
-                        onClick={() => {
-                          setStatusFilter(st.id);
-                          if (activeMenu !== "dashboard" && activeMenu !== "data") {
-                            setActiveMenu("data");
-                          }
-                          setIsMobileSidebarOpen(false);
-                        }}
-                        className={`flex items-center justify-between rounded-xl border px-2.5 py-1.5 text-[11px] font-bold transition-all cursor-pointer ${
-                          statusFilter === st.id
-                            ? "border-indigo-600 bg-indigo-50 text-indigo-700 dark:border-indigo-500 dark:bg-indigo-950/70 dark:text-indigo-300"
-                            : "border-slate-200/80 bg-slate-50/60 text-slate-600 hover:bg-slate-100 dark:border-slate-800 dark:bg-slate-800/40 dark:text-slate-300"
-                        }`}
-                      >
-                        <span className="truncate">{st.label}</span>
-                        <span className="font-mono text-[10px] font-black tabular-nums ml-1">
-                          {st.count}
-                        </span>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
-
-              {/* Single Unified Operator Account Card in Mobile Drawer Footer */}
-              <div className="p-3.5 border-t border-slate-100 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-900">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setActiveMenu("profile");
-                    setIsMobileSidebarOpen(false);
-                  }}
-                  className={`w-full flex items-center gap-2.5 rounded-xl border p-2.5 text-left transition-all cursor-pointer ${
-                    activeMenu === "profile"
-                      ? "border-indigo-600 bg-indigo-50/80 dark:border-indigo-500 dark:bg-indigo-950/60"
-                      : "border-slate-200/80 bg-white hover:border-indigo-400 dark:border-slate-800 dark:bg-slate-800/70"
-                  }`}
-                >
-                  <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-600 to-violet-600 text-white font-black text-xs shadow-xs">
-                    {userProfile.fullName
-                      .split(" ")
-                      .map((n) => n[0])
-                      .join("")
-                      .slice(0, 2)
-                      .toUpperCase() || "TF"}
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-1">
-                      <span className="text-xs font-extrabold text-slate-900 dark:text-white truncate">
-                        {userProfile.fullName}
-                      </span>
-                      <BadgeCheck className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400 shrink-0" />
-                    </div>
-                    <div className="text-[10px] text-slate-500 dark:text-slate-400 truncate">
-                      Account · {userProfile.hubPincode}
-                    </div>
-                  </div>
-                </button>
-              </div>
-            </aside>
-          </div>
-        )}
-
-        {/* ============================================================ */}
-        {/* DESKTOP FULL-SCREEN LEFT-SIDE END MENU BAR                   */}
-        {/* ============================================================ */}
-        <aside
-          className={`hidden lg:flex lg:sticky lg:top-14 sm:lg:top-16 lg:h-[calc(100vh-3.5rem)] sm:lg:h-[calc(100vh-4rem)] self-start flex-col justify-between border-r border-slate-200/90 bg-white dark:border-slate-800/90 dark:bg-slate-900 transition-all duration-200 shrink-0 overflow-y-auto select-none ${
-            isSidebarCollapsed ? "w-[72px]" : "w-60 xl:w-64"
-          }`}
-        >
-          {/* Top Section: Sidebar Header & Navigation */}
-          <div>
-            <div
-              className={`flex items-center border-b border-slate-100 dark:border-slate-800/80 px-3.5 py-3 ${
-                isSidebarCollapsed ? "justify-center" : "justify-between"
-              }`}
-            >
-              {!isSidebarCollapsed && (
-                <div className="flex items-center gap-2 min-w-0">
-                  <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-600 to-violet-600 text-white shadow-2xs">
-                    <Layers className="h-3.5 w-3.5" />
-                  </span>
-                  <span className="text-xs font-extrabold tracking-tight text-slate-900 dark:text-white truncate">
-                    Menu
-                  </span>
-                </div>
-              )}
-              <button
-                type="button"
-                onClick={toggleSidebarCollapse}
-                title={isSidebarCollapsed ? "Expand menu bar" : "Collapse menu bar"}
-                className="flex h-8 w-8 items-center justify-center rounded-xl border border-slate-200/80 bg-slate-50 text-slate-600 hover:border-indigo-300 hover:bg-indigo-50 hover:text-indigo-600 dark:border-slate-800 dark:bg-slate-800/80 dark:text-slate-300 dark:hover:bg-slate-800 transition-colors cursor-pointer shrink-0"
-              >
-                {isSidebarCollapsed ? (
-                  <PanelLeftOpen className="h-4 w-4" />
-                ) : (
-                  <PanelLeftClose className="h-4 w-4" />
-                )}
-              </button>
-            </div>
-
-            {/* Sidebar Section 1: Clean Single-Word Menu Items */}
-            <div className="p-2.5 space-y-1">
+          <aside
+            ref={mobileDrawerRef}
+            className="fixed top-15 right-3 sm:right-5 z-[55] md:hidden w-68 max-w-[calc(100vw-1.5rem)] max-h-[calc(100vh-4.5rem)] bg-white dark:bg-slate-900 border border-slate-200/90 dark:border-slate-800 rounded-2xl shadow-2xl flex flex-col justify-between overflow-hidden animate-menu-open"
+          >
+            {/* Navigation Items (No number counts) */}
+            <div className="flex-1 overflow-y-auto p-2.5 space-y-1">
               {(
                 [
                   {
                     id: "dashboard",
                     label: "Dashboard",
                     icon: LayoutDashboard,
-                    count: totalCount,
                   },
                   {
                     id: "data",
                     label: "Consignments",
                     icon: Package,
-                    count: filteredShipments.length,
                   },
                   {
                     id: "batches",
                     label: "Batches",
                     icon: FolderKanban,
-                    count: uniqueBatches.length,
                   },
                   {
                     id: "analytics",
                     label: "Analytics",
                     icon: BarChart3,
-                    count: dataAnalytics.formattedSize,
                   },
                   {
                     id: "settings",
                     label: "Settings",
                     icon: Settings,
-                    count: `${Math.round(checkIntervalSec / 60)}m`,
                   },
                 ] as const
-              ).map((item) => {
-                const Icon = item.icon;
-                const isActive = activeMenu === item.id;
+              ).map((nav) => {
+                const Icon = nav.icon;
+                const isActive = activeMenu === nav.id;
                 return (
                   <button
-                    key={item.id}
+                    key={nav.id}
                     type="button"
-                    onClick={() => setActiveMenu(item.id)}
-                    title={isSidebarCollapsed ? `${item.label} (${item.count})` : undefined}
-                    className={`w-full flex items-center rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                      isSidebarCollapsed
-                        ? "justify-center p-2.5"
-                        : "justify-between gap-2.5 px-3 py-2.5"
-                    } ${
+                    onClick={() => {
+                      setActiveMenu(nav.id);
+                      setIsMobileSidebarOpen(false);
+                    }}
+                    className={`w-full flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-xs font-bold transition-all cursor-pointer ${
                       isActive
                         ? "bg-gradient-to-r from-indigo-600 to-violet-600 text-white shadow-sm shadow-indigo-500/20"
-                        : "text-slate-700 hover:bg-slate-100/90 dark:text-slate-300 dark:hover:bg-slate-800/70"
+                        : "text-slate-700 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800/70"
                     }`}
                   >
-                    <div className="flex items-center gap-2.5 min-w-0">
-                      <Icon
-                        className={`h-4 w-4 shrink-0 ${
-                          isActive ? "text-white" : "text-indigo-600 dark:text-indigo-400"
-                        }`}
-                      />
-                      {!isSidebarCollapsed && <span className="truncate">{item.label}</span>}
-                    </div>
-                    {!isSidebarCollapsed && (
-                      <span
-                        className={`rounded-lg px-2 py-0.5 font-mono text-[10px] font-black tabular-nums shrink-0 ${
-                          isActive
-                            ? "bg-white/20 text-white"
-                            : "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400"
-                        }`}
-                      >
-                        {item.count}
-                      </span>
-                    )}
+                    <Icon
+                      className={`h-4 w-4 shrink-0 ${
+                        isActive ? "text-white" : "text-indigo-600 dark:text-indigo-400"
+                      }`}
+                    />
+                    <span className="truncate">{nav.label}</span>
                   </button>
                 );
               })}
             </div>
 
-            {/* Sidebar Section 2: Status Filter Matrix (Only shown when expanded) */}
-            {!isSidebarCollapsed && (
-              <div className="p-2.5 pt-2 border-t border-slate-100 dark:border-slate-800/80 space-y-2">
-                <div className="flex items-center justify-between px-2">
-                  <span className="text-[10px] font-extrabold uppercase tracking-wider text-slate-400 dark:text-slate-500">
-                    Status Filter
-                  </span>
-                  {statusFilter !== "all" && (
-                    <button
-                      type="button"
-                      onClick={() => setStatusFilter("all")}
-                      className="text-[10px] font-bold text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer"
-                    >
-                      Reset
-                    </button>
-                  )}
+            {/* Fixed Bottom Operator Account Card & Sign Out in Mobile Menu Footer */}
+            <div className="shrink-0 p-2.5 border-t border-slate-100 dark:border-slate-800 bg-slate-50/90 dark:bg-slate-900 flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveMenu("profile");
+                  setIsMobileSidebarOpen(false);
+                }}
+                className={`flex-1 flex items-center gap-2 rounded-xl border p-2 text-left transition-all cursor-pointer min-w-0 ${
+                  activeMenu === "profile"
+                    ? "border-indigo-600 bg-indigo-50/80 dark:border-indigo-500 dark:bg-indigo-950/60"
+                    : "border-slate-200/80 bg-white hover:border-indigo-400 dark:border-slate-800 dark:bg-slate-800/70"
+                }`}
+              >
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-600 to-violet-600 text-white font-black text-xs shadow-2xs">
+                  {userProfile.fullName
+                    .split(" ")
+                    .map((n) => n[0])
+                    .join("")
+                    .slice(0, 2)
+                    .toUpperCase() || "TF"}
                 </div>
-                <div className="grid grid-cols-2 gap-1.5">
-                  {(
-                    [
-                      { id: "all", label: "All", count: scopedTotalCount },
-                      { id: "booked", label: "Booked", count: scopedBookedCount },
-                      { id: "in_transit", label: "In Transit", count: scopedInTransitCount },
-                      { id: "out_for_delivery", label: "Out Deliv.", count: scopedOutCount },
-                      { id: "delivered", label: "Delivered", count: scopedDeliveredCount },
-                      { id: "returned", label: "Returned", count: scopedReturnedCount },
-                    ] as const
-                  ).map((st) => (
-                    <button
-                      key={st.id}
-                      type="button"
-                      onClick={() => {
-                        setStatusFilter(st.id);
-                        if (activeMenu !== "dashboard" && activeMenu !== "data") {
-                          setActiveMenu("data");
-                        }
-                      }}
-                      className={`flex items-center justify-between rounded-xl border px-2.5 py-1.5 text-[11px] font-bold transition-all cursor-pointer ${
-                        statusFilter === st.id
-                          ? "border-indigo-600 bg-indigo-50 text-indigo-700 dark:border-indigo-500 dark:bg-indigo-950/70 dark:text-indigo-300"
-                          : "border-slate-200/80 bg-slate-50/60 text-slate-600 hover:bg-slate-100 dark:border-slate-800 dark:bg-slate-800/40 dark:text-slate-300"
-                      }`}
-                    >
-                      <span className="truncate">{st.label}</span>
-                      <span className="font-mono text-[10px] font-black tabular-nums ml-1">
-                        {st.count}
-                      </span>
-                    </button>
-                  ))}
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-1">
+                    <span className="text-xs font-extrabold text-slate-900 dark:text-white truncate">
+                      {userProfile.fullName}
+                    </span>
+                    <BadgeCheck className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400 shrink-0" />
+                  </div>
+                  <div className="text-[10px] text-slate-500 dark:text-slate-400 truncate">
+                    {authUser?.loginId || "Account"} · {userProfile.hubPincode}
+                  </div>
                 </div>
+              </button>
+              {onLogout && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsMobileSidebarOpen(false);
+                    onLogout();
+                  }}
+                  title="Sign Out"
+                  className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-rose-200 bg-rose-50 text-rose-600 hover:bg-rose-100 dark:border-rose-900/60 dark:bg-rose-950/60 dark:text-rose-300 cursor-pointer"
+                >
+                  <LogOut className="h-4 w-4" />
+                </button>
+              )}
+            </div>
+          </aside>
+        )}
+
+        {/* ============================================================ */}
+        {/* DESKTOP FIXED FULL-HEIGHT LEFT-SIDE END MENU BAR             */}
+        {/* (Includes Logo + Collapse Icon at top; collapses together)   */}
+        {/* ============================================================ */}
+        <aside
+          className={`hidden md:flex md:fixed md:top-0 md:bottom-0 md:left-0 md:z-50 flex-col justify-between border-r border-slate-200/90 bg-white dark:border-slate-800/90 dark:bg-slate-900 transition-all duration-200 shrink-0 overflow-hidden select-none ${
+            isSidebarCollapsed ? "md:w-[68px]" : "md:w-60 xl:w-64"
+          }`}
+        >
+          {/* Top Brand Logo + Collapse Icon Near After Logo (Aligned with menu icons on collapse) */}
+          <div
+            className={`h-14 sm:h-16 shrink-0 flex items-center transition-all duration-200 ${
+              isSidebarCollapsed
+                ? "justify-center px-2.5"
+                : "justify-between px-3.5 sm:px-4"
+            }`}
+          >
+            <button
+              type="button"
+              onClick={() => {
+                if (isSidebarCollapsed) {
+                  toggleSidebarCollapse();
+                } else {
+                  setActiveMenu("dashboard");
+                }
+              }}
+              title={isSidebarCollapsed ? "TrackFlow (Click to expand)" : "TrackFlow"}
+              className={`flex items-center font-extrabold tracking-tight text-slate-900 dark:text-white whitespace-nowrap shrink-0 group cursor-pointer ${
+                isSidebarCollapsed ? "justify-center w-10 h-10" : "gap-2.5"
+              }`}
+            >
+              <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-600 to-violet-600 text-white shadow-sm shadow-indigo-500/25 transition-transform group-hover:scale-105 shrink-0">
+                <PackageSearch className="h-4.5 w-4.5" />
               </div>
+              {!isSidebarCollapsed && (
+                <span className="text-base sm:text-xl font-black tracking-tight">
+                  Track<span className="text-indigo-600 dark:text-indigo-400">Flow</span>
+                </span>
+              )}
+            </button>
+
+            {!isSidebarCollapsed && (
+              <button
+                type="button"
+                onClick={toggleSidebarCollapse}
+                title="Collapse sidebar"
+                aria-label="Collapse sidebar"
+                className="flex h-8 w-8 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 hover:text-indigo-600 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-indigo-400 transition-colors cursor-pointer shrink-0"
+              >
+                <PanelLeftClose className="h-4 w-4" />
+              </button>
             )}
           </div>
 
-          {/* Single Unified Account Card in Sidebar Footer */}
-          <div className="p-2.5 border-t border-slate-100 dark:border-slate-800/80 bg-slate-50/70 dark:bg-slate-800/40">
+          {/* Primary Navigation Items (Directly below logo with no dividing line; centered when collapsed) */}
+          <div className="flex-1 overflow-y-auto px-2.5 pb-2.5 pt-1 space-y-1">
+            {(
+              [
+                {
+                  id: "dashboard",
+                  label: "Dashboard",
+                  icon: LayoutDashboard,
+                },
+                {
+                  id: "data",
+                  label: "Consignments",
+                  icon: Package,
+                },
+                {
+                  id: "batches",
+                  label: "Batches",
+                  icon: FolderKanban,
+                },
+                {
+                  id: "analytics",
+                  label: "Analytics",
+                  icon: BarChart3,
+                },
+                {
+                  id: "settings",
+                  label: "Settings",
+                  icon: Settings,
+                },
+              ] as const
+            ).map((item) => {
+              const Icon = item.icon;
+              const isActive = activeMenu === item.id;
+
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => setActiveMenu(item.id)}
+                  title={isSidebarCollapsed ? item.label : undefined}
+                  className={`flex items-center rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                    isSidebarCollapsed
+                      ? "w-10 h-10 mx-auto justify-center"
+                      : "w-full justify-start gap-2.5 px-3 py-2.5"
+                  } ${
+                    isActive
+                      ? "bg-gradient-to-r from-indigo-600 to-violet-600 text-white shadow-sm shadow-indigo-500/20"
+                      : "text-slate-700 hover:bg-slate-100/90 dark:text-slate-300 dark:hover:bg-slate-800/70"
+                  }`}
+                >
+                  <Icon
+                    className={`h-4.5 w-4.5 shrink-0 ${
+                      isActive ? "text-white" : "text-indigo-600 dark:text-indigo-400"
+                    }`}
+                  />
+                  {!isSidebarCollapsed && <span className="truncate">{item.label}</span>}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Fixed Bottom Account Card & Sign Out in Sidebar Footer */}
+          <div className="shrink-0 mt-auto p-2.5 border-t border-slate-100 dark:border-slate-800/80 bg-slate-50/90 dark:bg-slate-900/95 flex items-center justify-center gap-1.5">
             <button
               type="button"
               onClick={() => setActiveMenu("profile")}
@@ -3291,8 +3350,8 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                   ? `${userProfile.fullName} • Account`
                   : "Open Account Settings"
               }
-              className={`w-full flex items-center rounded-xl border transition-all cursor-pointer ${
-                isSidebarCollapsed ? "justify-center p-2" : "gap-2.5 p-2.5 text-left"
+              className={`min-w-0 flex items-center rounded-xl border transition-all cursor-pointer ${
+                isSidebarCollapsed ? "w-10 h-10 justify-center mx-auto" : "flex-1 gap-2.5 p-2 text-left"
               } ${
                 activeMenu === "profile"
                   ? "border-indigo-600 bg-indigo-50/90 dark:border-indigo-500 dark:bg-indigo-950/70 shadow-2xs"
@@ -3317,18 +3376,33 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                     <BadgeCheck className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400 shrink-0" />
                   </div>
                   <div className="text-[10px] font-medium text-slate-500 dark:text-slate-400 truncate">
-                    Account · {userProfile.hubPincode}
+                    {authUser?.loginId || "Account"} · {userProfile.hubPincode}
                   </div>
                 </div>
               )}
             </button>
+
+            {!isSidebarCollapsed && onLogout && (
+              <button
+                type="button"
+                onClick={onLogout}
+                title="Sign Out"
+                className="flex h-10 w-9 shrink-0 items-center justify-center rounded-xl border border-slate-200/80 bg-white text-slate-500 hover:border-rose-200 hover:bg-rose-50 hover:text-rose-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400 dark:hover:border-rose-900/60 dark:hover:bg-rose-950/60 dark:hover:text-rose-300 transition-colors cursor-pointer"
+              >
+                <LogOut className="h-3.5 w-3.5" />
+              </button>
+            )}
           </div>
         </aside>
 
         {/* ============================================================ */}
-        {/* RIGHT MAIN SAAS WORKSPACE CONTENT                            */}
+        {/* RIGHT MAIN SAAS WORKSPACE CONTENT (INDEPENDENT SCROLL)       */}
         {/* ============================================================ */}
-        <div className="flex-1 min-w-0 px-3.5 sm:px-6 lg:px-8 py-4 sm:py-6 space-y-5">
+        <div
+          className={`flex-1 min-w-0 h-full overflow-y-auto px-3.5 sm:px-6 lg:px-8 py-4 sm:py-6 space-y-5 transition-all duration-200 ${
+            isSidebarCollapsed ? "md:ml-[68px]" : "md:ml-60 xl:ml-64"
+          }`}
+        >
           {/* SEPARATE BACKUP REVIEW MODE BANNER */}
           {isReviewingSeparately && backupReviewData && (
             <div className="rounded-3xl border-2 border-indigo-500 bg-indigo-50/90 dark:border-indigo-600 dark:bg-indigo-950/80 p-4 sm:p-5 shadow-md flex flex-col md:flex-row items-start md:items-center justify-between gap-4 animate-in fade-in">
@@ -3382,162 +3456,95 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
           )}
 
           {/* ========================================================== */}
-          {/* 1. ATTRACTIVE GLASS TOP CARD WITH VISUAL ELEMENTS & METRICS */}
+          {/* 1. REDESIGNED WORKSPACE TOP CARD (NO FOLDER ICON)          */}
           {/* ========================================================== */}
-          <div className="relative overflow-hidden rounded-2xl sm:rounded-3xl border border-indigo-200/75 dark:border-indigo-500/30 bg-gradient-to-br from-indigo-500/[0.11] via-white/90 to-emerald-500/[0.09] dark:from-indigo-500/20 dark:via-slate-900/95 dark:to-emerald-500/15 backdrop-blur-xl p-4 sm:p-5.5 shadow-sm">
-            {/* Subtle radial grid pattern + decorative glow accents */}
-            <div
-              className="pointer-events-none absolute inset-0 opacity-[0.35] dark:opacity-[0.18]"
-              style={{
-                backgroundImage:
-                  "radial-gradient(circle at 1px 1px, rgba(99, 102, 241, 0.28) 1px, transparent 0)",
-                backgroundSize: "18px 18px",
-              }}
-            />
-            <div className="pointer-events-none absolute -top-20 -left-16 h-52 w-52 rounded-full bg-indigo-500/15 blur-3xl" />
-            <div className="pointer-events-none absolute -bottom-20 -right-16 h-52 w-52 rounded-full bg-emerald-500/15 blur-3xl" />
-            <div className="pointer-events-none absolute top-0 inset-x-0 h-[2px] bg-gradient-to-r from-indigo-500 via-sky-400 to-emerald-500 opacity-75" />
+          <div className="relative overflow-hidden rounded-2xl border border-slate-200/85 dark:border-slate-800/85 bg-white/95 dark:bg-slate-900/95 p-4 sm:p-5 shadow-2xs">
+            <div className="pointer-events-none absolute -top-24 -right-20 h-48 w-48 rounded-full bg-indigo-500/10 blur-3xl" />
+            <div className="pointer-events-none absolute -bottom-24 -left-20 h-48 w-48 rounded-full bg-emerald-500/10 blur-3xl" />
 
-            <div className="relative z-10 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-              {/* Left: Mobile Menu Button + Attractive View Emblem + Title & Status Strip */}
-              <div className="flex items-start sm:items-center gap-3 min-w-0">
-                {/* Mobile Left Sidebar Drawer Trigger */}
-                <button
-                  type="button"
-                  onClick={() => setIsMobileSidebarOpen(true)}
-                  className="flex lg:hidden h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-indigo-200/80 bg-white/95 text-indigo-600 shadow-2xs hover:bg-indigo-50 dark:border-slate-700 dark:bg-slate-900/90 dark:text-indigo-400 cursor-pointer"
-                  aria-label="Open menu"
-                >
-                  <Menu className="h-4.5 w-4.5" />
-                </button>
+            <div className="relative z-10 flex flex-col lg:flex-row lg:items-center justify-between gap-3.5">
+              {/* Left: Clean Section Title, Active Count & Live Status Bar (Zero Folder Icons) */}
+              <div className="min-w-0 flex-1 space-y-2">
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <h1 className="text-lg sm:text-xl font-bold tracking-tight text-slate-900 dark:text-white leading-none">
+                    {activeMenu === "dashboard"
+                      ? "Dashboard"
+                      : activeMenu === "data"
+                      ? "Consignments"
+                      : activeMenu === "batches"
+                      ? "Batches"
+                      : activeMenu === "analytics"
+                      ? "Analytics"
+                      : activeMenu === "settings"
+                      ? "Settings"
+                      : "Account"}
+                  </h1>
 
-                {/* Desktop Decorative View Emblem Icon */}
-                <div className="hidden sm:flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-indigo-600 to-violet-600 text-white shadow-sm shadow-indigo-500/25 ring-4 ring-indigo-500/10">
-                  {activeMenu === "dashboard" ? (
-                    <LayoutGrid className="h-5 w-5" />
-                  ) : activeMenu === "data" ? (
-                    <Package className="h-5 w-5" />
-                  ) : activeMenu === "batches" ? (
-                    <FolderKanban className="h-5 w-5" />
-                  ) : activeMenu === "analytics" ? (
-                    <BarChart3 className="h-5 w-5" />
-                  ) : activeMenu === "settings" ? (
-                    <Settings className="h-5 w-5" />
-                  ) : (
-                    <User className="h-5 w-5" />
-                  )}
-                </div>
+                  <span className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-50 dark:bg-indigo-950/70 border border-indigo-200/70 dark:border-indigo-800/60 px-2.5 py-0.5 text-[11px] font-bold text-indigo-700 dark:text-indigo-300">
+                    <span className="h-1.5 w-1.5 rounded-full bg-indigo-500" />
+                    <span>{totalCount} Active</span>
+                  </span>
 
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-2.5 min-w-0">
-                      <h1 className="text-lg sm:text-xl font-bold tracking-tight text-slate-900 dark:text-white leading-tight truncate">
-                        {activeMenu === "dashboard"
-                          ? "Dashboard"
-                          : activeMenu === "data"
-                          ? "Consignments"
-                          : activeMenu === "batches"
-                          ? "Batches"
-                          : activeMenu === "analytics"
-                          ? "Analytics"
-                          : activeMenu === "settings"
-                          ? "Settings"
-                          : "Account"}
-                      </h1>
-                      <span className="hidden md:inline-flex items-center gap-1 rounded-full bg-indigo-500/10 dark:bg-indigo-400/15 border border-indigo-500/20 px-2.5 py-0.5 text-[11px] font-semibold text-indigo-700 dark:text-indigo-300">
-                        <span className="h-1.5 w-1.5 rounded-full bg-indigo-500" />
-                        <span>{totalCount} Active</span>
-                      </span>
-                      {totalCount > 0 && (
-                        <span className="hidden xl:inline-flex items-center gap-1 rounded-full bg-emerald-500/10 dark:bg-emerald-400/15 border border-emerald-500/20 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-700 dark:text-emerald-300">
-                          <CheckCircle2 className="h-3 w-3" />
-                          <span>{Math.round((deliveredCount / totalCount) * 100)}% Delivered</span>
-                        </span>
-                      )}
-                    </div>
-
-                    {/* Mobile Account Avatar Shortcut */}
-                    <button
-                      type="button"
-                      onClick={() => setActiveMenu("profile")}
-                      className="flex lg:hidden h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-600 to-violet-600 text-white font-bold text-[11px] shadow-xs cursor-pointer"
-                      title="Account"
-                    >
-                      {userProfile.fullName
-                        .split(" ")
-                        .map((n) => n[0])
-                        .join("")
-                        .slice(0, 2)
-                        .toUpperCase() || "TF"}
-                    </button>
-                  </div>
-
-                  {/* Status Metadata Strip: Origin Hub + Live Sync Time Pill + Batch Filter Indicator */}
-                  <div className="mt-1.5 flex flex-wrap items-center gap-1.5 sm:gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setActiveMenu("profile")}
-                      className="inline-flex items-center gap-1.5 rounded-lg bg-white/90 hover:bg-white dark:bg-slate-900/90 dark:hover:bg-slate-900 border border-slate-200/80 dark:border-slate-700/80 px-2.5 py-1 text-[11px] font-semibold text-slate-700 dark:text-slate-300 shadow-2xs transition-colors cursor-pointer"
-                      title="Origin Hub"
-                    >
-                      <MapPin className="h-3 w-3 text-emerald-600 dark:text-emerald-400 shrink-0" />
-                      <span className="truncate max-w-[165px] sm:max-w-[220px]">
-                        {userProfile.hubCity} ({userProfile.hubPincode})
-                      </span>
-                    </button>
-
-                    {/* Suitable Sync Time & Instant Refresh Pill */}
-                    <div className="inline-flex items-center gap-1.5 rounded-lg bg-white/90 dark:bg-slate-900/90 border border-slate-200/80 dark:border-slate-700/80 pl-2.5 pr-1 py-0.5 text-[11px] shadow-2xs">
-                      <span
-                        className={`h-1.5 w-1.5 rounded-full shrink-0 ${
-                          isAutoCheckEnabled ? "bg-emerald-500 animate-pulse" : "bg-amber-500"
-                        }`}
-                      />
-                      <span className="font-medium text-slate-500 dark:text-slate-400">
-                        {isAutoCheckEnabled ? "Sync" : "Paused"}
-                      </span>
-                      {isAutoCheckEnabled && (
-                        <span className="font-mono font-bold text-slate-800 dark:text-slate-200 tabular-nums">
-                          {formatTimer(secondsRemaining)}
-                        </span>
-                      )}
-                      <button
-                        type="button"
-                        onClick={handleRunAutoCheck}
-                        disabled={isRefreshing}
-                        className="ml-0.5 inline-flex items-center gap-1 rounded-md bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950/80 dark:hover:bg-indigo-900/80 px-2 py-0.5 text-[10px] font-bold text-indigo-600 dark:text-indigo-300 transition-colors cursor-pointer disabled:opacity-50"
-                        title="Sync now"
-                      >
-                        <RefreshCw
-                          className={`h-2.5 w-2.5 ${isRefreshing ? "animate-spin" : ""}`}
-                        />
-                        <span>Sync</span>
-                      </button>
-                    </div>
-
-                    {selectedBatchId !== "all" && (
-                      <span className="inline-flex items-center gap-1 rounded-lg bg-emerald-500/10 border border-emerald-500/25 px-2 py-0.5 text-[11px] font-semibold text-emerald-700 dark:text-emerald-300">
-                        <FolderKanban className="h-3 w-3 shrink-0" />
-                        <span className="truncate max-w-[140px]">
-                          {selectedBatchId === "imported_all"
-                            ? "All Imported"
-                            : uniqueBatches.find((b) => b.id === selectedBatchId)?.name || "Batch Filter"}
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => setSelectedBatchId("all")}
-                          className="ml-0.5 hover:text-rose-600 cursor-pointer"
-                          title="Clear batch filter"
-                        >
-                          <X className="h-3 w-3" />
-                        </button>
+                  {/* Live Sync Time & Instant Sync Pill */}
+                  <div className="inline-flex items-center gap-1.5 rounded-lg bg-slate-50 dark:bg-slate-800/80 border border-slate-200/80 dark:border-slate-700/80 pl-2.5 pr-1 py-0.5 text-[11px]">
+                    <span
+                      className={`h-1.5 w-1.5 rounded-full shrink-0 ${
+                        isAutoCheckEnabled ? "bg-emerald-500 animate-pulse" : "bg-amber-500"
+                      }`}
+                    />
+                    <span className="font-medium text-slate-500 dark:text-slate-400">
+                      {isAutoCheckEnabled ? "Sync" : "Paused"}
+                    </span>
+                    {isAutoCheckEnabled && (
+                      <span className="font-mono font-bold text-slate-800 dark:text-slate-200 tabular-nums">
+                        {formatTimer(secondsRemaining)}
                       </span>
                     )}
+                    <button
+                      type="button"
+                      onClick={handleRunAutoCheck}
+                      disabled={isRefreshing}
+                      className="ml-0.5 inline-flex items-center gap-1 rounded-md bg-white hover:bg-indigo-50 dark:bg-slate-900 dark:hover:bg-indigo-950/80 border border-slate-200/70 dark:border-slate-700 px-2 py-0.5 text-[10px] font-bold text-indigo-600 dark:text-indigo-300 transition-colors cursor-pointer disabled:opacity-50"
+                      title="Sync now"
+                    >
+                      <RefreshCw
+                        className={`h-2.5 w-2.5 ${isRefreshing ? "animate-spin" : ""}`}
+                      />
+                      <span>Sync</span>
+                    </button>
                   </div>
+                </div>
+
+                {/* Subtitle Metadata Row (Static Location Only — User Name & Click Action Removed) */}
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500 dark:text-slate-400">
+                  <div className="inline-flex items-center gap-1.5 font-medium text-slate-600 dark:text-slate-300">
+                    <MapPin className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                    <span className="truncate max-w-[200px] sm:max-w-[260px]">
+                      {userProfile.hubCity} ({userProfile.hubPincode})
+                    </span>
+                  </div>
+
+                  {selectedBatchId !== "all" && (
+                    <span className="inline-flex items-center gap-1 rounded-lg bg-emerald-500/10 border border-emerald-500/25 px-2 py-0.5 text-[11px] font-semibold text-emerald-700 dark:text-emerald-300">
+                      <span className="truncate max-w-[140px]">
+                        {selectedBatchId === "imported_all"
+                          ? "All Imported"
+                          : uniqueBatches.find((b) => b.id === selectedBatchId)?.name || "Batch Filter"}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedBatchId("all")}
+                        className="ml-0.5 hover:text-rose-600 cursor-pointer"
+                        title="Clear batch filter"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </span>
+                  )}
                 </div>
               </div>
 
-              {/* Right: Logically Placed Primary Action Buttons */}
+              {/* Right: Clean Primary Action Buttons */}
               <div className="grid grid-cols-2 sm:flex items-center gap-2 sm:gap-2.5 w-full lg:w-auto shrink-0">
                 <button
                   type="button"
@@ -3550,7 +3557,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                     setIsCameraActive(false);
                     setIsAddConsignmentsModalOpen(true);
                   }}
-                  className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-200/90 bg-white/95 hover:bg-white px-3.5 py-2.5 text-xs font-bold text-slate-800 shadow-2xs hover:border-indigo-300 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:border-indigo-500/60 transition-all cursor-pointer whitespace-nowrap"
+                  className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-200/90 bg-slate-50/80 hover:bg-white px-3.5 py-2.5 text-xs font-bold text-slate-800 shadow-2xs hover:border-indigo-300 dark:border-slate-700 dark:bg-slate-800/90 dark:text-slate-100 dark:hover:border-indigo-500/60 transition-all cursor-pointer whitespace-nowrap"
                 >
                   <Plus className="h-4 w-4 text-indigo-600 dark:text-indigo-400 stroke-[2.4] shrink-0" />
                   <span>Add Consignment</span>
@@ -3566,7 +3573,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                     setImportSuccessState(null);
                     setIsUploadModalOpen(true);
                   }}
-                  className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-700 hover:to-violet-700 px-4 py-2.5 text-xs font-bold text-white shadow-sm shadow-indigo-500/20 transition-all cursor-pointer whitespace-nowrap"
+                  className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-4 py-2.5 text-xs font-bold text-white shadow-xs transition-all cursor-pointer whitespace-nowrap"
                 >
                   <FileSpreadsheet className="h-4 w-4 stroke-[2.2] shrink-0" />
                   <span>Bulk Import</span>
@@ -3765,7 +3772,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                           className="fixed inset-0 z-40"
                           onClick={() => setIsFilterBatchDropdownOpen(false)}
                         />
-                        <div className="absolute right-0 left-0 sm:left-auto top-full mt-1.5 z-50 sm:w-68 max-h-64 overflow-y-auto rounded-2xl border border-slate-200/90 bg-white p-1.5 shadow-2xl dark:border-slate-700 dark:bg-slate-800 space-y-0.5 animate-in fade-in zoom-in-95 duration-100">
+                        <div className="absolute right-0 left-0 sm:left-auto top-full mt-1.5 z-50 sm:w-68 max-h-64 overflow-y-auto rounded-2xl border border-slate-200/90 bg-white p-1.5 shadow-2xl dark:border-slate-700 dark:bg-slate-800 space-y-0.5 animate-dropdown-open">
                           {[
                             { id: "all", label: "All Shipments", count: totalCount },
                             { id: "imported_all", label: "All Imported Batches", count: importedCount },
@@ -3838,7 +3845,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                           className="fixed inset-0 z-40"
                           onClick={() => setIsFilterStatusDropdownOpen(false)}
                         />
-                        <div className="absolute right-0 left-0 sm:left-auto top-full mt-1.5 z-50 sm:w-56 rounded-2xl border border-slate-200/90 bg-white p-1.5 shadow-2xl dark:border-slate-700 dark:bg-slate-800 space-y-0.5 animate-in fade-in zoom-in-95 duration-100">
+                        <div className="absolute right-0 left-0 sm:left-auto top-full mt-1.5 z-50 sm:w-56 rounded-2xl border border-slate-200/90 bg-white p-1.5 shadow-2xl dark:border-slate-700 dark:bg-slate-800 space-y-0.5 animate-dropdown-open">
                           {(
                             [
                               { id: "all", label: "All Statuses", dot: "bg-indigo-500", count: scopedTotalCount },
@@ -4046,10 +4053,9 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                                 <button
                                   type="button"
                                   onClick={() => onOpenTrackingResult(item.trackingNumber, item.courierId)}
-                                  className="inline-flex items-center gap-1 rounded-xl bg-indigo-50 hover:bg-indigo-600 hover:text-white px-3.5 py-1.5 text-xs font-bold text-indigo-700 dark:bg-indigo-950/70 dark:text-indigo-300 dark:hover:bg-indigo-600 dark:hover:text-white transition-all cursor-pointer"
+                                  className="inline-flex items-center justify-center rounded-xl bg-indigo-50 hover:bg-indigo-600 hover:text-white px-3.5 py-1.5 text-xs font-bold text-indigo-700 dark:bg-indigo-950/70 dark:text-indigo-300 dark:hover:bg-indigo-600 dark:hover:text-white transition-all cursor-pointer"
                                 >
                                   <span>Track</span>
-                                  <ArrowRight className="h-3 w-3" />
                                 </button>
                               </td>
                             </tr>
@@ -4068,35 +4074,35 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
           {/* ============================================================ */}
           {activeMenu === "batches" && (
             <div className="space-y-5 animate-in fade-in duration-150">
-              {/* Batch Summary Strip */}
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
-                <div className="rounded-2xl border border-indigo-200/70 bg-gradient-to-br from-indigo-500/10 via-white to-white dark:from-indigo-500/20 dark:to-slate-900 p-4 dark:border-indigo-800/50">
-                  <div className="flex items-center justify-between text-xs font-semibold text-slate-500 dark:text-slate-400">
+              {/* Mobile-Responsive Batch Summary Strip (2 columns on mobile, 3 on sm+) */}
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 sm:gap-3.5">
+                <div className="rounded-2xl border border-indigo-200/70 bg-gradient-to-br from-indigo-500/10 via-white to-white dark:from-indigo-500/20 dark:to-slate-900 p-3 sm:p-4 dark:border-indigo-800/50">
+                  <div className="flex items-center justify-between gap-1 text-[11px] sm:text-xs font-semibold text-slate-500 dark:text-slate-400">
                     <span>Total Batches</span>
-                    <FolderKanban className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
+                    <FolderKanban className="h-3.5 w-3.5 sm:h-4 sm:w-4 text-indigo-600 dark:text-indigo-400 shrink-0" />
                   </div>
-                  <div className="mt-1.5 text-2xl font-bold text-slate-900 dark:text-white tabular-nums">
+                  <div className="mt-1 sm:mt-1.5 text-lg sm:text-2xl font-bold text-slate-900 dark:text-white tabular-nums">
                     {uniqueBatches.length}
                   </div>
                 </div>
 
-                <div className="rounded-2xl border border-emerald-200/70 bg-gradient-to-br from-emerald-500/10 via-white to-white dark:from-emerald-500/20 dark:to-slate-900 p-4 dark:border-emerald-800/50">
-                  <div className="flex items-center justify-between text-xs font-semibold text-slate-500 dark:text-slate-400">
+                <div className="rounded-2xl border border-emerald-200/70 bg-gradient-to-br from-emerald-500/10 via-white to-white dark:from-emerald-500/20 dark:to-slate-900 p-3 sm:p-4 dark:border-emerald-800/50">
+                  <div className="flex items-center justify-between gap-1 text-[11px] sm:text-xs font-semibold text-slate-500 dark:text-slate-400">
                     <span>Batch Consignments</span>
-                    <Package className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
+                    <Package className="h-3.5 w-3.5 sm:h-4 sm:w-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
                   </div>
-                  <div className="mt-1.5 text-2xl font-bold text-emerald-600 dark:text-emerald-400 tabular-nums">
+                  <div className="mt-1 sm:mt-1.5 text-lg sm:text-2xl font-bold text-emerald-600 dark:text-emerald-400 tabular-nums">
                     {importedCount}
                   </div>
                 </div>
 
-                <div className="rounded-2xl border border-violet-200/70 bg-gradient-to-br from-violet-500/10 via-white to-white dark:from-violet-500/20 dark:to-slate-900 p-4 dark:border-violet-800/50">
-                  <div className="flex items-center justify-between text-xs font-semibold text-slate-500 dark:text-slate-400">
+                <div className="col-span-2 sm:col-span-1 rounded-2xl border border-violet-200/70 bg-gradient-to-br from-violet-500/10 via-white to-white dark:from-violet-500/20 dark:to-slate-900 p-3 sm:p-4 dark:border-violet-800/50">
+                  <div className="flex items-center justify-between gap-1 text-[11px] sm:text-xs font-semibold text-slate-500 dark:text-slate-400">
                     <span>Active Batch Filter</span>
-                    <Filter className="h-4 w-4 text-violet-600 dark:text-violet-400" />
+                    <Filter className="h-3.5 w-3.5 sm:h-4 sm:w-4 text-violet-600 dark:text-violet-400 shrink-0" />
                   </div>
-                  <div className="mt-1.5 flex items-center justify-between gap-2">
-                    <span className="text-sm font-bold text-slate-900 dark:text-white truncate">
+                  <div className="mt-1 sm:mt-1.5 flex items-center justify-between gap-2">
+                    <span className="text-xs sm:text-sm font-bold text-slate-900 dark:text-white truncate">
                       {selectedBatchId === "all"
                         ? "All Shipments"
                         : selectedBatchId === "imported_all"
@@ -4337,19 +4343,19 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
           {/* ============================================================ */}
           {activeMenu === "analytics" && (
             <div className="space-y-5 animate-in fade-in duration-150">
-              {/* 1. DATE-WISE ANALYSIS & BATCH FILTER WORKSPACE */}
+              {/* 1. SHIPMENT OVERVIEW & CUSTOM CALENDAR POPOVER */}
               <div className="rounded-3xl border border-slate-200/90 bg-white p-5 sm:p-6 shadow-xs dark:border-slate-800 dark:bg-slate-900 space-y-5">
                 <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3.5 pb-4 border-b border-slate-100 dark:border-slate-800">
                   <div>
                     <div className="flex items-center gap-2">
                       <Calendar className="h-4.5 w-4.5 text-indigo-600 dark:text-indigo-400" />
                       <h3 className="text-base font-bold text-slate-900 dark:text-white">
-                        Date-Wise Shipment Analysis
+                        Shipment Overview
                       </h3>
                     </div>
                   </div>
 
-                  {/* Date Range Filter Pills + Batch Scope Filter */}
+                  {/* Date Range Filter Pills + Direct Custom Calendar Popover */}
                   <div className="flex flex-wrap items-center gap-2">
                     {(
                       [
@@ -4357,13 +4363,15 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                         { id: "today", label: "Today" },
                         { id: "yesterday", label: "Yesterday" },
                         { id: "last_7_days", label: "Last 7 Days" },
-                        { id: "custom", label: "Custom Date" },
                       ] as const
                     ).map((df) => (
                       <button
                         key={df.id}
                         type="button"
-                        onClick={() => setAnalyticsDateFilter(df.id)}
+                        onClick={() => {
+                          setAnalyticsDateFilter(df.id);
+                          setIsCustomCalendarOpen(false);
+                        }}
                         className={`rounded-xl px-3 py-1.5 text-xs font-semibold transition-all cursor-pointer ${
                           analyticsDateFilter === df.id
                             ? "bg-indigo-600 text-white shadow-2xs"
@@ -4373,36 +4381,192 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                         {df.label}
                       </button>
                     ))}
+
+                    {/* Custom Date Button with Attached Custom Calendar Popover */}
+                    <div className="relative">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setAnalyticsDateFilter("custom");
+                          setIsCustomCalendarOpen((prev) => !prev);
+                        }}
+                        className={`inline-flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-semibold transition-all cursor-pointer ${
+                          analyticsDateFilter === "custom"
+                            ? "bg-indigo-600 text-white shadow-2xs"
+                            : "bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300"
+                        }`}
+                      >
+                        <Calendar className="h-3.5 w-3.5 shrink-0" />
+                        <span>
+                          {analyticsDateFilter === "custom"
+                            ? `${customStartDate} → ${customEndDate}`
+                            : "Custom Date"}
+                        </span>
+                        <ChevronDown className="h-3.5 w-3.5 opacity-80 shrink-0" />
+                      </button>
+
+                      {isCustomCalendarOpen && (
+                        <>
+                          <div
+                            className="fixed inset-0 z-40"
+                            onClick={() => setIsCustomCalendarOpen(false)}
+                          />
+                          <div className="absolute right-0 top-full mt-2 z-50 w-72 sm:w-80 rounded-2xl border border-slate-200 bg-white p-3.5 shadow-2xl dark:border-slate-700 dark:bg-slate-900 space-y-3 animate-calendar-open">
+                            {/* Start / End Selector Tabs */}
+                            <div className="grid grid-cols-2 gap-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 p-1">
+                              <button
+                                type="button"
+                                onClick={() => setCalendarPickingField("start")}
+                                className={`rounded-lg px-2 py-1.5 text-left transition-all cursor-pointer ${
+                                  calendarPickingField === "start"
+                                    ? "bg-white dark:bg-slate-900 shadow-2xs text-indigo-600 dark:text-indigo-400"
+                                    : "text-slate-600 dark:text-slate-400"
+                                }`}
+                              >
+                                <div className="text-[9px] font-bold uppercase tracking-wider opacity-75">
+                                  Start Date
+                                </div>
+                                <div className="font-mono text-[11px] font-bold">
+                                  {customStartDate}
+                                </div>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setCalendarPickingField("end")}
+                                className={`rounded-lg px-2 py-1.5 text-left transition-all cursor-pointer ${
+                                  calendarPickingField === "end"
+                                    ? "bg-white dark:bg-slate-900 shadow-2xs text-indigo-600 dark:text-indigo-400"
+                                    : "text-slate-600 dark:text-slate-400"
+                                }`}
+                              >
+                                <div className="text-[9px] font-bold uppercase tracking-wider opacity-75">
+                                  End Date
+                                </div>
+                                <div className="font-mono text-[11px] font-bold">
+                                  {customEndDate}
+                                </div>
+                              </button>
+                            </div>
+
+                            {/* Month Navigation Header */}
+                            <div className="flex items-center justify-between px-1">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setCalendarMonthCursor((prev) => {
+                                    const d = new Date(prev.year, prev.month - 1, 1);
+                                    return { year: d.getFullYear(), month: d.getMonth() };
+                                  })
+                                }
+                                className="rounded-lg p-1 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                              >
+                                <ChevronLeft className="h-4 w-4" />
+                              </button>
+                              <span className="text-xs font-bold text-slate-900 dark:text-white">
+                                {new Date(
+                                  calendarMonthCursor.year,
+                                  calendarMonthCursor.month,
+                                  1
+                                ).toLocaleString("default", {
+                                  month: "long",
+                                  year: "numeric",
+                                })}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setCalendarMonthCursor((prev) => {
+                                    const d = new Date(prev.year, prev.month + 1, 1);
+                                    return { year: d.getFullYear(), month: d.getMonth() };
+                                  })
+                                }
+                                className="rounded-lg p-1 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                              >
+                                <ChevronRight className="h-4 w-4" />
+                              </button>
+                            </div>
+
+                            {/* Weekday Headers */}
+                            <div className="grid grid-cols-7 text-center text-[10px] font-bold text-slate-400">
+                              {["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"].map((d) => (
+                                <span key={d}>{d}</span>
+                              ))}
+                            </div>
+
+                            {/* Days Grid */}
+                            <div className="grid grid-cols-7 gap-1 text-center">
+                              {buildCalendarDays(
+                                calendarMonthCursor.year,
+                                calendarMonthCursor.month
+                              ).map((iso, idx) => {
+                                if (!iso) {
+                                  return <div key={`empty-${idx}`} className="h-7" />;
+                                }
+                                const dayNum = parseInt(iso.split("-")[2], 10);
+                                const isStart = iso === customStartDate;
+                                const isEnd = iso === customEndDate;
+                                const isInRange =
+                                  iso >= customStartDate && iso <= customEndDate;
+                                return (
+                                  <button
+                                    key={iso}
+                                    type="button"
+                                    onClick={() => {
+                                      if (calendarPickingField === "start") {
+                                        setCustomStartDate(iso);
+                                        if (iso > customEndDate) {
+                                          setCustomEndDate(iso);
+                                        }
+                                        setCalendarPickingField("end");
+                                      } else {
+                                        if (iso < customStartDate) {
+                                          setCustomStartDate(iso);
+                                        } else {
+                                          setCustomEndDate(iso);
+                                        }
+                                        setCalendarPickingField("start");
+                                      }
+                                    }}
+                                    className={`h-7 rounded-lg text-[11px] font-semibold transition-colors cursor-pointer ${
+                                      isStart || isEnd
+                                        ? "bg-indigo-600 text-white font-bold shadow-2xs"
+                                        : isInRange
+                                        ? "bg-indigo-50 text-indigo-700 dark:bg-indigo-950/70 dark:text-indigo-300"
+                                        : "text-slate-700 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
+                                    }`}
+                                  >
+                                    {dayNum}
+                                  </button>
+                                );
+                              })}
+                            </div>
+
+                            <div className="flex items-center justify-between pt-2 border-t border-slate-100 dark:border-slate-800">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const today = getTodayIso();
+                                  setCustomStartDate(today);
+                                  setCustomEndDate(today);
+                                }}
+                                className="text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer"
+                              >
+                                Select Today
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setIsCustomCalendarOpen(false)}
+                                className="rounded-lg bg-indigo-600 hover:bg-indigo-700 px-3 py-1 text-[11px] font-bold text-white cursor-pointer"
+                              >
+                                Done
+                              </button>
+                            </div>
+                          </div>
+                        </>
+                      )}
+                    </div>
                   </div>
                 </div>
-
-                {/* Custom Date Range Picker Strip when 'custom' is active */}
-                {analyticsDateFilter === "custom" && (
-                  <div className="flex flex-wrap items-center gap-3 rounded-2xl bg-indigo-50/60 dark:bg-indigo-950/30 border border-indigo-200/70 dark:border-indigo-800/60 p-3.5">
-                    <div className="flex items-center gap-2">
-                      <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">
-                        From:
-                      </label>
-                      <input
-                        type="date"
-                        value={customStartDate}
-                        onChange={(e) => setCustomStartDate(e.target.value)}
-                        className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-800 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
-                      />
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">
-                        To:
-                      </label>
-                      <input
-                        type="date"
-                        value={customEndDate}
-                        onChange={(e) => setCustomEndDate(e.target.value)}
-                        className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-800 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
-                      />
-                    </div>
-                  </div>
-                )}
 
                 {/* Date-Filtered KPI Summary Cards */}
                 <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
@@ -4563,7 +4727,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                             className="fixed inset-0 z-40"
                             onClick={() => setIsExportDateDropdownOpen(false)}
                           />
-                          <div className="absolute left-0 right-0 top-full mt-1.5 z-50 rounded-2xl border border-slate-200/90 bg-white p-1.5 shadow-2xl dark:border-slate-700 dark:bg-slate-800 space-y-0.5">
+                          <div className="absolute left-0 right-0 top-full mt-1.5 z-50 rounded-2xl border border-slate-200/90 bg-white p-1.5 shadow-2xl dark:border-slate-700 dark:bg-slate-800 space-y-0.5 animate-dropdown-open">
                             {(
                               [
                                 { id: "all", label: "All Dates" },
@@ -4579,6 +4743,9 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                                 onClick={() => {
                                   setAnalyticsDateFilter(opt.id);
                                   setIsExportDateDropdownOpen(false);
+                                  if (opt.id === "custom") {
+                                    setIsCustomCalendarOpen(true);
+                                  }
                                 }}
                                 className={`w-full flex items-center justify-between rounded-xl px-3 py-2 text-xs font-medium transition-colors cursor-pointer ${
                                   analyticsDateFilter === opt.id
@@ -4633,7 +4800,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                             className="fixed inset-0 z-40"
                             onClick={() => setIsExportBatchDropdownOpen(false)}
                           />
-                          <div className="absolute left-0 right-0 top-full mt-1.5 z-50 max-h-60 overflow-y-auto rounded-2xl border border-slate-200/90 bg-white p-1.5 shadow-2xl dark:border-slate-700 dark:bg-slate-800 space-y-0.5">
+                          <div className="absolute left-0 right-0 top-full mt-1.5 z-50 max-h-60 overflow-y-auto rounded-2xl border border-slate-200/90 bg-white p-1.5 shadow-2xl dark:border-slate-700 dark:bg-slate-800 space-y-0.5 animate-dropdown-open">
                             {[
                               { id: "all", label: "All Shipments", count: totalCount },
                               { id: "imported_all", label: "All Imported Batches", count: importedCount },
@@ -4709,7 +4876,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                             className="fixed inset-0 z-40"
                             onClick={() => setIsExportStatusDropdownOpen(false)}
                           />
-                          <div className="absolute left-0 right-0 top-full mt-1.5 z-50 rounded-2xl border border-slate-200/90 bg-white p-1.5 shadow-2xl dark:border-slate-700 dark:bg-slate-800 space-y-0.5">
+                          <div className="absolute left-0 right-0 top-full mt-1.5 z-50 rounded-2xl border border-slate-200/90 bg-white p-1.5 shadow-2xl dark:border-slate-700 dark:bg-slate-800 space-y-0.5 animate-dropdown-open">
                             {(
                               [
                                 { id: "all", label: "All Statuses" },
@@ -4779,7 +4946,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                             className="fixed inset-0 z-40"
                             onClick={() => setIsExportFormatDropdownOpen(false)}
                           />
-                          <div className="absolute left-0 right-0 top-full mt-1.5 z-50 rounded-2xl border border-slate-200/90 bg-white p-1.5 shadow-2xl dark:border-slate-700 dark:bg-slate-800 space-y-0.5">
+                          <div className="absolute left-0 right-0 top-full mt-1.5 z-50 rounded-2xl border border-slate-200/90 bg-white p-1.5 shadow-2xl dark:border-slate-700 dark:bg-slate-800 space-y-0.5 animate-dropdown-open">
                             {(
                               [
                                 { ext: "xlsx", label: "Excel Workbook", badge: ".xlsx" },
@@ -4846,12 +5013,12 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                       onClick={() => {
                         setBackupError(null);
                         setBackupSuccessMsg(null);
-                        setIsBackupModalOpen(true);
+                        setActiveMenu("settings");
                       }}
                       className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-800 px-3 py-2.5 text-xs font-bold text-slate-700 dark:text-slate-200 cursor-pointer"
                     >
-                      <Database className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" />
-                      <span>Backup &amp; Restore</span>
+                      <Settings className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" />
+                      <span>Backup in Settings</span>
                     </button>
                   </div>
                 </div>
@@ -4932,95 +5099,478 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
           )}
 
           {/* ============================================================ */}
-          {/* VIEW 5: SETTINGS                                             */}
+          {/* VIEW 5: SETTINGS & DATE-WISE BACKUP WORKSPACE                */}
           {/* ============================================================ */}
           {activeMenu === "settings" && (
-            <div className="rounded-3xl border border-slate-200/90 bg-white p-5 sm:p-6 shadow-xs dark:border-slate-800 dark:bg-slate-900 space-y-5 animate-in fade-in duration-150">
-              <div className="flex items-center justify-between rounded-2xl bg-slate-50 dark:bg-slate-800/60 p-4 border border-slate-200/80 dark:border-slate-700">
-                <div>
-                  <div className="text-sm font-extrabold text-slate-900 dark:text-white">
-                    Automatic Background Sync
+            <div className="space-y-5 animate-in fade-in duration-150">
+              <div className="rounded-3xl border border-slate-200/90 bg-white p-5 sm:p-6 shadow-xs dark:border-slate-800 dark:bg-slate-900 space-y-5">
+                <div className="flex items-center justify-between rounded-2xl bg-slate-50 dark:bg-slate-800/60 p-4 border border-slate-200/80 dark:border-slate-700">
+                  <div>
+                    <div className="text-sm font-bold text-slate-900 dark:text-white">
+                      Automatic Background Sync
+                    </div>
                   </div>
-                  <div className="text-xs text-slate-500 mt-0.5">
-                    Current interval: {Math.round(checkIntervalSec / 60)} minutes
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={isAutoCheckEnabled}
+                    onClick={handleToggleAutoCheck}
+                    className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out ${
+                      isAutoCheckEnabled ? "bg-emerald-600" : "bg-slate-300 dark:bg-slate-600"
+                    }`}
+                  >
+                    <span
+                      className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm transition duration-200 ease-in-out ${
+                        isAutoCheckEnabled ? "translate-x-5" : "translate-x-0"
+                      }`}
+                    />
+                  </button>
+                </div>
+
+                <div>
+                  <label className="text-xs font-bold text-slate-700 dark:text-slate-300 mb-2 block">
+                    Sync Frequency:
+                  </label>
+                  <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+                    {[
+                      { label: "5 mins", sec: 300 },
+                      { label: "10 mins", sec: 600 },
+                      { label: "15 mins", sec: 900 },
+                      { label: "30 mins", sec: 1800 },
+                      { label: "1 hour", sec: 3600 },
+                    ].map((opt) => (
+                      <button
+                        key={opt.sec}
+                        type="button"
+                        onClick={() => handleChangeInterval(opt.sec)}
+                        className={`rounded-xl border py-2.5 px-3 text-xs font-bold transition-all cursor-pointer ${
+                          checkIntervalSec === opt.sec
+                            ? "border-indigo-600 bg-indigo-600 text-white shadow-xs"
+                            : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300"
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
                   </div>
                 </div>
-                <button
-                  type="button"
-                  onClick={handleToggleAutoCheck}
-                  className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out ${
-                    isAutoCheckEnabled ? "bg-emerald-600" : "bg-slate-300 dark:bg-slate-600"
-                  }`}
-                >
-                  <span
-                    className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm transition duration-200 ease-in-out ${
-                      isAutoCheckEnabled ? "translate-x-5" : "translate-x-0"
-                    }`}
-                  />
-                </button>
-              </div>
 
-              <div>
-                <label className="text-xs font-bold text-slate-700 dark:text-slate-300 mb-2 block">
-                  Sync Frequency:
-                </label>
-                <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
-                  {[
-                    { label: "5 mins", sec: 300 },
-                    { label: "10 mins", sec: 600 },
-                    { label: "15 mins", sec: 900 },
-                    { label: "30 mins", sec: 1800 },
-                    { label: "1 hour", sec: 3600 },
-                  ].map((opt) => (
+                {/* Sliding Toggle Switches for Auto-Next Scan Mode & No Rule */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-slate-100 dark:border-slate-800">
+                  <div className="flex items-center justify-between rounded-2xl border border-slate-200 p-3.5 dark:border-slate-800">
+                    <div>
+                      <span className="text-xs font-bold text-slate-800 dark:text-slate-200 block">
+                        Auto-Next Scan Mode
+                      </span>
+                      <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                        Automatically clear input after staging
+                      </span>
+                    </div>
                     <button
-                      key={opt.sec}
                       type="button"
-                      onClick={() => handleChangeInterval(opt.sec)}
-                      className={`rounded-xl border py-2.5 px-3 text-xs font-bold transition-all cursor-pointer ${
-                        checkIntervalSec === opt.sec
-                          ? "border-indigo-600 bg-indigo-600 text-white shadow-xs"
-                          : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300"
+                      role="switch"
+                      aria-checked={isAutoNextEnabled}
+                      onClick={() => setIsAutoNextEnabled((prev) => !prev)}
+                      className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out ${
+                        isAutoNextEnabled ? "bg-emerald-600" : "bg-slate-300 dark:bg-slate-600"
                       }`}
                     >
-                      {opt.label}
+                      <span
+                        className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm transition duration-200 ease-in-out ${
+                          isAutoNextEnabled ? "translate-x-5" : "translate-x-0"
+                        }`}
+                      />
                     </button>
-                  ))}
+                  </div>
+
+                  <div className="flex items-center justify-between rounded-2xl border border-slate-200 p-3.5 dark:border-slate-800">
+                    <div>
+                      <span className="text-xs font-bold text-slate-800 dark:text-slate-200 block">
+                        No Rule
+                      </span>
+                      <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                        Allow custom or unrecognized AWB formats
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={isPasteAnywayEnabled}
+                      onClick={() => setIsPasteAnywayEnabled((prev) => !prev)}
+                      className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out ${
+                        isPasteAnywayEnabled ? "bg-amber-500" : "bg-slate-300 dark:bg-slate-600"
+                      }`}
+                    >
+                      <span
+                        className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm transition duration-200 ease-in-out ${
+                          isPasteAnywayEnabled ? "translate-x-5" : "translate-x-0"
+                        }`}
+                      />
+                    </button>
+                  </div>
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-slate-100 dark:border-slate-800">
-                <div className="flex items-center justify-between rounded-2xl border border-slate-200 p-3.5 dark:border-slate-800">
-                  <span className="text-xs font-bold text-slate-800 dark:text-slate-200">
-                    Auto-Next Scan Mode
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => setIsAutoNextEnabled((prev) => !prev)}
-                    className={`rounded-lg px-3 py-1 text-xs font-black cursor-pointer ${
-                      isAutoNextEnabled
-                        ? "bg-emerald-600 text-white"
-                        : "bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300"
-                    }`}
-                  >
-                    {isAutoNextEnabled ? "ON" : "OFF"}
-                  </button>
+              {/* ========================================================== */}
+              {/* DATA BACKUP & RECOVERY (WITH DATE-WISE BACKUP IN SETTINGS) */}
+              {/* ========================================================== */}
+              <div className="rounded-3xl border border-slate-200/90 bg-white p-5 sm:p-6 shadow-xs dark:border-slate-800 dark:bg-slate-900 space-y-5">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-100 dark:border-slate-800">
+                  <div className="flex items-center gap-2.5">
+                    <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-indigo-50 dark:bg-indigo-950/70 text-indigo-600 dark:text-indigo-400">
+                      <Database className="h-4.5 w-4.5" />
+                    </span>
+                    <div>
+                      <h3 className="text-base font-bold text-slate-900 dark:text-white">
+                        Data Backup &amp; Restore
+                      </h3>
+                      <p className="text-xs text-slate-500 dark:text-slate-400">
+                        Export date-wise or full JSON backups and restore snapshots
+                      </p>
+                    </div>
+                  </div>
                 </div>
 
-                <div className="flex items-center justify-between rounded-2xl border border-slate-200 p-3.5 dark:border-slate-800">
-                  <span className="text-xs font-bold text-slate-800 dark:text-slate-200">
-                    No Rule
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => setIsPasteAnywayEnabled((prev) => !prev)}
-                    className={`rounded-lg px-3 py-1 text-xs font-black cursor-pointer ${
-                      isPasteAnywayEnabled
-                        ? "bg-amber-500 text-slate-950"
-                        : "bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300"
-                    }`}
-                  >
-                    {isPasteAnywayEnabled ? "ON" : "OFF"}
-                  </button>
+                {backupSuccessMsg && (
+                  <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-3.5 dark:border-emerald-900/60 dark:bg-emerald-950/60 flex items-start gap-2.5 text-xs text-emerald-800 dark:text-emerald-300">
+                    <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0 mt-0.5" />
+                    <div>
+                      <div className="font-bold">Success</div>
+                      <div>{backupSuccessMsg}</div>
+                    </div>
+                  </div>
+                )}
+
+                {backupError && (
+                  <div className="rounded-2xl border border-rose-200 bg-rose-50 p-3.5 dark:border-rose-900/60 dark:bg-rose-950/60 flex items-start gap-2.5 text-xs text-rose-800 dark:text-rose-300">
+                    <ShieldAlert className="h-4 w-4 text-rose-600 shrink-0 mt-0.5" />
+                    <div>
+                      <div className="font-bold">Backup Notice</div>
+                      <div>{backupError}</div>
+                    </div>
+                  </div>
+                )}
+
+                {/* 1. Date-Wise Backup Export Card */}
+                <div className="rounded-2xl border border-slate-200 bg-slate-50/60 p-4 sm:p-5 dark:border-slate-800 dark:bg-slate-800/40 space-y-4">
+                  <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <Download className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
+                        <h4 className="text-xs sm:text-sm font-bold text-slate-900 dark:text-white">
+                          Date-Wise Backup Export (.json)
+                        </h4>
+                      </div>
+                      <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                        Matched records for backup:{" "}
+                        <span className="font-mono font-bold text-indigo-600 dark:text-indigo-400">
+                          {backupScopedShipments.length}
+                        </span>{" "}
+                        of {shipments.length} consignments
+                      </p>
+                    </div>
+
+                    {/* Date Scope Filter Pills + Custom Calendar Popover */}
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {(
+                        [
+                          { id: "all", label: "All Dates" },
+                          { id: "today", label: "Today" },
+                          { id: "yesterday", label: "Yesterday" },
+                          { id: "last_7_days", label: "Last 7 Days" },
+                        ] as const
+                      ).map((bf) => (
+                        <button
+                          key={bf.id}
+                          type="button"
+                          onClick={() => {
+                            setBackupDateFilter(bf.id);
+                            setIsBackupCalendarOpen(false);
+                          }}
+                          className={`rounded-xl px-3 py-1.5 text-xs font-semibold transition-all cursor-pointer ${
+                            backupDateFilter === bf.id
+                              ? "bg-indigo-600 text-white shadow-2xs"
+                              : "bg-white text-slate-700 hover:bg-slate-100 border border-slate-200/80 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300"
+                          }`}
+                        >
+                          {bf.label}
+                        </button>
+                      ))}
+
+                      {/* Custom Date Backup Button with Popover Calendar */}
+                      <div className="relative">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setBackupDateFilter("custom");
+                            setIsBackupCalendarOpen((prev) => !prev);
+                          }}
+                          className={`inline-flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-semibold transition-all cursor-pointer ${
+                            backupDateFilter === "custom"
+                              ? "bg-indigo-600 text-white shadow-2xs"
+                              : "bg-white text-slate-700 hover:bg-slate-100 border border-slate-200/80 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300"
+                          }`}
+                        >
+                          <Calendar className="h-3.5 w-3.5 shrink-0" />
+                          <span>
+                            {backupDateFilter === "custom"
+                              ? `${backupStartDate} → ${backupEndDate}`
+                              : "Custom Date"}
+                          </span>
+                          <ChevronDown className="h-3.5 w-3.5 opacity-80 shrink-0" />
+                        </button>
+
+                        {isBackupCalendarOpen && (
+                          <>
+                            <div
+                              className="fixed inset-0 z-40"
+                              onClick={() => setIsBackupCalendarOpen(false)}
+                            />
+                            <div className="absolute right-0 top-full mt-2 z-50 w-72 sm:w-80 rounded-2xl border border-slate-200 bg-white p-3.5 shadow-2xl dark:border-slate-700 dark:bg-slate-900 space-y-3 animate-calendar-open">
+                              <div className="grid grid-cols-2 gap-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 p-1">
+                                <button
+                                  type="button"
+                                  onClick={() => setBackupCalendarPickingField("start")}
+                                  className={`rounded-lg px-2 py-1.5 text-left transition-all cursor-pointer ${
+                                    backupCalendarPickingField === "start"
+                                      ? "bg-white dark:bg-slate-900 shadow-2xs text-indigo-600 dark:text-indigo-400"
+                                      : "text-slate-600 dark:text-slate-400"
+                                  }`}
+                                >
+                                  <div className="text-[9px] font-bold uppercase tracking-wider opacity-75">
+                                    Start Date
+                                  </div>
+                                  <div className="font-mono text-[11px] font-bold">
+                                    {backupStartDate}
+                                  </div>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setBackupCalendarPickingField("end")}
+                                  className={`rounded-lg px-2 py-1.5 text-left transition-all cursor-pointer ${
+                                    backupCalendarPickingField === "end"
+                                      ? "bg-white dark:bg-slate-900 shadow-2xs text-indigo-600 dark:text-indigo-400"
+                                      : "text-slate-600 dark:text-slate-400"
+                                  }`}
+                                >
+                                  <div className="text-[9px] font-bold uppercase tracking-wider opacity-75">
+                                    End Date
+                                  </div>
+                                  <div className="font-mono text-[11px] font-bold">
+                                    {backupEndDate}
+                                  </div>
+                                </button>
+                              </div>
+
+                              <div className="flex items-center justify-between px-1">
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setCalendarMonthCursor((prev) => {
+                                      const d = new Date(prev.year, prev.month - 1, 1);
+                                      return { year: d.getFullYear(), month: d.getMonth() };
+                                    })
+                                  }
+                                  className="rounded-lg p-1 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                                >
+                                  <ChevronLeft className="h-4 w-4" />
+                                </button>
+                                <span className="text-xs font-bold text-slate-900 dark:text-white">
+                                  {new Date(
+                                    calendarMonthCursor.year,
+                                    calendarMonthCursor.month,
+                                    1
+                                  ).toLocaleString("default", {
+                                    month: "long",
+                                    year: "numeric",
+                                  })}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setCalendarMonthCursor((prev) => {
+                                      const d = new Date(prev.year, prev.month + 1, 1);
+                                      return { year: d.getFullYear(), month: d.getMonth() };
+                                    })
+                                  }
+                                  className="rounded-lg p-1 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                                >
+                                  <ChevronRight className="h-4 w-4" />
+                                </button>
+                              </div>
+
+                              <div className="grid grid-cols-7 text-center text-[10px] font-bold text-slate-400">
+                                {["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"].map((d) => (
+                                  <span key={d}>{d}</span>
+                                ))}
+                              </div>
+
+                              <div className="grid grid-cols-7 gap-1 text-center">
+                                {buildCalendarDays(
+                                  calendarMonthCursor.year,
+                                  calendarMonthCursor.month
+                                ).map((iso, idx) => {
+                                  if (!iso) {
+                                    return <div key={`b-empty-${idx}`} className="h-7" />;
+                                  }
+                                  const dayNum = parseInt(iso.split("-")[2], 10);
+                                  const isStart = iso === backupStartDate;
+                                  const isEnd = iso === backupEndDate;
+                                  const isInRange =
+                                    iso >= backupStartDate && iso <= backupEndDate;
+                                  return (
+                                    <button
+                                      key={iso}
+                                      type="button"
+                                      onClick={() => {
+                                        if (backupCalendarPickingField === "start") {
+                                          setBackupStartDate(iso);
+                                          if (iso > backupEndDate) {
+                                            setBackupEndDate(iso);
+                                          }
+                                          setBackupCalendarPickingField("end");
+                                        } else {
+                                          if (iso < backupStartDate) {
+                                            setBackupStartDate(iso);
+                                          } else {
+                                            setBackupEndDate(iso);
+                                          }
+                                          setBackupCalendarPickingField("start");
+                                        }
+                                      }}
+                                      className={`h-7 rounded-lg text-[11px] font-semibold transition-colors cursor-pointer ${
+                                        isStart || isEnd
+                                          ? "bg-indigo-600 text-white font-bold shadow-2xs"
+                                          : isInRange
+                                          ? "bg-indigo-50 text-indigo-700 dark:bg-indigo-950/70 dark:text-indigo-300"
+                                          : "text-slate-700 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
+                                      }`}
+                                    >
+                                      {dayNum}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+
+                              <div className="flex items-center justify-between pt-2 border-t border-slate-100 dark:border-slate-800">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const today = getTodayIso();
+                                    setBackupStartDate(today);
+                                    setBackupEndDate(today);
+                                  }}
+                                  className="text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer"
+                                >
+                                  Select Today
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setIsBackupCalendarOpen(false)}
+                                  className="rounded-lg bg-indigo-600 hover:bg-indigo-700 px-3 py-1 text-[11px] font-bold text-white cursor-pointer"
+                                >
+                                  Done
+                                </button>
+                              </div>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex justify-end">
+                    <button
+                      type="button"
+                      onClick={handleExportBackup}
+                      disabled={backupScopedShipments.length === 0}
+                      className="inline-flex items-center justify-center gap-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 px-4 py-2.5 text-xs font-bold text-white shadow-xs transition-colors cursor-pointer"
+                    >
+                      <Download className="h-3.5 w-3.5" />
+                      <span>
+                        Download Backup ({backupScopedShipments.length})
+                      </span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* 2. Import Backup File for Review / Restore */}
+                <div className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-5 dark:border-slate-800 dark:bg-slate-900/80 space-y-4">
+                  <div className="flex items-center gap-2">
+                    <FileJson className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
+                    <h4 className="text-xs sm:text-sm font-bold text-slate-900 dark:text-white">
+                      Import &amp; Restore Backup File (.json)
+                    </h4>
+                  </div>
+
+                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+                    <input
+                      ref={backupFileInputRef}
+                      type="file"
+                      accept=".json,application/json"
+                      onChange={handleBackupFileSelect}
+                      id="backup-file-input"
+                      className="hidden"
+                    />
+                    <label
+                      htmlFor="backup-file-input"
+                      className="inline-flex items-center justify-center gap-2 rounded-xl border border-dashed border-slate-300 hover:border-indigo-500 bg-slate-50 hover:bg-indigo-50/30 px-4 py-3 text-xs font-bold text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 cursor-pointer transition-colors"
+                    >
+                      <Upload className="h-4 w-4 text-indigo-600" />
+                      <span>Select Backup File (.json)</span>
+                    </label>
+                    {backupReviewData && (
+                      <div className="flex items-center gap-2 text-xs font-mono text-slate-500 dark:text-slate-400">
+                        <FileJson className="h-3.5 w-3.5 text-emerald-600" />
+                        <span className="font-bold text-slate-900 dark:text-white">
+                          {backupReviewData.fileName}
+                        </span>
+                        <span>({backupReviewData.shipments.length} records)</span>
+                      </div>
+                    )}
+                  </div>
+
+                  {backupReviewData && (
+                    <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2.5">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={handleMergeBackupIntoLive}
+                          className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-3.5 py-2 text-xs font-bold text-white cursor-pointer shadow-2xs"
+                        >
+                          <Plus className="h-3.5 w-3.5" />
+                          <span>Merge into Live</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleRestoreBackupOverwrite}
+                          className="inline-flex items-center gap-1.5 rounded-xl border border-rose-200 bg-rose-50 hover:bg-rose-100 dark:border-rose-900 dark:bg-rose-950/50 px-3.5 py-2 text-xs font-bold text-rose-700 dark:text-rose-300 cursor-pointer"
+                        >
+                          <RotateCcw className="h-3.5 w-3.5" />
+                          <span>Replace Live Data</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setIsReviewingSeparately(true);
+                            setActiveMenu("dashboard");
+                          }}
+                          className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 px-3.5 py-2 text-xs font-bold text-slate-700 dark:text-slate-200 cursor-pointer"
+                        >
+                          <ExternalLink className="h-3.5 w-3.5" />
+                          <span>Review in Dashboard</span>
+                        </button>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => setBackupReviewData(null)}
+                        className="text-xs font-semibold text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 underline cursor-pointer"
+                      >
+                        Clear
+                      </button>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -5047,6 +5597,11 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                         {userProfile.fullName}
                       </h3>
                       <BadgeCheck className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
+                      {authUser?.loginId && (
+                        <span className="rounded-md bg-indigo-50 dark:bg-indigo-950/70 border border-indigo-200/70 dark:border-indigo-800/60 px-2 py-0.5 font-mono text-[10px] font-bold text-indigo-600 dark:text-indigo-300">
+                          {authUser.loginId}
+                        </span>
+                      )}
                     </div>
                     <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
                       {userProfile.role} · {userProfile.companyName}
@@ -5054,12 +5609,24 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                   </div>
                 </div>
 
-                {profileSavedMsg && (
-                  <div className="rounded-xl bg-emerald-50 border border-emerald-200 dark:bg-emerald-950/60 dark:border-emerald-800 px-3 py-1.5 text-xs font-bold text-emerald-700 dark:text-emerald-300 flex items-center gap-1.5">
-                    <Check className="h-3.5 w-3.5" />
-                    <span>{profileSavedMsg}</span>
-                  </div>
-                )}
+                <div className="flex items-center gap-2">
+                  {profileSavedMsg && (
+                    <div className="rounded-xl bg-emerald-50 border border-emerald-200 dark:bg-emerald-950/60 dark:border-emerald-800 px-3 py-1.5 text-xs font-bold text-emerald-700 dark:text-emerald-300 flex items-center gap-1.5">
+                      <Check className="h-3.5 w-3.5" />
+                      <span>{profileSavedMsg}</span>
+                    </div>
+                  )}
+                  {onLogout && (
+                    <button
+                      type="button"
+                      onClick={onLogout}
+                      className="inline-flex items-center gap-1.5 rounded-xl border border-rose-200 bg-rose-50 hover:bg-rose-100 px-3.5 py-2 text-xs font-bold text-rose-700 dark:border-rose-900/60 dark:bg-rose-950/60 dark:text-rose-300 transition-colors cursor-pointer"
+                    >
+                      <LogOut className="h-3.5 w-3.5" />
+                      <span>Sign Out</span>
+                    </button>
+                  )}
+                </div>
               </div>
 
               <form onSubmit={handleSaveProfile} className="space-y-4">
@@ -5243,14 +5810,14 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1">
-                    Destination City / Hub
+                    Item Code
                   </label>
                   <input
                     type="text"
-                    value={editDestination}
-                    onChange={(e) => setEditDestination(e.target.value)}
-                    placeholder="Destination Hub"
-                    className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-white focus:border-indigo-500 focus:outline-none"
+                    value={editItemCode}
+                    onChange={(e) => setEditItemCode(e.target.value)}
+                    placeholder="e.g. ITM-1042"
+                    className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-xs font-semibold text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-white focus:border-indigo-500 focus:outline-none"
                   />
                 </div>
 
@@ -5263,7 +5830,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                     onClick={() => setIsEditStatusDropdownOpen((prev) => !prev)}
                     className="w-full flex items-center justify-between gap-2 rounded-xl border border-slate-200 bg-slate-50 hover:border-indigo-300 px-3 py-2 text-xs font-bold text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-white cursor-pointer"
                   >
-                    <div className="flex items-center gap-2 truncate">
+                    <div className="flex items-center gap-2 min-w-0 pl-0.5">
                       <span
                         className={`h-2 w-2 rounded-full shrink-0 ${
                           editStatus === "delivered"
@@ -5298,7 +5865,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                         className="fixed inset-0 z-40"
                         onClick={() => setIsEditStatusDropdownOpen(false)}
                       />
-                      <div className="absolute right-0 left-0 top-full mt-1 z-50 rounded-2xl border border-slate-200 bg-white p-1.5 shadow-2xl dark:border-slate-700 dark:bg-slate-800 space-y-0.5">
+                      <div className="absolute right-0 left-0 top-full mt-1 z-50 rounded-2xl border border-slate-200 bg-white p-1.5 shadow-2xl dark:border-slate-700 dark:bg-slate-800 space-y-0.5 animate-dropdown-open">
                         {(
                           [
                             { value: "booked", label: "Booked", dot: "bg-violet-500" },
@@ -5368,24 +5935,30 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
             className="relative z-10 w-full max-w-xl rounded-3xl border border-slate-200 bg-white shadow-2xl dark:border-slate-800 dark:bg-slate-900 overflow-hidden"
             onClick={(e) => e.stopPropagation()}
           >
-            {/* Attractive Top Gradient Header */}
+            {/* Attractive Top Gradient Header (All details shown in full without ellipsis) */}
             <div className="relative bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900 px-6 py-5 text-white overflow-hidden">
               <div className="pointer-events-none absolute -top-12 -right-12 h-36 w-36 rounded-full bg-indigo-500/20 blur-2xl" />
               <div className="relative flex items-start justify-between gap-4">
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2 mb-1.5">
-                    <span className="inline-flex items-center gap-1 rounded-md bg-white/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-indigo-200 border border-white/10">
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2 mb-1.5">
+                    <span className="inline-flex items-center gap-1 rounded-md bg-white/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-indigo-200 border border-white/10 break-words">
                       {selectedDetailShipment.courierName}
                     </span>
                     {selectedDetailShipment.batchName && (
-                      <span className="inline-flex items-center gap-1 rounded-md bg-indigo-500/20 px-2 py-0.5 text-[10px] font-medium text-indigo-200 border border-indigo-400/20 truncate max-w-[180px]">
+                      <span className="inline-flex items-center gap-1 rounded-md bg-indigo-500/20 px-2 py-0.5 text-[10px] font-medium text-indigo-200 border border-indigo-400/20 break-words">
                         <FolderKanban className="h-3 w-3 shrink-0" />
-                        <span className="truncate">{selectedDetailShipment.batchName}</span>
+                        <span className="break-words">{selectedDetailShipment.batchName}</span>
+                      </span>
+                    )}
+                    {selectedDetailShipment.itemCode && (
+                      <span className="inline-flex items-center gap-1 rounded-md bg-emerald-500/20 px-2 py-0.5 text-[10px] font-mono font-semibold text-emerald-200 border border-emerald-400/25 break-words">
+                        <Tag className="h-3 w-3 shrink-0" />
+                        <span>{selectedDetailShipment.itemCode}</span>
                       </span>
                     )}
                   </div>
-                  <div className="flex items-center gap-2">
-                    <h3 className="font-mono text-lg sm:text-xl font-bold tracking-wider text-white truncate">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h3 className="font-mono text-lg sm:text-xl font-bold tracking-wider text-white break-all">
                       {selectedDetailShipment.trackingNumber}
                     </h3>
                     <button
@@ -5393,7 +5966,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                       onClick={() =>
                         handleCopy(selectedDetailShipment.id, selectedDetailShipment.trackingNumber)
                       }
-                      className="rounded-lg bg-white/10 hover:bg-white/20 p-1.5 text-slate-200 transition-colors cursor-pointer"
+                      className="rounded-lg bg-white/10 hover:bg-white/20 p-1.5 text-slate-200 transition-colors cursor-pointer shrink-0"
                       title="Copy Tracking Number"
                     >
                       {copiedId === selectedDetailShipment.id ? (
@@ -5430,18 +6003,18 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                         : "bg-sky-500/20 text-sky-300 border border-sky-400/30"
                     }`}
                   >
-                    <span className="h-1.5 w-1.5 rounded-full bg-current" />
-                    <span>{selectedDetailShipment.statusText}</span>
+                    <span className="h-1.5 w-1.5 rounded-full bg-current shrink-0" />
+                    <span className="break-words">{selectedDetailShipment.statusText}</span>
                   </span>
                 </div>
                 <div className="text-[11px] text-slate-300 flex items-center gap-1.5">
-                  <Clock className="h-3.5 w-3.5 text-indigo-300" />
-                  <span>Updated: {selectedDetailShipment.lastUpdated}</span>
+                  <Clock className="h-3.5 w-3.5 text-indigo-300 shrink-0" />
+                  <span className="break-words">Updated: {selectedDetailShipment.lastUpdated}</span>
                 </div>
               </div>
             </div>
 
-            {/* Body: Customer Info + Route & Consignment Metadata */}
+            {/* Body: Customer Info + Route & Consignment Metadata (Full text, no ellipsis) */}
             <div className="p-5 sm:p-6 space-y-4 max-h-[70vh] overflow-y-auto">
               {/* Customer Details Card */}
               <div className="rounded-2xl border border-slate-200/90 bg-slate-50/70 dark:border-slate-800 dark:bg-slate-800/40 p-4">
@@ -5449,12 +6022,12 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                   <UserCheck className="h-3.5 w-3.5" />
                   <span>Customer Details</span>
                 </div>
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
                   <div className="rounded-xl bg-white dark:bg-slate-900 p-3 border border-slate-200/70 dark:border-slate-800">
                     <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
                       Customer Name
                     </div>
-                    <div className="mt-1 text-xs sm:text-sm font-semibold text-slate-900 dark:text-white truncate">
+                    <div className="mt-1 text-xs sm:text-sm font-semibold text-slate-900 dark:text-white break-words">
                       {selectedDetailShipment.recipientName || "Not specified"}
                     </div>
                   </div>
@@ -5462,7 +6035,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                     <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
                       Phone Number
                     </div>
-                    <div className="mt-1 font-mono text-xs sm:text-sm font-semibold text-slate-900 dark:text-white">
+                    <div className="mt-1 font-mono text-xs sm:text-sm font-semibold text-slate-900 dark:text-white break-all">
                       {selectedDetailShipment.customerPhone || "Not specified"}
                     </div>
                   </div>
@@ -5470,20 +6043,28 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                     <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
                       Delivery Pincode
                     </div>
-                    <div className="mt-1 font-mono text-xs sm:text-sm font-semibold text-indigo-600 dark:text-indigo-400">
+                    <div className="mt-1 font-mono text-xs sm:text-sm font-semibold text-indigo-600 dark:text-indigo-400 break-all">
                       {selectedDetailShipment.pincode || "Not specified"}
+                    </div>
+                  </div>
+                  <div className="rounded-xl bg-white dark:bg-slate-900 p-3 border border-slate-200/70 dark:border-slate-800">
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+                      Item Code
+                    </div>
+                    <div className="mt-1 font-mono text-xs sm:text-sm font-semibold text-slate-900 dark:text-white break-all">
+                      {selectedDetailShipment.itemCode || "Not specified"}
                     </div>
                   </div>
                 </div>
               </div>
 
               {/* Route & Logistics Details */}
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div className="rounded-xl border border-slate-200/80 dark:border-slate-800 p-3">
                   <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
                     Origin Hub
                   </div>
-                  <div className="mt-1 text-xs font-semibold text-slate-800 dark:text-slate-200 truncate">
+                  <div className="mt-1 text-xs font-semibold text-slate-800 dark:text-slate-200 break-words">
                     {selectedDetailShipment.origin}
                   </div>
                 </div>
@@ -5491,7 +6072,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                   <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
                     Destination
                   </div>
-                  <div className="mt-1 text-xs font-semibold text-slate-800 dark:text-slate-200 truncate">
+                  <div className="mt-1 text-xs font-semibold text-slate-800 dark:text-slate-200 break-words">
                     {selectedDetailShipment.destination}
                   </div>
                 </div>
@@ -5499,7 +6080,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                   <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
                     Last Location
                   </div>
-                  <div className="mt-1 text-xs font-semibold text-slate-800 dark:text-slate-200 truncate">
+                  <div className="mt-1 text-xs font-semibold text-slate-800 dark:text-slate-200 break-words">
                     {selectedDetailShipment.lastLocation}
                   </div>
                 </div>
@@ -5507,7 +6088,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                   <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
                     Package Type
                   </div>
-                  <div className="mt-1 text-xs font-semibold text-slate-800 dark:text-slate-200 truncate">
+                  <div className="mt-1 text-xs font-semibold text-slate-800 dark:text-slate-200 break-words">
                     {selectedDetailShipment.articleType} ({selectedDetailShipment.weight})
                   </div>
                 </div>
@@ -5516,7 +6097,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
               {selectedDetailShipment.returnReason && (
                 <div className="rounded-2xl border border-rose-200 bg-rose-50/70 dark:border-rose-900/50 dark:bg-rose-950/40 p-3.5 flex items-center gap-2.5 text-xs text-rose-800 dark:text-rose-200">
                   <AlertTriangle className="h-4 w-4 text-rose-600 shrink-0" />
-                  <span>
+                  <span className="break-words">
                     <strong className="font-semibold">Return Reason:</strong>{" "}
                     {selectedDetailShipment.returnReason}
                   </span>
@@ -5562,10 +6143,9 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                     setSelectedDetailShipment(null);
                     onOpenTrackingResult(target.trackingNumber, target.courierId);
                   }}
-                  className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-4 py-2 text-xs font-semibold text-white shadow-xs cursor-pointer transition-colors"
+                  className="inline-flex items-center justify-center rounded-xl bg-indigo-600 hover:bg-indigo-700 px-4 py-2 text-xs font-semibold text-white shadow-xs cursor-pointer transition-colors"
                 >
-                  <span>Track Live</span>
-                  <ArrowUpRight className="h-3.5 w-3.5" />
+                  <span>Track</span>
                 </button>
               </div>
             </div>
@@ -6570,37 +7150,37 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                       </button>
                     </div>
 
-                    {/* Fallback 'No Rule' ON/OFF Toggle Button */}
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setIsPasteAnywayEnabled((prev) => {
-                          const next = !prev;
-                          if (next) {
-                            setIntakeError("");
-                            setFlaggedInvalidCode(null);
-                          }
-                          return next;
-                        });
-                      }}
-                      className={`inline-flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-extrabold transition-all cursor-pointer ${
-                        isPasteAnywayEnabled
-                          ? "border-amber-500 bg-amber-50 text-amber-800 dark:border-amber-500/70 dark:bg-amber-950/60 dark:text-amber-300"
-                          : "border-slate-200 bg-white text-slate-700 hover:border-slate-300 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300"
-                      }`}
-                      title="Toggle No Rule mode for unrecognized consignment formats"
-                    >
-                      <span>No Rule:</span>
-                      <span
-                        className={`rounded px-1.5 py-0.5 text-[10px] font-black uppercase ${
-                          isPasteAnywayEnabled
-                            ? "bg-amber-500 text-slate-950"
-                            : "bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-400"
-                        }`}
-                      >
-                        {isPasteAnywayEnabled ? "ON" : "OFF"}
+                    {/* Fallback 'No Rule' Sliding Toggle Switch */}
+                    <div className="flex items-center gap-2.5">
+                      <span className="text-xs font-bold text-slate-900 dark:text-white">
+                        No Rule:
                       </span>
-                    </button>
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={isPasteAnywayEnabled}
+                        onClick={() => {
+                          setIsPasteAnywayEnabled((prev) => {
+                            const next = !prev;
+                            if (next) {
+                              setIntakeError("");
+                              setFlaggedInvalidCode(null);
+                            }
+                            return next;
+                          });
+                        }}
+                        className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                          isPasteAnywayEnabled ? "bg-amber-500" : "bg-slate-300 dark:bg-slate-600"
+                        }`}
+                        title="Toggle No Rule mode for unrecognized consignment formats"
+                      >
+                        <span
+                          className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm ring-0 transition duration-200 ease-in-out ${
+                            isPasteAnywayEnabled ? "translate-x-5" : "translate-x-0"
+                          }`}
+                        />
+                      </button>
+                    </div>
                   </div>
 
                   {/* Unified Typing, Hardware Barcode Reader & Convenient Mobile-Responsive Camera Scan Field */}
@@ -6755,7 +7335,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                                 setIntakeCourierSearch("");
                               }}
                             />
-                            <div className="absolute left-0 top-full mt-1 z-50 w-64 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xl dark:border-slate-700 dark:bg-slate-800">
+                            <div className="absolute left-0 top-full mt-1 z-50 w-64 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xl dark:border-slate-700 dark:bg-slate-800 animate-dropdown-open">
                               {/* Instant Search Input (auto-filters when typing any letter) */}
                               <div className="p-2 border-b border-slate-100 dark:border-slate-700/80 bg-slate-50/70 dark:bg-slate-900/50">
                                 <div className="relative flex items-center">
@@ -6828,16 +7408,16 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                         )}
                       </div>
 
-                      {/* Destination City */}
+                      {/* Item Code (replaces Destination Hub / City) */}
                       <input
                         type="text"
-                        placeholder="Destination Hub / City"
-                        value={intakeDestination}
-                        onChange={(e) => setIntakeDestination(e.target.value)}
-                        className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 focus:border-indigo-500 focus:outline-none"
+                        placeholder="Item Code (e.g. ITM-1042)"
+                        value={intakeItemCode}
+                        onChange={(e) => setIntakeItemCode(e.target.value)}
+                        className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 focus:border-indigo-500 focus:outline-none"
                       />
 
-                      {/* Custom Styled Status Dropdown (with Booked + Logical Stage Metadata) */}
+                      {/* Custom Styled Status Dropdown (with unclipped status dot before Booked, etc.) */}
                       <div className="relative">
                         <button
                           type="button"
@@ -6847,7 +7427,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                           }}
                           className="w-full flex items-center justify-between rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-800 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 cursor-pointer"
                         >
-                          <div className="flex items-center gap-2 truncate">
+                          <div className="flex items-center gap-2 min-w-0 pl-1">
                             <span
                               className={`h-2 w-2 rounded-full shrink-0 ${
                                 intakeStatus === "delivered"
@@ -6882,7 +7462,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                               className="fixed inset-0 z-40"
                               onClick={() => setIsIntakeStatusDropdownOpen(false)}
                             />
-                            <div className="absolute left-0 right-0 sm:right-auto top-full mt-1 z-50 sm:w-56 overflow-hidden rounded-xl border border-slate-200 bg-white p-1 shadow-xl dark:border-slate-700 dark:bg-slate-800">
+                            <div className="absolute left-0 right-0 sm:right-auto top-full mt-1 z-50 sm:w-56 overflow-hidden rounded-xl border border-slate-200 bg-white p-1 shadow-xl dark:border-slate-700 dark:bg-slate-800 animate-dropdown-open">
                               {[
                                 { value: "booked", label: "Booked", dot: "bg-violet-500", desc: "Consignment booked at origin" },
                                 { value: "in_transit", label: "In Transit", dot: "bg-sky-500", desc: "Active linehaul dispatch" },
@@ -6988,13 +7568,14 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                       </div>
                     ) : (
                       <div className="overflow-x-auto max-h-64 overflow-y-auto rounded-xl border border-slate-200 dark:border-slate-800">
-                        <table className="w-full text-left text-xs min-w-[760px]">
+                        <table className="w-full text-left text-xs min-w-[820px]">
                           <thead className="bg-slate-50 dark:bg-slate-800 text-[10px] uppercase font-bold text-slate-500 border-b border-slate-200 dark:border-slate-800 sticky top-0 z-10">
                             <tr>
                               <th className="py-2.5 px-3">AWB / Consignment</th>
                               <th className="py-2.5 px-3">Customer Name</th>
                               <th className="py-2.5 px-3">Customer Number</th>
                               <th className="py-2.5 px-3">Pincode</th>
+                              <th className="py-2.5 px-3">Item Code</th>
                               <th className="py-2.5 px-3">Carrier Partner</th>
                               <th className="py-2.5 px-3">Status</th>
                               <th className="py-2.5 px-3 text-right">Remove</th>
@@ -7057,6 +7638,23 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                                   />
                                 </td>
 
+                                {/* Item Code (Editable) */}
+                                <td className="py-2.5 px-3 font-mono">
+                                  <input
+                                    type="text"
+                                    placeholder="Item Code"
+                                    value={item.itemCode || ""}
+                                    onChange={(e) =>
+                                      handleUpdateStagedCustomerField(
+                                        item.id,
+                                        "itemCode",
+                                        e.target.value
+                                      )
+                                    }
+                                    className="w-24 rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-mono font-semibold text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+                                  />
+                                </td>
+
                                 {/* Carrier Selector (Custom SaaS Dropdown) */}
                                 <td className="py-2.5 px-3 font-sans">
                                   <div className="relative inline-block">
@@ -7081,7 +7679,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                                             className="fixed inset-0 z-40"
                                             onClick={() => setOpenRowDropdown(null)}
                                           />
-                                          <div className="absolute left-0 top-full mt-1 z-50 w-52 max-h-48 overflow-y-auto rounded-xl border border-slate-200 bg-white p-1 shadow-xl dark:border-slate-700 dark:bg-slate-800">
+                                          <div className="absolute left-0 top-full mt-1 z-50 w-52 max-h-48 overflow-y-auto rounded-xl border border-slate-200 bg-white p-1 shadow-xl dark:border-slate-700 dark:bg-slate-800 animate-dropdown-open">
                                             {COURIER_LIST.map((c) => (
                                               <button
                                                 key={c.id}
@@ -7142,7 +7740,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                                             className="fixed inset-0 z-40"
                                             onClick={() => setOpenRowDropdown(null)}
                                           />
-                                          <div className="absolute right-0 top-full mt-1 z-50 w-44 rounded-xl border border-slate-200 bg-white p-1 shadow-xl dark:border-slate-700 dark:bg-slate-800">
+                                          <div className="absolute right-0 top-full mt-1 z-50 w-44 rounded-xl border border-slate-200 bg-white p-1 shadow-xl dark:border-slate-700 dark:bg-slate-800 animate-dropdown-open">
                                             {(
                                               [
                                                 { value: "booked", label: "Booked" },
@@ -7465,7 +8063,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                                                 className="fixed inset-0 z-40"
                                                 onClick={() => setOpenRowDropdown(null)}
                                               />
-                                              <div className="absolute left-0 top-full mt-1 z-50 w-52 max-h-48 overflow-y-auto rounded-xl border border-slate-200 bg-white p-1 shadow-xl dark:border-slate-700 dark:bg-slate-800">
+                                              <div className="absolute left-0 top-full mt-1 z-50 w-52 max-h-48 overflow-y-auto rounded-xl border border-slate-200 bg-white p-1 shadow-xl dark:border-slate-700 dark:bg-slate-800 animate-dropdown-open">
                                                 {COURIER_LIST.map((c) => (
                                                   <button
                                                     key={c.id}
@@ -7527,7 +8125,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
                                                 className="fixed inset-0 z-40"
                                                 onClick={() => setOpenRowDropdown(null)}
                                               />
-                                              <div className="absolute right-0 top-full mt-1 z-50 w-44 rounded-xl border border-slate-200 bg-white p-1 shadow-xl dark:border-slate-700 dark:bg-slate-800">
+                                              <div className="absolute right-0 top-full mt-1 z-50 w-44 rounded-xl border border-slate-200 bg-white p-1 shadow-xl dark:border-slate-700 dark:bg-slate-800 animate-dropdown-open">
                                                 {(
                                                   [
                                                     { value: "booked", label: "Booked" },
@@ -7707,270 +8305,7 @@ export function BulkDashboard({ onOpenTrackingResult }: BulkDashboardProps) {
         </div>
       )}
 
-      {/* ============================================================== */}
-      {/* 9. DATA BACKUP & IMPORT BACKUP FOR SEPARATE REVIEW MODAL       */}
-      {/* ============================================================== */}
-      {isBackupModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-0 sm:p-4 bg-slate-950/75 backdrop-blur-xs animate-in fade-in">
-          <div className="fixed inset-0" onClick={() => setIsBackupModalOpen(false)} />
-          <div
-            className="relative z-10 w-full h-full sm:h-auto sm:max-w-3xl sm:max-h-[92vh] flex flex-col rounded-none sm:rounded-3xl border-0 sm:border border-slate-200 bg-white shadow-2xl dark:border-slate-800 dark:bg-slate-900 text-left overflow-hidden"
-            onClick={(e) => e.stopPropagation()}
-          >
-            {/* Modal Header */}
-            <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 px-5 sm:px-6 py-4 shrink-0">
-              <div className="flex items-center gap-2.5">
-                <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-indigo-50 dark:bg-indigo-950/70 text-indigo-600 dark:text-indigo-400">
-                  <Database className="h-5 w-5 stroke-[2.2]" />
-                </span>
-                <div>
-                  <h3 className="text-base font-extrabold text-slate-900 dark:text-white">
-                    Data Backup & Recovery Center
-                  </h3>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setIsBackupModalOpen(false)}
-                className="rounded-xl p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800 dark:hover:text-slate-200 cursor-pointer"
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-
-            {/* Modal Scrollable Body */}
-            <div className="overflow-y-auto p-5 sm:p-6 space-y-5 flex-1">
-              {/* Alert Feedback */}
-              {backupSuccessMsg && (
-                <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-3.5 dark:border-emerald-900/60 dark:bg-emerald-950/60 flex items-start gap-2.5 text-xs text-emerald-800 dark:text-emerald-300">
-                  <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0 mt-0.5" />
-                  <div>
-                    <div className="font-bold">Success</div>
-                    <div>{backupSuccessMsg}</div>
-                  </div>
-                </div>
-              )}
-
-              {backupError && (
-                <div className="rounded-2xl border border-rose-200 bg-rose-50 p-3.5 dark:border-rose-900/60 dark:bg-rose-950/60 flex items-start gap-2.5 text-xs text-rose-800 dark:text-rose-300">
-                  <ShieldAlert className="h-4 w-4 text-rose-600 shrink-0 mt-0.5" />
-                  <div>
-                    <div className="font-bold">Backup Notice</div>
-                    <div>{backupError}</div>
-                  </div>
-                </div>
-              )}
-
-              {/* 1. Export Backup Section */}
-              <div className="rounded-2xl border border-slate-200 bg-slate-50/60 p-4 sm:p-5 dark:border-slate-800 dark:bg-slate-800/40">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <Download className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
-                      <h4 className="text-xs sm:text-sm font-bold text-slate-900 dark:text-white">
-                        Export Full Operational Backup (.json)
-                      </h4>
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={handleExportBackup}
-                    className="inline-flex items-center justify-center gap-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-4 py-2.5 text-xs font-extrabold text-white shadow-xs transition-colors shrink-0 cursor-pointer"
-                  >
-                    <Download className="h-3.5 w-3.5" />
-                    <span>Download JSON Backup</span>
-                  </button>
-                </div>
-              </div>
-
-              {/* 2. Import Backup Section */}
-              <div className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-5 dark:border-slate-800 dark:bg-slate-900/80 space-y-4">
-                <div className="flex items-center gap-2">
-                  <FileJson className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
-                  <h4 className="text-xs sm:text-sm font-bold text-slate-900 dark:text-white">
-                    Import Backup Data for Review
-                  </h4>
-                </div>
-
-                {/* File picker */}
-                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
-                  <input
-                    ref={backupFileInputRef}
-                    type="file"
-                    accept=".json,application/json"
-                    onChange={handleBackupFileSelect}
-                    id="backup-file-input"
-                    className="hidden"
-                  />
-                  <label
-                    htmlFor="backup-file-input"
-                    className="inline-flex items-center justify-center gap-2 rounded-xl border border-dashed border-slate-300 hover:border-indigo-500 bg-slate-50 hover:bg-indigo-50/30 px-4 py-3 text-xs font-bold text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 cursor-pointer transition-colors"
-                  >
-                    <Upload className="h-4 w-4 text-indigo-600" />
-                    <span>Select Backup File (.json)</span>
-                  </label>
-                  {backupReviewData && (
-                    <div className="flex items-center gap-2 text-xs font-mono text-slate-500 dark:text-slate-400">
-                      <FileJson className="h-3.5 w-3.5 text-emerald-600" />
-                      <span className="font-bold text-slate-900 dark:text-white truncate max-w-xs">
-                        {backupReviewData.fileName}
-                      </span>
-                      <span>({backupReviewData.shipments.length} records)</span>
-                    </div>
-                  )}
-                </div>
-
-                {/* Backup Loaded Review Studio */}
-                {backupReviewData && (
-                  <div className="mt-4 pt-4 border-t border-slate-100 dark:border-slate-800 space-y-3.5">
-                    {/* Status Breakdown Pills */}
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center text-xs">
-                      <div className="rounded-xl border border-emerald-200 bg-emerald-50/60 p-2 dark:border-emerald-900/60 dark:bg-emerald-950/40">
-                        <div className="text-[10px] uppercase font-bold text-emerald-600">Delivered</div>
-                        <div className="text-base font-black text-emerald-700 dark:text-emerald-300">
-                          {backupReviewData.shipments.filter((s) => s.status === "delivered").length}
-                        </div>
-                      </div>
-                      <div className="rounded-xl border border-amber-200 bg-amber-50/60 p-2 dark:border-amber-900/60 dark:bg-amber-950/40">
-                        <div className="text-[10px] uppercase font-bold text-amber-600">Out for Delivery</div>
-                        <div className="text-base font-black text-amber-700 dark:text-amber-300">
-                          {backupReviewData.shipments.filter((s) => s.status === "out_for_delivery").length}
-                        </div>
-                      </div>
-                      <div className="rounded-xl border border-sky-200 bg-sky-50/60 p-2 dark:border-sky-900/60 dark:bg-sky-950/40">
-                        <div className="text-[10px] uppercase font-bold text-sky-600">In Transit</div>
-                        <div className="text-base font-black text-sky-700 dark:text-sky-300">
-                          {backupReviewData.shipments.filter((s) => s.status === "in_transit").length}
-                        </div>
-                      </div>
-                      <div className="rounded-xl border border-rose-200 bg-rose-50/60 p-2 dark:border-rose-900/60 dark:bg-rose-950/40">
-                        <div className="text-[10px] uppercase font-bold text-rose-600">Returned (RTO)</div>
-                        <div className="text-base font-black text-rose-700 dark:text-rose-300">
-                          {backupReviewData.shipments.filter((s) => s.status === "returned").length}
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Review In Separate Action Banner */}
-                    <div className="flex flex-wrap items-center justify-between gap-3 p-3 rounded-2xl bg-indigo-50/80 dark:bg-indigo-950/60 border border-indigo-200 dark:border-indigo-900">
-                      <div>
-                        <div className="text-xs font-bold text-indigo-950 dark:text-indigo-200">
-                          Review in Separate Dashboard Mode ({backupReviewData.shipments.length})
-                        </div>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setIsReviewingSeparately(true);
-                          setIsBackupModalOpen(false);
-                          setBackupSuccessMsg("Separate review mode enabled.");
-                        }}
-                        className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-4 py-2 text-xs font-extrabold text-white shadow-xs cursor-pointer"
-                      >
-                        <ExternalLink className="h-3.5 w-3.5" />
-                        <span>Open Separate Review</span>
-                      </button>
-                    </div>
-
-                    {/* Table Preview of Backup Records */}
-                    <div className="space-y-2">
-                      <div className="flex items-center justify-between text-xs font-bold text-slate-700 dark:text-slate-300">
-                        <span>Snapshot Consignments Preview:</span>
-                        <span className="text-[11px] text-slate-400 font-normal">
-                          Showing first 6 of {backupReviewData.shipments.length}
-                        </span>
-                      </div>
-                      <div className="max-h-48 overflow-y-auto rounded-xl border border-slate-200 dark:border-slate-800 overflow-x-auto">
-                        <table className="w-full text-left text-xs min-w-[500px]">
-                          <thead className="bg-slate-50 dark:bg-slate-800 text-[10px] uppercase font-bold text-slate-500">
-                            <tr>
-                              <th className="py-2 px-3">AWB</th>
-                              <th className="py-2 px-3">Courier</th>
-                              <th className="py-2 px-3">Destination</th>
-                              <th className="py-2 px-3">Status</th>
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-slate-100 dark:divide-slate-800 font-mono text-[11px]">
-                            {backupReviewData.shipments.slice(0, 8).map((b) => (
-                              <tr key={b.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
-                                <td className="py-2 px-3 font-bold text-indigo-600 dark:text-indigo-400">
-                                  {b.trackingNumber}
-                                </td>
-                                <td className="py-2 px-3 font-sans text-slate-700 dark:text-slate-300">
-                                  {b.courierName}
-                                </td>
-                                <td className="py-2 px-3 font-sans text-slate-500 dark:text-slate-400 truncate max-w-[140px]">
-                                  {b.destination}
-                                </td>
-                                <td className="py-2 px-3">
-                                  <span
-                                    className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-sans font-bold ${
-                                      b.status === "delivered"
-                                        ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
-                                        : b.status === "returned"
-                                        ? "bg-rose-50 text-rose-700 dark:bg-rose-950 dark:text-rose-300"
-                                        : b.status === "out_for_delivery"
-                                        ? "bg-amber-50 text-amber-700 dark:bg-amber-950 dark:text-amber-300"
-                                        : "bg-sky-50 text-sky-700 dark:bg-sky-950 dark:text-sky-300"
-                                    }`}
-                                  >
-                                    {b.status}
-                                  </span>
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>
-
-                    {/* Merge or Restore Action Buttons */}
-                    <div className="flex flex-wrap items-center justify-between gap-2.5 pt-2">
-                      <div className="flex items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={handleMergeBackupIntoLive}
-                          className="inline-flex items-center gap-1.5 rounded-xl border border-indigo-200 bg-white hover:bg-indigo-50 dark:border-indigo-800 dark:bg-slate-800 dark:hover:bg-indigo-950/60 px-3.5 py-2 text-xs font-bold text-indigo-700 dark:text-indigo-300 cursor-pointer shadow-2xs"
-                        >
-                          <Plus className="h-3.5 w-3.5" />
-                          <span>Merge into Live Dashboard</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={handleRestoreBackupOverwrite}
-                          className="inline-flex items-center gap-1.5 rounded-xl border border-rose-200 bg-white hover:bg-rose-50 dark:border-rose-900 dark:bg-slate-800 dark:hover:bg-rose-950/60 px-3.5 py-2 text-xs font-bold text-rose-700 dark:text-rose-300 cursor-pointer shadow-2xs"
-                        >
-                          <RotateCcw className="h-3.5 w-3.5" />
-                          <span>Replace Live Data</span>
-                        </button>
-                      </div>
-
-                      <button
-                        type="button"
-                        onClick={() => setBackupReviewData(null)}
-                        className="text-xs font-semibold text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 underline cursor-pointer"
-                      >
-                        Clear Loaded Backup
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Modal Footer */}
-            <div className="border-t border-slate-100 dark:border-slate-800 px-5 sm:px-6 py-3 flex justify-end shrink-0">
-              <button
-                type="button"
-                onClick={() => setIsBackupModalOpen(false)}
-                className="rounded-xl px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800 cursor-pointer"
-              >
-                Close
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* Backup & Restore is now integrated directly inside the Settings page */}
 
       {/* ============================================================== */}
       {/* 9. BULK MULTIPLE DELETE CONFIRMATION MODAL                      */}

@@ -1,4 +1,4 @@
-import type {Metadata} from 'next';
+import type {Metadata, Viewport} from 'next';
 import {Plus_Jakarta_Sans, JetBrains_Mono} from 'next/font/google';
 import './globals.css';
 
@@ -14,9 +14,25 @@ const jetbrainsMono = JetBrains_Mono({
   variable: '--font-mono',
 });
 
+export const viewport: Viewport = {
+  themeColor: '#4f46e5',
+  width: 'device-width',
+  initialScale: 1,
+};
+
 export const metadata: Metadata = {
   title: 'TrackFlow - Universal Multi-Carrier Tracker',
   description: 'Fast, free parcel and shipment tracking for 20+ carriers including India Post Speed Post, DTDC, Ekart, Delhivery, BlueDart, and international postal networks.',
+  manifest: '/manifest.json',
+  appleWebApp: {
+    capable: true,
+    statusBarStyle: 'default',
+    title: 'TrackFlow',
+  },
+  icons: {
+    icon: '/icon.svg',
+    apple: '/apple-touch-icon.png',
+  },
   openGraph: {
     title: 'TrackFlow - Universal Multi-Carrier Tracker',
     description: 'Fast, free parcel tracking for 20+ carriers with live journey route maps, delivery estimates, and instant WhatsApp status cards.',

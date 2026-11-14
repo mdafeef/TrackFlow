@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "tw-animate-css";
 @custom-variant dark (&:where(.dark, .dark *));
 
 @layer base {
@@ -27,6 +28,52 @@
 
 .animate-marquee:hover {
   animation-play-state: paused;
+}
+
+/* Smooth Spring Popover Animations for Menus, Dropdowns & Calendars */
+@keyframes springPopoverOpen {
+  0% {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.95);
+  }
+  70% {
+    opacity: 1;
+    transform: translateY(1px) scale(1.005);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes springCalendarOpen {
+  0% {
+    opacity: 0;
+    transform: translateY(-10px) scale(0.93);
+  }
+  65% {
+    opacity: 1;
+    transform: translateY(2px) scale(1.01);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.animate-menu-open {
+  transform-origin: top right;
+  animation: springPopoverOpen 0.24s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.animate-dropdown-open {
+  transform-origin: top center;
+  animation: springPopoverOpen 0.22s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.animate-calendar-open {
+  transform-origin: top left;
+  animation: springCalendarOpen 0.26s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
 /* Custom Sleek Modern Scrollbar Design */
@@ -80,4 +127,3 @@ body.modal-scroll-lock::-webkit-scrollbar {
   width: 0 !important;
   height: 0 !important;
 }
-

@@ -34,8 +34,23 @@ import { NotTrackableCard } from "@/components/NotTrackableCard";
 import { TrackingModalPopup } from "@/components/TrackingModalPopup";
 import { PartnerMarquee } from "@/components/PartnerMarquee";
 import { BulkDashboard } from "@/components/BulkDashboard";
+import { AuthModal } from "@/components/AuthModal";
+import { AuthUserProfile } from "@/app/api/auth/route";
 import { COURIER_MAP, autoDetectCourier } from "@/lib/couriers";
 import { TrackingResult } from "@/app/api/track/route";
+import { OfflineIndicator } from "@/components/PWAInstallButton";
+import {
+  syncWatchlistToOfflineCache,
+  loadWatchlistFromOfflineCache,
+  cacheTrackingResultOffline,
+  getOfflineCachedTrackingResult,
+} from "@/lib/usePWAInstall";
+import {
+  PublicTabId,
+  PUBLIC_TAB_PATHS,
+  resolveRouteFromPathname,
+  silentNavigateTab,
+} from "@/lib/tabRoutes";
 
 function TrackingAppContent() {
   const searchParams = useSearchParams();
@@ -77,44 +92,32 @@ function TrackingAppContent() {
   // Dark mode
   const [isDark, setIsDark] = useState(false);
 
-  // Active view: single tracker vs bulk dashboard (defaults to bulk when returning from camera scan page)
-  const [activeView, setActiveView] = useState<"single" | "bulk">(() => {
+  // Real User Authentication State (Single = Public, Workspace = Logged-In)
+  const [authUser, setAuthUser] = useState<AuthUserProfile | null>(null);
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+
+  // Active view: single tracker vs bulk dashboard, plus active public tab
+  const [activeView, setActiveView] = useState<"single" | "bulk">("single");
+  const [publicTab, setPublicTab] = useState<PublicTabId>("track");
+  const [selectedCarrierFromDirectory, setSelectedCarrierFromDirectory] = useState<string>("");
+
+  const handleSelectPublicTab = useCallback((tab: PublicTabId) => {
+    setActiveView("single");
+    setPublicTab(tab);
+    silentNavigateTab(PUBLIC_TAB_PATHS[tab]);
     if (typeof window !== "undefined") {
-      try {
-        const rawReturn = sessionStorage.getItem("trackflow_scan_return");
-        if (rawReturn) {
-          const parsed = JSON.parse(rawReturn);
-          if (
-            parsed.target === "bulk_review" ||
-            parsed.target === "bulk_ingested" ||
-            parsed.target === "bulk_dashboard"
-          ) {
-            return "bulk";
-          }
-        }
-      } catch {}
+      window.scrollTo({ top: 0, behavior: "smooth" });
     }
-    return "single";
-  });
+  }, []);
 
   // Track Next Order Action: Clears active results/errors and smoothly focuses input
   const handleTrackNextOrder = useCallback(() => {
     setActiveResult(null);
     setNotTrackableInfo(null);
     setErrorMsg(null);
-
-    try {
-      if (window.location.search || window.location.pathname !== "/") {
-        window.history.replaceState(null, "", "/");
-      }
-    } catch (e) {
-      console.warn("Could not replace history state:", e);
-    }
-
-    const heroSection = document.getElementById("track-section");
-    if (heroSection) {
-      heroSection.scrollIntoView({ behavior: "smooth", block: "start" });
-    }
+    setActiveView("single");
+    setPublicTab("track");
+    silentNavigateTab("/");
 
     setTimeout(() => {
       const inputEl = document.getElementById("tracking-input") as HTMLInputElement | null;
@@ -122,7 +125,7 @@ function TrackingAppContent() {
         inputEl.focus();
         inputEl.select();
       }
-    }, 250);
+    }, 150);
   }, []);
 
   // Save an untracked order to watchlist for later automated refresh
@@ -149,17 +152,13 @@ function TrackingAppContent() {
 
       const updated = [newItem, ...watchlist];
       setWatchlist(updated);
-      try {
-        localStorage.setItem("trackflow_watchlist", JSON.stringify(updated));
-      } catch (e) {
-        console.error(e);
-      }
+      syncWatchlistToOfflineCache(updated);
       setIsWatchlistOpen(true);
     },
     [watchlist]
   );
 
-  // Initialize theme and watchlist from localStorage
+  // Initialize theme, watchlist (with Service Worker cache fallback), and auth session after hydration
   useEffect(() => {
     const timer = setTimeout(() => {
       try {
@@ -173,15 +172,57 @@ function TrackingAppContent() {
           document.documentElement.classList.remove("dark");
         }
 
-        const savedWatchlist = localStorage.getItem("trackflow_watchlist");
-        if (savedWatchlist) {
-          setWatchlist(JSON.parse(savedWatchlist));
+        loadWatchlistFromOfflineCache().then((cachedItems) => {
+          if (cachedItems.length > 0) {
+            setWatchlist(cachedItems);
+            syncWatchlistToOfflineCache(cachedItems);
+          }
+        });
+
+        const storedUser = localStorage.getItem("trackflow_auth_user");
+        if (storedUser) {
+          try {
+            setAuthUser(JSON.parse(storedUser) as AuthUserProfile);
+          } catch {}
         }
+
+        // Verify or hydrate session with backend /api/auth
+        const token = localStorage.getItem("trackflow_auth_token");
+        fetch("/api/auth", {
+          method: "GET",
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        })
+          .then((r) => r.json())
+          .then((data) => {
+            if (data?.authenticated && data?.user) {
+              setAuthUser(data.user);
+              localStorage.setItem("trackflow_auth_user", JSON.stringify(data.user));
+            }
+          })
+          .catch(() => {});
       } catch (e) {
         console.error("Local storage initialization error:", e);
       }
     }, 0);
     return () => clearTimeout(timer);
+  }, []);
+
+  const handleLogout = useCallback(async () => {
+    try {
+      await fetch("/api/auth", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "logout" }),
+      });
+    } catch {}
+    try {
+      localStorage.removeItem("trackflow_auth_user");
+      localStorage.removeItem("trackflow_auth_token");
+    } catch {}
+    setAuthUser(null);
+    setActiveView("single");
+    setPublicTab("track");
+    silentNavigateTab("/");
   }, []);
 
   const toggleTheme = () => {
@@ -198,25 +239,37 @@ function TrackingAppContent() {
     });
   };
 
-
-
-  // Perform tracking search - ALWAYS fetches fresh data when invoked
+  // Perform tracking search - fetches fresh data when online and falls back to offline cache when offline
   const performSearch = useCallback(
     async (
       trackingNumber: string,
       courierId?: string,
       shouldScroll: boolean = false
     ) => {
-      const cleanNum = (trackingNumber || "").trim();
+      const cleanNum = (trackingNumber || "").trim().toUpperCase();
 
       if (!cleanNum) return;
 
+      const autoDetected = autoDetectCourier(cleanNum);
+      let resolvedCourierId = (courierId || "").trim().toLowerCase();
+
+      // Prevent stale "speedpost" selection from overriding a tracking number that matches another carrier's format (e.g. DTDC)
+      if (
+        resolvedCourierId === "speedpost" &&
+        autoDetected &&
+        autoDetected.id !== "speedpost" &&
+        !COURIER_MAP.speedpost.regex.test(cleanNum.replace(/-/g, ""))
+      ) {
+        resolvedCourierId = autoDetected.id;
+      } else if (!resolvedCourierId && autoDetected) {
+        resolvedCourierId = autoDetected.id;
+      }
+
       // Determine courier label for fetching animation
-      const detected = (courierId && COURIER_MAP[courierId]?.name)
-        ? COURIER_MAP[courierId].name
-        : (cleanNum && autoDetectCourier(cleanNum)?.name)
-        ? autoDetectCourier(cleanNum)!.name
-        : "Carrier Network";
+      const detected =
+        (resolvedCourierId && COURIER_MAP[resolvedCourierId]?.name) ||
+        autoDetected?.name ||
+        "Carrier Network";
 
       setPendingQuery({
         number: cleanNum,
@@ -225,13 +278,14 @@ function TrackingAppContent() {
 
       setIsLoading(true);
       setIsTrackingModalOpen(true);
+      setActiveResult(null);
       setErrorMsg(null);
       setNotTrackableInfo(null);
 
-      // Ensure browser URL stays strictly clean
+      // Strip query parameters while keeping the current clean tab pathname
       try {
-        if (window.location.search || window.location.pathname !== "/") {
-          window.history.replaceState(null, "", "/");
+        if (window.location.search) {
+          window.history.replaceState(null, "", window.location.pathname || "/");
         }
       } catch {
         // ignore history state errors
@@ -247,7 +301,7 @@ function TrackingAppContent() {
           },
           body: JSON.stringify({
             trackingNumber: cleanNum,
-            courierId: courierId || "",
+            courierId: resolvedCourierId,
           }),
         });
         const json = await res.json();
@@ -276,11 +330,18 @@ function TrackingAppContent() {
         }
 
         if (!res.ok || !json.success) {
+          const cachedOffline = await getOfflineCachedTrackingResult(cleanNum);
+          if (cachedOffline) {
+            setActiveResult(cachedOffline);
+            setNotTrackableInfo(null);
+            return;
+          }
           throw new Error(json.error || "Failed to fetch tracking information.");
         }
 
         setActiveResult(json.data);
         setNotTrackableInfo(null);
+        cacheTrackingResultOffline(json.data);
 
         // Only scroll if the user explicitly submitted from UI
         if (shouldScroll) {
@@ -292,6 +353,14 @@ function TrackingAppContent() {
           }, 150);
         }
       } catch (err: any) {
+        // Offline fallback from client/Service Worker cache
+        const cachedOffline = await getOfflineCachedTrackingResult(cleanNum);
+        if (cachedOffline) {
+          setActiveResult(cachedOffline);
+          setNotTrackableInfo(null);
+          setErrorMsg(null);
+          return;
+        }
         setErrorMsg(err.message || "Failed to load tracking details.");
         setActiveResult(null);
       } finally {
@@ -301,16 +370,30 @@ function TrackingAppContent() {
     []
   );
 
-  // Keep URL strictly clean on mount and handle return from dedicated /scan camera page
+  // Sync initial URL pathname & browser Back/Forward (popstate) with in-page tabs
   useEffect(() => {
-    if (typeof window !== "undefined") {
-      if (window.location.search || window.location.pathname !== "/") {
-        try {
-          window.history.replaceState(null, "", "/");
-        } catch {
-          // ignore
-        }
+    if (typeof window === "undefined") return;
+
+    const applyPathnameRoute = (pathname: string, normalizeUrl: boolean = false) => {
+      const resolved = resolveRouteFromPathname(pathname);
+      if (normalizeUrl && (window.location.search || window.location.pathname !== resolved.canonicalPath)) {
+        silentNavigateTab(resolved.canonicalPath, true);
       }
+      setActiveView(resolved.view);
+      setPublicTab(resolved.publicTab);
+      if (resolved.view === "bulk") {
+        setTimeout(() => {
+          window.dispatchEvent(
+            new CustomEvent("trackflow:set-workspace-menu", {
+              detail: { menu: resolved.workspaceTab, skipUrlPush: true },
+            })
+          );
+        }, 0);
+      }
+    };
+
+    const timer = setTimeout(() => {
+      applyPathnameRoute(window.location.pathname, true);
 
       try {
         const rawReturn = sessionStorage.getItem("trackflow_scan_return");
@@ -321,12 +404,16 @@ function TrackingAppContent() {
             parsed.target === "bulk_ingested" ||
             parsed.target === "bulk_dashboard"
           ) {
-            setTimeout(() => setActiveView("bulk"), 0);
+            setActiveView("bulk");
+            silentNavigateTab("/dashboard", true);
             if (parsed.target !== "bulk_review") {
               sessionStorage.removeItem("trackflow_scan_return");
             }
           } else if (parsed.target === "single_track" && parsed.trackingNumber) {
             sessionStorage.removeItem("trackflow_scan_return");
+            setActiveView("single");
+            setPublicTab("track");
+            silentNavigateTab("/", true);
             setTimeout(() => {
               performSearch(parsed.trackingNumber, parsed.courierId, true);
             }, 50);
@@ -335,10 +422,19 @@ function TrackingAppContent() {
       } catch {
         // ignore
       }
-    }
+    }, 0);
+
+    const handlePopState = () => {
+      applyPathnameRoute(window.location.pathname, false);
+    };
+    window.addEventListener("popstate", handlePopState);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener("popstate", handlePopState);
+    };
   }, [searchParams, performSearch]);
 
-  // Watchlist helpers
+  // Watchlist helpers (synced to Service Worker offline cache)
   const handleAddToWatchlist = () => {
     if (!activeResult) return;
     const exists = watchlist.some((item) => item.trackingNumber === activeResult.trackingNumber);
@@ -355,21 +451,14 @@ function TrackingAppContent() {
 
     const updated = [newItem, ...watchlist];
     setWatchlist(updated);
-    try {
-      localStorage.setItem("trackflow_watchlist", JSON.stringify(updated));
-    } catch (e) {
-      console.error(e);
-    }
+    syncWatchlistToOfflineCache(updated);
+    cacheTrackingResultOffline(activeResult);
   };
 
   const handleRemoveFromWatchlist = (num: string) => {
     const updated = watchlist.filter((item) => item.trackingNumber !== num);
     setWatchlist(updated);
-    try {
-      localStorage.setItem("trackflow_watchlist", JSON.stringify(updated));
-    } catch (e) {
-      console.error(e);
-    }
+    syncWatchlistToOfflineCache(updated);
   };
 
   const handleUpdateNickname = (num: string, newNickname: string) => {
@@ -377,11 +466,7 @@ function TrackingAppContent() {
       item.trackingNumber === num ? { ...item, nickname: newNickname } : item
     );
     setWatchlist(updated);
-    try {
-      localStorage.setItem("trackflow_watchlist", JSON.stringify(updated));
-    } catch (e) {
-      console.error(e);
-    }
+    syncWatchlistToOfflineCache(updated);
   };
 
   const handleRefreshAllWatchlist = async () => {
@@ -400,6 +485,7 @@ function TrackingAppContent() {
           });
           const json = await res.json();
           if (json.success && json.data) {
+            cacheTrackingResultOffline(json.data);
             updatedList.push({
               ...item,
               lastStatus: json.data.overallStatus.phrase,
@@ -414,7 +500,7 @@ function TrackingAppContent() {
         }
       }
       setWatchlist(updatedList);
-      localStorage.setItem("trackflow_watchlist", JSON.stringify(updatedList));
+      syncWatchlistToOfflineCache(updatedList);
     } finally {
       setIsRefreshingWatchlist(false);
     }
@@ -424,133 +510,200 @@ function TrackingAppContent() {
     ? watchlist.some((item) => item.trackingNumber === activeResult.trackingNumber)
     : false;
 
-  const navigateSection = (id: string) => {
-    const el = document.getElementById(id);
-    if (el) {
-      el.scrollIntoView({ behavior: "smooth" });
-    }
-  };
-
   return (
-    <div className="min-h-screen w-full max-w-full overflow-x-hidden flex flex-col bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100 transition-colors">
-      {/* Top Bar Contract */}
+    <div
+      className={`w-full max-w-full flex flex-col bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100 transition-colors pt-14 sm:pt-16 ${
+        activeView === "bulk" && authUser
+          ? "h-screen overflow-hidden"
+          : "min-h-screen overflow-x-hidden"
+      }`}
+    >
+      {/* Top Bar Contract (Fixed at top) */}
       <Navbar
         watchlistCount={watchlist.length}
         onOpenWatchlist={() => setIsWatchlistOpen(true)}
         isDark={isDark}
         onToggleTheme={toggleTheme}
-        onNavigateSection={navigateSection}
+        publicTab={publicTab}
+        onSelectPublicTab={handleSelectPublicTab}
         activeView={activeView}
-        onChangeView={setActiveView}
+        onChangeView={(nextView) => {
+          if (nextView === "bulk" && !authUser) {
+            setIsAuthModalOpen(true);
+            return;
+          }
+          setActiveView(nextView);
+          if (nextView === "bulk") {
+            const currentResolved =
+              typeof window !== "undefined"
+                ? resolveRouteFromPathname(window.location.pathname)
+                : null;
+            silentNavigateTab(
+              currentResolved?.view === "bulk" ? currentResolved.canonicalPath : "/dashboard"
+            );
+          } else {
+            silentNavigateTab(PUBLIC_TAB_PATHS[publicTab]);
+          }
+        }}
+        authUser={authUser}
+        onOpenLogin={() => setIsAuthModalOpen(true)}
+        onLogout={handleLogout}
       />
 
-      <main className="flex-1">
+      <main className={activeView === "bulk" && authUser ? "flex-1 min-h-0 flex overflow-hidden" : "flex-1"}>
         {activeView === "bulk" ? (
-          /* Enterprise Bulk Operations Dashboard */
-          <BulkDashboard
-            onOpenTrackingResult={(trackingNum, courierId) => {
-              performSearch(trackingNum, courierId, false);
-            }}
-          />
-        ) : (
-          /* Normal Single Tracker View */
-          <>
-            {/* Hero & Search Section */}
-            <TrackerHero
-              onSearch={(num, cId) => {
-                performSearch(num, cId, true);
+          authUser ? (
+            /* Enterprise Bulk Operations Dashboard (Authenticated) */
+            <BulkDashboard
+              onOpenTrackingResult={(trackingNum, courierId) => {
+                performSearch(trackingNum, courierId, false);
               }}
-              isLoading={isLoading}
-              initialTracking={activeResult ? activeResult.trackingNumber : ""}
-              initialCourier={activeResult ? activeResult.courier.id : ""}
+              authUser={authUser}
+              onLogout={handleLogout}
+              onProfileUpdated={(updated) => setAuthUser(updated)}
             />
+          ) : (
+            /* Workspace Login Gate if accessed while unauthenticated */
+            <AuthModal
+              isOpen={true}
+              inlineMode={true}
+              onClose={() => handleSelectPublicTab("track")}
+              onSuccess={(user) => {
+                setAuthUser(user);
+                setIsAuthModalOpen(false);
+                setActiveView("bulk");
+                const currentResolved =
+                  typeof window !== "undefined"
+                    ? resolveRouteFromPathname(window.location.pathname)
+                    : null;
+                silentNavigateTab(
+                  currentResolved?.view === "bulk" ? currentResolved.canonicalPath : "/dashboard"
+                );
+              }}
+            />
+          )
+        ) : (
+          /* Single Tracker Public Tabs: Renders only the active tab in-page for instant load */
+          <>
+            {publicTab === "track" && (
+              <div className="animate-in fade-in duration-150">
+                {/* Hero & Search Section */}
+                <TrackerHero
+                  onSearch={(num, cId) => {
+                    performSearch(num, cId, true);
+                  }}
+                  isLoading={isLoading}
+                  initialTracking={
+                    activeResult
+                      ? activeResult.trackingNumber
+                      : notTrackableInfo
+                      ? notTrackableInfo.trackingNumber
+                      : ""
+                  }
+                  initialCourier={
+                    selectedCarrierFromDirectory ||
+                    (activeResult
+                      ? activeResult.courier.id
+                      : notTrackableInfo?.courierId
+                      ? notTrackableInfo.courierId
+                      : "")
+                  }
+                />
 
-            {/* Scrolling Supported Partners Logo Ribbon */}
-            <PartnerMarquee />
+                {/* Scrolling Supported Partners Logo Ribbon */}
+                <PartnerMarquee />
 
-
-            {/* Streamlined Status Banner if activeResult is present outside modal or after modal dismissal */}
-            {activeResult && !isLoading && !isTrackingModalOpen && (
-              <div className="mx-auto max-w-4xl px-4 sm:px-6 my-10">
-                <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs dark:border-slate-800 dark:bg-slate-900 flex flex-col sm:flex-row items-center justify-between gap-4">
-                  <div className="flex items-center gap-3">
-                    <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 shrink-0">
-                      <Package className="h-5 w-5" />
-                    </div>
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs font-bold text-slate-900 dark:text-white">
-                          {activeResult.courier.name}
-                        </span>
-                        <span className="text-xs font-mono text-slate-500">
-                          #{activeResult.trackingNumber}
-                        </span>
-                        <span className="text-xs font-semibold text-emerald-600 dark:text-emerald-400">
-                          · {activeResult.overallStatus.phrase}
-                        </span>
+                {/* Streamlined Status Banner if activeResult is present outside modal or after modal dismissal */}
+                {activeResult && !isLoading && !isTrackingModalOpen && (
+                  <div className="mx-auto max-w-4xl px-4 sm:px-6 my-10">
+                    <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs dark:border-slate-800 dark:bg-slate-900 flex flex-col sm:flex-row items-center justify-between gap-4">
+                      <div className="flex items-center gap-3">
+                        <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 shrink-0">
+                          <Package className="h-5 w-5" />
+                        </div>
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-bold text-slate-900 dark:text-white">
+                              {activeResult.courier.name}
+                            </span>
+                            <span className="text-xs font-mono text-slate-500">
+                              #{activeResult.trackingNumber}
+                            </span>
+                            <span className="text-xs font-semibold text-emerald-600 dark:text-emerald-400">
+                              · {activeResult.overallStatus.phrase}
+                            </span>
+                          </div>
+                          {activeResult.bookingDetails.origin && activeResult.bookingDetails.destination ? (
+                            <p className="text-xs text-slate-500 dark:text-slate-400">
+                              {activeResult.bookingDetails.origin.split(",")[0]} → {activeResult.bookingDetails.destination.split(",")[0]}
+                            </p>
+                          ) : (
+                            <p className="text-xs text-slate-500 dark:text-slate-400">
+                              Last scan: {activeResult.overallStatus.timestamp}
+                            </p>
+                          )}
+                        </div>
                       </div>
-                      {activeResult.bookingDetails.origin && activeResult.bookingDetails.destination ? (
-                        <p className="text-xs text-slate-500 dark:text-slate-400">
-                          {activeResult.bookingDetails.origin.split(",")[0]} → {activeResult.bookingDetails.destination.split(",")[0]}
-                        </p>
-                      ) : (
-                        <p className="text-xs text-slate-500 dark:text-slate-400">
-                          Last scan: {activeResult.overallStatus.timestamp}
-                        </p>
-                      )}
+                      <div className="flex items-center gap-2 w-full sm:w-auto">
+                        <button
+                          type="button"
+                          onClick={() => setIsTrackingModalOpen(true)}
+                          className="flex-1 sm:flex-initial inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2 text-xs font-bold text-white hover:bg-indigo-700 shadow-xs cursor-pointer"
+                        >
+                          <span>View Details Popup</span>
+                          <ArrowRight className="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleTrackNextOrder}
+                          className="flex-1 sm:flex-initial inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-800 dark:text-slate-200 cursor-pointer"
+                        >
+                          <PlusCircle className="h-3.5 w-3.5" />
+                          <span>New</span>
+                        </button>
+                      </div>
                     </div>
                   </div>
-                  <div className="flex items-center gap-2 w-full sm:w-auto">
-                    <button
-                      type="button"
-                      onClick={() => setIsTrackingModalOpen(true)}
-                      className="flex-1 sm:flex-initial inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2 text-xs font-bold text-white hover:bg-indigo-700 shadow-xs cursor-pointer"
-                    >
-                      <span>View Details Popup</span>
-                      <ArrowRight className="h-3.5 w-3.5" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleTrackNextOrder}
-                      className="flex-1 sm:flex-initial inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-800 dark:text-slate-200 cursor-pointer"
-                    >
-                      <PlusCircle className="h-3.5 w-3.5" />
-                      <span>New</span>
-                    </button>
-                  </div>
-                </div>
+                )}
               </div>
             )}
 
-            {/* Features & Capabilities */}
-            <FeaturesOverview />
+            {publicTab === "carriers" && (
+              <div className="animate-in fade-in duration-150">
+                <CourierDirectory
+                  onSelectCourier={(courierId) => {
+                    setSelectedCarrierFromDirectory(courierId);
+                    handleSelectPublicTab("track");
+                    setTimeout(() => {
+                      if (typeof window !== "undefined") {
+                        window.dispatchEvent(
+                          new CustomEvent("trackflow:set-courier", {
+                            detail: { courierId },
+                          })
+                        );
+                      }
+                      const inputEl = document.getElementById("tracking-input") as HTMLInputElement | null;
+                      if (inputEl) {
+                        inputEl.focus();
+                        inputEl.select();
+                      }
+                    }, 120);
+                  }}
+                />
+              </div>
+            )}
 
-            {/* 20+ Supported Couriers Directory */}
-            <CourierDirectory
-              onSelectCourier={(courierId) => {
-                const el = document.getElementById("track-section");
-                if (el) {
-                  el.scrollIntoView({ behavior: "smooth", block: "start" });
-                }
-                if (typeof window !== "undefined") {
-                  window.dispatchEvent(
-                    new CustomEvent("trackflow:set-courier", {
-                      detail: { courierId },
-                    })
-                  );
-                }
-                setTimeout(() => {
-                  const inputEl = document.getElementById("tracking-input") as HTMLInputElement | null;
-                  if (inputEl) {
-                    inputEl.focus();
-                    inputEl.select();
-                  }
-                }, 200);
-              }}
-            />
+            {publicTab === "features" && (
+              <div className="animate-in fade-in duration-150">
+                <FeaturesOverview />
+              </div>
+            )}
 
-            {/* FAQ Section */}
-            <FaqSection />
+            {publicTab === "faq" && (
+              <div className="animate-in fade-in duration-150">
+                <FaqSection />
+              </div>
+            )}
           </>
         )}
       </main>
@@ -568,6 +721,8 @@ function TrackingAppContent() {
         onRefresh={() => {
           if (activeResult) {
             performSearch(activeResult.trackingNumber, activeResult.courier.id, false);
+          } else if (notTrackableInfo) {
+            performSearch(notTrackableInfo.trackingNumber, notTrackableInfo.courierId, false);
           } else if (pendingQuery.number) {
             performSearch(pendingQuery.number, undefined, false);
           }
@@ -602,6 +757,21 @@ function TrackingAppContent() {
         onRefreshAll={handleRefreshAllWatchlist}
         isRefreshing={isRefreshingWatchlist}
       />
+
+      {/* Real Workspace Login & Registration Modal */}
+      <AuthModal
+        isOpen={isAuthModalOpen}
+        onClose={() => setIsAuthModalOpen(false)}
+        onSuccess={(user) => {
+          setAuthUser(user);
+          setIsAuthModalOpen(false);
+          setActiveView("bulk");
+          silentNavigateTab("/dashboard");
+        }}
+      />
+
+      {/* Offline Status & Cached Watchlist Quick Trigger */}
+      <OfflineIndicator onOpenWatchlist={() => setIsWatchlistOpen(true)} />
 
       {/* Footer (Only shown in Single Tracker landing view; Workspace uses full-screen SaaS layout) */}
       {activeView === "single" && <Footer />}

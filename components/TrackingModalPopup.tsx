@@ -266,6 +266,26 @@ export function TrackingModalPopup({
     (trackingResult?.overallStatus?.stage === "delivered" ||
       (trackingResult?.overallStatus?.phrase && trackingResult.overallStatus.phrase.toLowerCase().includes("delivered")));
 
+  if (isLoading) {
+    return (
+      <div
+        className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-sm animate-in fade-in duration-150"
+        onClick={onClose}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Fetching shipment status"
+      >
+        <div onClick={(e) => e.stopPropagation()} className="w-full max-w-sm">
+          <TrackingFetchingAnimation
+            trackingNumber={pendingQuery.number}
+            courierName={pendingQuery.courierName}
+            onCancel={onClose}
+          />
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-0 sm:p-4 md:p-6 bg-slate-950/85 backdrop-blur-md animate-in fade-in duration-200">
       {/* Background click dismiss */}
@@ -289,10 +309,12 @@ export function TrackingModalPopup({
             <div>
               <div className="flex flex-wrap items-center gap-2">
                 <h3 className="text-base sm:text-lg font-extrabold tracking-tight text-slate-900 dark:text-white">
-                  {trackingResult ? trackingResult.courier.name : pendingQuery.courierName || "Parcel Tracker"}
+                  {trackingResult
+                    ? trackingResult.courier.name
+                    : notTrackableInfo?.courierName || pendingQuery.courierName || "Parcel Tracker"}
                 </h3>
                 <span className="rounded-full bg-indigo-50 dark:bg-indigo-950/80 px-2.5 py-0.5 text-xs font-bold text-indigo-700 dark:text-indigo-300 border border-indigo-200/70 dark:border-indigo-800/60">
-                  {trackingResult?.courier.shortName || "Live"}
+                  {trackingResult?.courier.shortName || notTrackableInfo?.courierName || "Live"}
                 </span>
                 <span className="hidden md:inline-flex items-center gap-1 text-[11px] font-bold text-emerald-600 dark:text-emerald-400">
                   <ShieldCheck className="h-3.5 w-3.5" />
@@ -300,7 +322,7 @@ export function TrackingModalPopup({
                 </span>
               </div>
               <div className="text-xs font-mono font-bold text-slate-500 dark:text-slate-400">
-                #{trackingResult ? trackingResult.trackingNumber : pendingQuery.number}
+                #{trackingResult ? trackingResult.trackingNumber : notTrackableInfo?.trackingNumber || pendingQuery.number}
               </div>
             </div>
           </div>
@@ -353,15 +375,6 @@ export function TrackingModalPopup({
         <div
           className="overflow-y-auto flex-1 p-4 sm:p-6 lg:p-7 space-y-5 sm:space-y-6"
         >
-          {/* Loading Animation */}
-          {isLoading && (
-            <div className="py-6">
-              <TrackingFetchingAnimation
-                trackingNumber={pendingQuery.number}
-                courierName={pendingQuery.courierName}
-              />
-            </div>
-          )}
 
           {/* Not Trackable State */}
           {!isLoading && notTrackableInfo && (
