@@ -242,6 +242,13 @@ export function CameraScanClient() {
   const isPasteAnywayEnabledRef = useRef<boolean>(isPasteAnywayEnabled);
   const isScanCustomerQrEnabledRef = useRef<boolean>(isScanCustomerQrEnabled);
   const customerQrScanStepRef = useRef(customerQrScanStep);
+  const pendingCustomerQrRef = useRef<{
+    customerName: string;
+    customerPhone: string;
+    formattedPhone91: string;
+    pincode: string;
+    itemCode: string;
+  } | null>(null);
 
   useEffect(() => {
     guideModeRef.current = cameraGuideMode;
@@ -579,10 +586,13 @@ export function CameraScanClient() {
         ? `Pasted Anyway (${cleanNum.length} chars)`
         : identification.formatLabel;
 
+      const effectiveCustomerData =
+        customerDataOverride || pendingCustomerQrRef.current || undefined;
+
       // If 2-Step "Scan Customer Data QR" is ON and we have not scanned the customer QR yet:
       if (
         isScanCustomerQrEnabledRef.current &&
-        !customerDataOverride &&
+        !effectiveCustomerData &&
         !skipCustomerStep
       ) {
         setCustomerQrScanStep({
@@ -607,9 +617,10 @@ export function CameraScanClient() {
         return;
       }
 
+      pendingCustomerQrRef.current = null;
       const activeStatus = defaultStatusRef.current;
-      const dest = customerDataOverride?.pincode
-        ? `Pin ${customerDataOverride.pincode}`
+      const dest = effectiveCustomerData?.pincode
+        ? `Pin ${effectiveCustomerData.pincode}`
         : "Destination Hub";
       const meta = getLogicalStatusMeta(activeStatus, dest);
 
@@ -622,10 +633,10 @@ export function CameraScanClient() {
         statusText: `${meta.statusText} • ${resolvedFormatLabel}`,
         origin: "Origin Booking Hub",
         destination: dest,
-        pincode: customerDataOverride?.pincode || undefined,
-        itemCode: customerDataOverride?.itemCode || undefined,
-        recipientName: customerDataOverride?.customerName || undefined,
-        customerPhone: customerDataOverride?.formattedPhone91 || customerDataOverride?.customerPhone || undefined,
+        pincode: effectiveCustomerData?.pincode || undefined,
+        itemCode: effectiveCustomerData?.itemCode || undefined,
+        recipientName: effectiveCustomerData?.customerName || undefined,
+        customerPhone: effectiveCustomerData?.customerPhone || undefined,
         articleType: isPastedAnywayFallback
           ? "Unrecognized Format (Pasted Anyway)"
           : activeStatus === "booked"
@@ -650,11 +661,11 @@ export function CameraScanClient() {
 
       playScanBeep(true);
       setCameraScanSuccess({
-        code: customerDataOverride
-          ? `${cleanNum} • ${customerDataOverride.customerName}`
+        code: effectiveCustomerData
+          ? `${cleanNum} • ${effectiveCustomerData.customerName}`
           : cleanNum,
-        carrier: customerDataOverride
-          ? `PIN ${customerDataOverride.pincode} • ${customerDataOverride.itemCode}`
+        carrier: effectiveCustomerData
+          ? `PIN ${effectiveCustomerData.pincode} • ${effectiveCustomerData.itemCode}`
           : isPastedAnywayFallback
           ? `${chosenCourier.shortName} • Pasted Anyway`
           : chosenCourier.name,
@@ -800,10 +811,14 @@ export function CameraScanClient() {
           return true;
         }
 
-        // If scanned when no AWB is pending yet, show prompt to scan AWB first
-        playScanBeep(false);
-        setDuplicateAlert({
-          text: `Customer QR Read (${customerQr.data.customerName}, PIN ${customerQr.data.pincode}). Scan Tracking Number (AWB) 1st!`,
+        // If Customer QR is scanned first, hold it ready and pair automatically when the Tracking Number (AWB) barcode is scanned next
+        pendingCustomerQrRef.current = customerQr.data;
+        playScanBeep(true);
+        setCameraScanSuccess({
+          code: `Customer QR Ready: ${customerQr.data.customerName}`,
+          carrier: `${customerQr.data.customerPhone} • PIN ${customerQr.data.pincode} • Scan Tracking Barcode!`,
+          formatLabel: "Customer Mini QR",
+          length: trimmedRaw.length,
           ts: now,
         });
         return true;

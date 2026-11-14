@@ -93,8 +93,7 @@ import {
 import BulkLabelPrintTool from "@/components/BulkLabelPrintTool";
 import {
   decryptCustomerMiniQR,
-  validateIndianPhone,
-  validateIndianPincode,
+  strip91FromPhone,
 } from "@/lib/customerQrCrypto";
 
 export interface BulkShipment {
@@ -1109,31 +1108,20 @@ export function BulkDashboard({
       setIntakeCourier(detected.id);
     }
 
-    // Validate Indian Phone Number (+91 / 91 or 10-digit) and 6-Digit Indian Pincode when provided
-    const effectivePhone = (customerQrDataOverride?.customerPhone ?? intakePhone).trim();
-    const effectivePin = (customerQrDataOverride?.pincode ?? intakePincode).trim();
-    const effectiveName = (customerQrDataOverride?.customerName ?? recipientOverride ?? intakeRecipient).trim();
-    const effectiveItemCode = (customerQrDataOverride?.itemCode ?? intakeItemCode).trim();
-
-    if (effectivePhone) {
-      const phoneCheck = validateIndianPhone(effectivePhone);
-      if (!phoneCheck.isValid) {
-        setFlaggedInvalidCode(null);
-        setIntakeError(`Customer Phone Error: ${phoneCheck.error}`);
-        playChime(false);
-        return;
-      }
-    }
-
-    if (effectivePin) {
-      const pinCheck = validateIndianPincode(effectivePin);
-      if (!pinCheck.isValid) {
-        setFlaggedInvalidCode(null);
-        setIntakeError(`Pincode Error: ${pinCheck.error}`);
-        playChime(false);
-        return;
-      }
-    }
+    const effectivePhone = strip91FromPhone(
+      (customerQrDataOverride?.customerPhone ?? intakePhone).trim()
+    );
+    const effectivePin = (customerQrDataOverride?.pincode ?? intakePincode)
+      .replace(/\D/g, "")
+      .trim();
+    const effectiveName = (
+      customerQrDataOverride?.customerName ??
+      recipientOverride ??
+      intakeRecipient
+    ).trim();
+    const effectiveItemCode = (
+      customerQrDataOverride?.itemCode ?? intakeItemCode
+    ).trim();
 
     setFlaggedInvalidCode(null);
     setIntakeError("");
@@ -1143,12 +1131,7 @@ export function BulkDashboard({
       statusOverride ||
       (scanSource === "camera" && isReturnedSim ? "returned" : intakeStatus);
 
-    const normalizedPhoneFinal = effectivePhone
-      ? (() => {
-          const p = validateIndianPhone(effectivePhone);
-          return p.isValid ? (p.had91Prefix ? p.formattedWith91 : p.normalized10) : effectivePhone;
-        })()
-      : "";
+    const normalizedPhoneFinal = effectivePhone;
 
     const resolvedDest =
       destinationOverride?.trim() ||
@@ -7794,7 +7777,7 @@ export function BulkDashboard({
                       </div>
                     </div>
 
-                    {/* Inline Options Strip: Customer Name, Customer Number (+91/10-digit validated), Pincode (6-digit validated), Carrier, Item Code, Status */}
+                    {/* Inline Options Strip: Customer Name, Customer Phone (91 stripped automatically), Pincode, Carrier, Item Code, Status */}
                     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5 pt-1 text-xs">
                       {/* Customer Name */}
                       <input
@@ -7805,69 +7788,31 @@ export function BulkDashboard({
                         className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 focus:border-indigo-500 focus:outline-none"
                       />
 
-                      {/* Customer Number (with live Indian +91 / 10-digit validation) */}
-                      <div className="relative flex items-center">
-                        <input
-                          type="tel"
-                          placeholder="Indian Mobile (+91 or 10-digit)"
-                          value={intakePhone}
-                          onChange={(e) => {
-                            setIntakePhone(e.target.value.replace(/[^0-9+\-\s]/g, "").slice(0, 16));
-                            setIntakeError("");
-                          }}
-                          className={`w-full rounded-xl border px-3 pr-16 py-2 text-xs font-mono focus:outline-none ${
-                            intakePhone.trim()
-                              ? validateIndianPhone(intakePhone).isValid
-                                ? "border-emerald-400 bg-emerald-50/30 text-slate-900 dark:border-emerald-700 dark:bg-emerald-950/20 dark:text-slate-200"
-                                : "border-rose-400 bg-rose-50/30 text-slate-900 dark:border-rose-700 dark:bg-rose-950/20 dark:text-slate-200"
-                              : "border-slate-200 bg-slate-50 text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
-                          }`}
-                        />
-                        {intakePhone.trim() && (
-                          <span
-                            className={`absolute right-2 rounded px-1.5 py-0.5 text-[9px] font-bold pointer-events-none ${
-                              validateIndianPhone(intakePhone).isValid
-                                ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
-                                : "bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300"
-                            }`}
-                          >
-                            {validateIndianPhone(intakePhone).isValid ? "✓ IN OK" : "Invalid"}
-                          </span>
-                        )}
-                      </div>
+                      {/* Customer Phone (automatically strips 91 if entered with 91) */}
+                      <input
+                        type="tel"
+                        placeholder="Customer Phone Number"
+                        value={intakePhone}
+                        onChange={(e) => {
+                          setIntakePhone(strip91FromPhone(e.target.value));
+                          setIntakeError("");
+                        }}
+                        className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-mono text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 focus:border-indigo-500 focus:outline-none"
+                      />
 
-                      {/* Pincode (with live 6-digit Indian PIN validation) */}
-                      <div className="relative flex items-center">
-                        <input
-                          type="text"
-                          inputMode="numeric"
-                          maxLength={6}
-                          placeholder="Pincode (6-digit e.g. 682001)"
-                          value={intakePincode}
-                          onChange={(e) => {
-                            setIntakePincode(e.target.value.replace(/\D/g, "").slice(0, 6));
-                            setIntakeError("");
-                          }}
-                          className={`w-full rounded-xl border px-3 pr-16 py-2 text-xs font-mono font-bold focus:outline-none ${
-                            intakePincode.trim()
-                              ? validateIndianPincode(intakePincode).isValid
-                                ? "border-emerald-400 bg-emerald-50/30 text-slate-900 dark:border-emerald-700 dark:bg-emerald-950/20 dark:text-slate-200"
-                                : "border-rose-400 bg-rose-50/30 text-slate-900 dark:border-rose-700 dark:bg-rose-950/20 dark:text-slate-200"
-                              : "border-slate-200 bg-slate-50 text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
-                          }`}
-                        />
-                        {intakePincode.trim() && (
-                          <span
-                            className={`absolute right-2 rounded px-1.5 py-0.5 text-[9px] font-bold pointer-events-none ${
-                              validateIndianPincode(intakePincode).isValid
-                                ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
-                                : "bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300"
-                            }`}
-                          >
-                            {validateIndianPincode(intakePincode).isValid ? "✓ 6D PIN" : "Bad PIN"}
-                          </span>
-                        )}
-                      </div>
+                      {/* Pincode */}
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        maxLength={6}
+                        placeholder="Pincode (e.g. 682001)"
+                        value={intakePincode}
+                        onChange={(e) => {
+                          setIntakePincode(e.target.value.replace(/\D/g, "").slice(0, 6));
+                          setIntakeError("");
+                        }}
+                        className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-mono font-bold text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 focus:border-indigo-500 focus:outline-none"
+                      />
 
                       {/* Courier Partner Selection with Search + Letter Key Auto-Filter */}
                       <div className="relative">

@@ -26,21 +26,18 @@ import {
   ClipboardPaste,
   SlidersHorizontal,
   Building2,
-  CheckCheck,
-  Filter,
   FileText,
   RotateCcw,
   FileSpreadsheet,
   Undo2,
   X,
+  Hash,
 } from "lucide-react";
 import {
   encryptCustomerMiniQR,
   decryptCustomerMiniQR,
-  validateIndianPhone,
-  validateIndianPincode,
+  strip91FromPhone,
   generateMiniQRSvgMatrix,
-  getIndianPostalStateFromPincode,
 } from "@/lib/customerQrCrypto";
 
 export interface LabelPrintItem {
@@ -85,10 +82,10 @@ const INITIAL_SAMPLE_LABELS: LabelPrintItem[] = [
   {
     id: "lbl-1",
     customerName: "Ananya Menon",
-    customerPhone: "+91 9847012345",
+    customerPhone: "9847012345",
     pincode: "682001",
     itemCode: "ITM-KRL-104",
-    deliveryAddress: "MG Road, Ernakulam, Kochi",
+    deliveryAddress: "Flat 4B, Lotus Residency, MG Road, Ernakulam, Kochi",
     copies: 1,
     selected: true,
     printed: false,
@@ -99,7 +96,7 @@ const INITIAL_SAMPLE_LABELS: LabelPrintItem[] = [
     customerPhone: "9820156789",
     pincode: "400001",
     itemCode: "ITM-BOM-209",
-    deliveryAddress: "Fort Commercial Complex, Mumbai",
+    deliveryAddress: "2nd Floor, Fort Commercial Complex, D.N. Road, Mumbai",
     copies: 1,
     selected: true,
     printed: false,
@@ -107,10 +104,10 @@ const INITIAL_SAMPLE_LABELS: LabelPrintItem[] = [
   {
     id: "lbl-3",
     customerName: "Karthik Nair",
-    customerPhone: "919447123987",
+    customerPhone: "9447123987",
     pincode: "695001",
     itemCode: "ITM-TVM-312",
-    deliveryAddress: "Statue Junction, Thiruvananthapuram",
+    deliveryAddress: "TC 24/812, Statue Junction, MG Road, Thiruvananthapuram",
     copies: 1,
     selected: true,
     printed: false,
@@ -121,7 +118,7 @@ const INITIAL_SAMPLE_LABELS: LabelPrintItem[] = [
     customerPhone: "9840911223",
     pincode: "600001",
     itemCode: "ITM-MAA-418",
-    deliveryAddress: "Parrys Corner, George Town, Chennai",
+    deliveryAddress: "No. 18, Armenian Street, Parrys Corner, George Town, Chennai",
     copies: 1,
     selected: true,
     printed: false,
@@ -146,7 +143,7 @@ export const MiniQrSvg: React.FC<{
     );
   }
 
-  // Quiet zone of 3 modules guarantees crisp optical detection on phone & handheld cameras
+  // Quiet zone of 3 modules guarantees fast optical recognition on phone & handheld cameras
   const quietZone = 3;
   const totalSize = size + quietZone * 2;
 
@@ -180,27 +177,26 @@ export const MiniQrSvg: React.FC<{
 MiniQrSvg.displayName = "MiniQrSvg";
 
 /**
- * Formats an Indian phone number for printed label text while keeping the full
- * unmasked number encrypted inside the Office Mini QR.
+ * Formats phone number for printed label display without any 91 prefix.
  */
 function formatPhoneForLabelDisplay(
   rawPhone: string,
-  phoneCheck: ReturnType<typeof validateIndianPhone>,
   mode: "full" | "masked" | "hidden"
 ): string {
   if (mode === "hidden") return "";
-  if (!phoneCheck.isValid) return rawPhone;
-  const n10 = phoneCheck.normalized10;
-  if (mode === "masked") {
-    return `+91 ${n10.slice(0, 5)} •••${n10.slice(8)}`;
+  const clean = strip91FromPhone(rawPhone);
+  if (!clean) return "";
+  if (mode === "masked" && clean.length >= 7) {
+    return `${clean.slice(0, 5)} •••${clean.slice(-2)}`;
   }
-  return phoneCheck.had91Prefix ? phoneCheck.formattedWith91 : n10;
+  return clean;
 }
 
 /**
  * Intelligent parser for Smart Bulk Paste:
  * Supports spreadsheet rows (Tab / Pipe / Semicolon / Comma separated) AND
- * freeform WhatsApp / multi-line Indian address blocks.
+ * freeform WhatsApp / multi-line address blocks.
+ * Automatically removes 91 / +91 from phone numbers and keeps Delivery Address for the label.
  */
 function parseSmartBulkPasteText(rawText: string): LabelPrintItem[] {
   const trimmed = (rawText || "").trim();
@@ -224,7 +220,7 @@ function parseSmartBulkPasteText(rawText: string): LabelPrintItem[] {
     lines.forEach((line, idx) => {
       if (
         /customer\s*name|phone|pincode|item\s*code/i.test(line) &&
-        !/\b[1-9]\d{5}\b/.test(line)
+        !/\b\d{6}\b/.test(line)
       ) {
         return;
       }
@@ -244,15 +240,16 @@ function parseSmartBulkPasteText(rawText: string): LabelPrintItem[] {
 
       for (const part of parts) {
         const cleanDigits = part.replace(/[\s\-().+]/g, "");
-        if (!foundPin && /^[1-9]\d{5}$/.test(cleanDigits)) {
+        if (!foundPin && /^\d{6}$/.test(cleanDigits)) {
           foundPin = cleanDigits;
         } else if (
           !foundPhone &&
-          (/^[6-9]\d{9}$/.test(cleanDigits) ||
-            /^91[6-9]\d{9}$/.test(cleanDigits) ||
-            /^0[6-9]\d{9}$/.test(cleanDigits))
+          (/^\d{10}$/.test(cleanDigits) ||
+            /^91\d{10}$/.test(cleanDigits) ||
+            /^091\d{10}$/.test(cleanDigits) ||
+            /^0\d{10}$/.test(cleanDigits))
         ) {
-          foundPhone = part;
+          foundPhone = strip91FromPhone(part);
         } else if (
           !foundItem &&
           /^(?:ITM|SKU|ORD|ITEM|PRD|CODE|REF)[-_A-Z0-9]*$/i.test(part)
@@ -264,7 +261,6 @@ function parseSmartBulkPasteText(rawText: string): LabelPrintItem[] {
       }
 
       const customerName = remainingText[0] || `Customer #${idx + 1}`;
-      // Only treat secondary token as Item Code if it contains digits or hyphen/underscore (avoids mistaking cities like "Kochi" for an SKU)
       if (
         !foundItem &&
         remainingText.length >= 2 &&
@@ -296,17 +292,11 @@ function parseSmartBulkPasteText(rawText: string): LabelPrintItem[] {
     .filter(Boolean);
 
   blocks.forEach((block, idx) => {
-    const pinMatch = block.match(/\b([1-9]\d{5})\b/);
-    // Matches Indian mobiles including spaced formats like "+91 98470 12345" or "98470-12345"
-    const phoneMatch = block.match(/(?:\+?91[\s\-]?)?([6-9]\d{4}[\s\-]?\d{5})\b/);
+    const pinMatch = block.match(/\b(\d{6})\b/);
+    const phoneMatch = block.match(/(?:\+?0?91[\s\-]?)?([6-9]\d{4}[\s\-]?\d{5})\b/);
     const itemMatch = block.match(/\b((?:ITM|SKU|ORD|ITEM|PRD)[-_A-Z0-9]+)\b/i);
 
-    const extractedPhoneRaw = phoneMatch
-      ? phoneMatch[0].replace(/\s+/g, " ").trim()
-      : "";
-    const normalizedExtractedDigits = phoneMatch
-      ? phoneMatch[1].replace(/[\s\-]/g, "")
-      : "";
+    const extractedPhoneClean = phoneMatch ? strip91FromPhone(phoneMatch[0]) : "";
 
     const blockLines = block
       .split(/\r?\n/)
@@ -325,7 +315,7 @@ function parseSmartBulkPasteText(rawText: string): LabelPrintItem[] {
       .slice(1)
       .filter((l) => {
         const lineDigits = l.replace(/[\s\-+]/g, "");
-        if (normalizedExtractedDigits && lineDigits.includes(normalizedExtractedDigits)) {
+        if (extractedPhoneClean && lineDigits.includes(extractedPhoneClean)) {
           return false;
         }
         if (itemMatch && l.toUpperCase() === itemMatch[1].toUpperCase()) {
@@ -340,10 +330,10 @@ function parseSmartBulkPasteText(rawText: string): LabelPrintItem[] {
     results.push({
       id: `lbl-wa-${Date.now()}-${idx}`,
       customerName,
-      customerPhone: extractedPhoneRaw,
+      customerPhone: extractedPhoneClean,
       pincode: pinMatch ? pinMatch[1] : "",
       itemCode: itemMatch ? itemMatch[1].toUpperCase() : `ITM-${101 + idx}`,
-      deliveryAddress: addressLines.join(", ").slice(0, 96) || undefined,
+      deliveryAddress: addressLines.join(", ").slice(0, 140) || undefined,
       copies: 1,
       selected: true,
       printed: false,
@@ -357,7 +347,7 @@ export default function BulkLabelPrintTool({
   shipments = [],
   defaultOfficeName = "TRACKFLOW DISPATCH HUB",
   defaultOfficeHub = "Kochi GPO Hub (682001)",
-  defaultOfficePhone = "+91 9847000000",
+  defaultOfficePhone = "9847000000",
   onSimulateScanInIntake,
 }: BulkLabelPrintToolProps) {
   const [labels, setLabels] = useState<LabelPrintItem[]>(INITIAL_SAMPLE_LABELS);
@@ -379,6 +369,7 @@ export default function BulkLabelPrintTool({
   const [formPincode, setFormPincode] = useState("");
   const [formItemCode, setFormItemCode] = useState("");
   const [formAddress, setFormAddress] = useState("");
+  const [formAwbHint, setFormAwbHint] = useState("");
   const [formCopies, setFormCopies] = useState(1);
   const [formError, setFormError] = useState<string | null>(null);
 
@@ -394,12 +385,14 @@ export default function BulkLabelPrintTool({
   const [showReturnAddressOnLabel, setShowReturnAddressOnLabel] = useState(true);
   const [senderOfficeTitle, setSenderOfficeTitle] = useState(defaultOfficeName);
   const [senderOfficeHub, setSenderOfficeHub] = useState(defaultOfficeHub);
-  const [senderOfficePhone, setSenderOfficePhone] = useState(defaultOfficePhone);
+  const [senderOfficePhone, setSenderOfficePhone] = useState(
+    strip91FromPhone(defaultOfficePhone) || defaultOfficePhone
+  );
 
   // Queue Filter & Search
-  const [queueFilter, setQueueFilter] = useState<
-    "all" | "valid" | "invalid" | "unprinted" | "printed"
-  >("all");
+  const [queueFilter, setQueueFilter] = useState<"all" | "unprinted" | "printed">(
+    "all"
+  );
   const [searchQuery, setSearchQuery] = useState("");
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [statusBanner, setStatusBanner] = useState<{
@@ -408,7 +401,9 @@ export default function BulkLabelPrintTool({
     canUndo?: boolean;
   } | null>(null);
   const [inspectItemId, setInspectItemId] = useState<string | null>(null);
-  const [singlePrintTargetId, setSinglePrintTargetId] = useState<string | null>(null);
+  const [singlePrintTargetId, setSinglePrintTargetId] = useState<string | null>(
+    null
+  );
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const nameInputRef = useRef<HTMLInputElement | null>(null);
@@ -419,7 +414,7 @@ export default function BulkLabelPrintTool({
   const activePrintIframeRef = useRef<HTMLIFrameElement | null>(null);
   const singlePrintHandledRef = useRef<string | null>(null);
 
-  // Load persisted queue & preferences on mount (deferred via timer to keep SSR deterministic and avoid clobbering storage)
+  // Load persisted queue & preferences on mount (and strip any legacy 91 prefixes automatically)
   useEffect(() => {
     const timer = setTimeout(() => {
       try {
@@ -427,7 +422,12 @@ export default function BulkLabelPrintTool({
         if (savedQueue !== null) {
           const parsed = JSON.parse(savedQueue);
           if (Array.isArray(parsed)) {
-            setLabels(parsed);
+            setLabels(
+              parsed.map((item: LabelPrintItem) => ({
+                ...item,
+                customerPhone: strip91FromPhone(item.customerPhone || ""),
+              }))
+            );
           }
         }
         const savedPrefs = localStorage.getItem(STORAGE_PREFS_KEY);
@@ -441,7 +441,8 @@ export default function BulkLabelPrintTool({
             setShowReturnAddressOnLabel(prefs.showReturnAddressOnLabel);
           if (prefs.senderOfficeTitle) setSenderOfficeTitle(prefs.senderOfficeTitle);
           if (prefs.senderOfficeHub) setSenderOfficeHub(prefs.senderOfficeHub);
-          if (prefs.senderOfficePhone) setSenderOfficePhone(prefs.senderOfficePhone);
+          if (prefs.senderOfficePhone)
+            setSenderOfficePhone(strip91FromPhone(prefs.senderOfficePhone));
         }
       } catch {
         // ignore storage errors
@@ -507,28 +508,14 @@ export default function BulkLabelPrintTool({
     (text: string, type: "success" | "warn" = "success", canUndo = false) => {
       if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
       setStatusBanner({ type, text, canUndo });
-      toastTimerRef.current = setTimeout(() => {
-        setStatusBanner(null);
-      }, canUndo ? 8000 : 4500);
+      toastTimerRef.current = setTimeout(
+        () => {
+          setStatusBanner(null);
+        },
+        canUndo ? 8000 : 4500
+      );
     },
     []
-  );
-
-  // Live validation of Quick Add inputs
-  const formPhoneValidation = useMemo(
-    () => (formPhone.trim() ? validateIndianPhone(formPhone) : null),
-    [formPhone]
-  );
-  const formPincodeValidation = useMemo(
-    () => (formPincode.trim() ? validateIndianPincode(formPincode) : null),
-    [formPincode]
-  );
-  const formPinState = useMemo(
-    () =>
-      formPincodeValidation?.isValid
-        ? getIndianPostalStateFromPincode(formPincodeValidation.normalized)
-        : "",
-    [formPincodeValidation]
   );
 
   const handleAddLabel = (e: React.FormEvent) => {
@@ -541,15 +528,15 @@ export default function BulkLabelPrintTool({
       return;
     }
 
-    const phoneRes = validateIndianPhone(formPhone);
-    if (!phoneRes.isValid) {
-      setFormError(phoneRes.error || "Invalid Indian mobile number.");
+    const cleanPhone = strip91FromPhone(formPhone);
+    if (!cleanPhone) {
+      setFormError("Please enter Customer Phone Number.");
       return;
     }
 
-    const pinRes = validateIndianPincode(formPincode);
-    if (!pinRes.isValid) {
-      setFormError(pinRes.error || "Invalid 6-digit Indian Pincode.");
+    const cleanPin = formPincode.replace(/\D/g, "").trim();
+    if (!cleanPin) {
+      setFormError("Please enter Pincode.");
       return;
     }
 
@@ -560,12 +547,11 @@ export default function BulkLabelPrintTool({
     const newItem: LabelPrintItem = {
       id: `lbl-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       customerName: cleanName,
-      customerPhone: phoneRes.had91Prefix
-        ? phoneRes.formattedWith91
-        : phoneRes.normalized10,
-      pincode: pinRes.normalized,
+      customerPhone: cleanPhone,
+      pincode: cleanPin,
       itemCode: cleanItem,
       deliveryAddress: formAddress.trim() || undefined,
+      awbHint: formAwbHint.trim().toUpperCase() || undefined,
       copies: Math.max(1, Math.min(50, Number(formCopies) || 1)),
       selected: true,
       printed: false,
@@ -578,8 +564,9 @@ export default function BulkLabelPrintTool({
     setFormPincode("");
     setFormItemCode("");
     setFormAddress("");
+    setFormAwbHint("");
     setFormCopies(1);
-    showToast(`Added "${cleanName}" (${pinRes.normalized}) to label queue.`);
+    showToast(`Added "${cleanName}" to label queue.`);
     nameInputRef.current?.focus();
   };
 
@@ -589,6 +576,7 @@ export default function BulkLabelPrintTool({
     setFormPincode("");
     setFormItemCode("");
     setFormAddress("");
+    setFormAwbHint("");
     setFormCopies(1);
     setFormError(null);
     nameInputRef.current?.focus();
@@ -606,19 +594,7 @@ export default function BulkLabelPrintTool({
     setLabels((prev) => [...parsed, ...prev]);
     setSmartPasteText("");
     setActiveIntakeTab("single");
-    const invalidParsed = parsed.filter(
-      (p) =>
-        !validateIndianPhone(p.customerPhone).isValid ||
-        !validateIndianPincode(p.pincode).isValid
-    ).length;
-    if (invalidParsed > 0) {
-      showToast(
-        `Added ${parsed.length} row(s) (${invalidParsed} need phone/pincode review).`,
-        "warn"
-      );
-    } else {
-      showToast(`Parsed & added ${parsed.length} validated customer label(s).`);
-    }
+    showToast(`Added ${parsed.length} customer label(s) (91 stripped automatically).`);
   };
 
   const handleUpdateField = (
@@ -627,43 +603,19 @@ export default function BulkLabelPrintTool({
     value: string | number | boolean
   ) => {
     setLabels((prev) =>
-      prev.map((item) => (item.id === id ? { ...item, [field]: value } : item))
+      prev.map((item) => {
+        if (item.id !== id) return item;
+        if (field === "customerPhone" && typeof value === "string") {
+          return { ...item, customerPhone: strip91FromPhone(value) };
+        }
+        return { ...item, [field]: value };
+      })
     );
   };
 
   const handleRemoveLabel = (id: string) => {
     setLabels((prev) => prev.filter((item) => item.id !== id));
     if (inspectItemId === id) setInspectItemId(null);
-  };
-
-  const handleNormalizeAllPhones = () => {
-    let fixedCount = 0;
-    setLabels((prev) =>
-      prev.map((item) => {
-        const check = validateIndianPhone(item.customerPhone);
-        if (check.isValid) {
-          fixedCount++;
-          return { ...item, customerPhone: check.formattedWith91 };
-        }
-        return item;
-      })
-    );
-    showToast(
-      `Formatted ${fixedCount} Indian mobile number(s) to standard +91 format.`
-    );
-  };
-
-  const handleSelectOnlyValid = () => {
-    setLabels((prev) =>
-      prev.map((item) => {
-        const isOk =
-          validateIndianPhone(item.customerPhone).isValid &&
-          validateIndianPincode(item.pincode).isValid &&
-          Boolean(item.customerName.trim());
-        return { ...item, selected: isOk };
-      })
-    );
-    showToast("Selected only validated Indian Phone & 6-digit Pincode rows.");
   };
 
   const handleClearQueue = () => {
@@ -705,7 +657,7 @@ export default function BulkLabelPrintTool({
     shipments.forEach((s, idx) => {
       if (!s.recipientName && !s.customerPhone && !s.pincode && !s.itemCode) return;
       const name = s.recipientName || `Customer (${s.trackingNumber})`;
-      const pin = s.pincode && /^\d{6}$/.test(s.pincode) ? s.pincode : "";
+      const pin = (s.pincode || "").replace(/\D/g, "");
       const itemCode = (
         s.itemCode || `ITM-${s.trackingNumber.slice(-4)}`
       ).toUpperCase();
@@ -716,7 +668,7 @@ export default function BulkLabelPrintTool({
       validFromShipments.push({
         id: `lbl-ship-${s.id}-${idx}-${Date.now()}`,
         customerName: name,
-        customerPhone: s.customerPhone || "",
+        customerPhone: strip91FromPhone(s.customerPhone || ""),
         pincode: pin,
         itemCode,
         deliveryAddress: s.destination || undefined,
@@ -738,7 +690,7 @@ export default function BulkLabelPrintTool({
     setUndoQueueSnapshot(null);
     setLabels((prev) => [...validFromShipments, ...prev]);
     showToast(
-      `Imported ${validFromShipments.length} new customer label(s) from active consignments.`
+      `Imported ${validFromShipments.length} customer label(s) from active consignments.`
     );
   };
 
@@ -746,10 +698,11 @@ export default function BulkLabelPrintTool({
     const sampleRows = [
       {
         "Customer Name": "Ananya Menon",
-        "Customer Number": "+91 9847012345",
+        "Customer Number": "9847012345",
         Pincode: "682001",
         "Item Code": "ITM-KRL-104",
-        "Delivery Address": "MG Road, Ernakulam, Kochi",
+        "Delivery Address": "Flat 4B, Lotus Residency, MG Road, Ernakulam, Kochi",
+        "Tracking Number (Optional)": "",
         Copies: 1,
       },
       {
@@ -757,15 +710,17 @@ export default function BulkLabelPrintTool({
         "Customer Number": "9845098765",
         Pincode: "560001",
         "Item Code": "ITM-BLR-502",
-        "Delivery Address": "Brigade Road, Bengaluru",
+        "Delivery Address": "14 Brigade Road, Ashok Nagar, Bengaluru",
+        "Tracking Number (Optional)": "",
         Copies: 2,
       },
       {
         "Customer Name": "Meera Krishnan",
-        "Customer Number": "919446011223",
+        "Customer Number": "9446011223",
         Pincode: "673001",
         "Item Code": "ITM-CLT-881",
-        "Delivery Address": "SM Street, Kozhikode",
+        "Delivery Address": "SM Street, Palayam, Kozhikode",
+        "Tracking Number (Optional)": "B4000211866",
         Copies: 1,
       },
     ];
@@ -819,16 +774,18 @@ export default function BulkLabelPrintTool({
             "city",
             "location",
           ]);
+          const awbHint = getVal(["trackingnumber", "awb", "consignment", "tracking"]);
           const copiesRaw = getVal(["copies", "qty", "quantity"]);
 
-          if (customerName || customerPhone || pincode) {
+          if (customerName || customerPhone || pincode || deliveryAddress) {
             imported.push({
               id: `lbl-imp-${Date.now()}-${index}`,
               customerName: customerName || `Customer #${index + 1}`,
-              customerPhone: customerPhone || "",
-              pincode: pincode.replace(/\D/g, "").slice(0, 6),
+              customerPhone: strip91FromPhone(customerPhone),
+              pincode: pincode.replace(/\D/g, ""),
               itemCode: (itemCode || `ITM-${100 + index}`).toUpperCase(),
               deliveryAddress: deliveryAddress || undefined,
+              awbHint: awbHint ? awbHint.toUpperCase() : undefined,
               copies: Math.max(1, Math.min(50, parseInt(copiesRaw, 10) || 1)),
               selected: true,
               printed: false,
@@ -840,11 +797,11 @@ export default function BulkLabelPrintTool({
           setUndoQueueSnapshot(null);
           setLabels((prev) => [...imported, ...prev]);
           showToast(
-            `Loaded ${imported.length} customer label row(s) from ${file.name}.`
+            `Loaded ${imported.length} customer label row(s) from ${file.name} (91 stripped automatically).`
           );
         } else {
           setFormError(
-            "Could not find Customer Name, Number, or Pincode columns in uploaded file."
+            "Could not find Customer Name, Number, Address, or Pincode columns in uploaded file."
           );
         }
       } catch {
@@ -857,49 +814,39 @@ export default function BulkLabelPrintTool({
     e.target.value = "";
   };
 
-  // Enrich each queue item with validation & encrypted QR once
+  // Enrich each queue item with clean 10-digit phone & encrypted QR (QR contains ONLY Name, Phone without 91, Pincode, Item Code — NO address)
   const enrichedLabels = useMemo(() => {
     return labels.map((l) => {
-      const phoneCheck = validateIndianPhone(l.customerPhone);
-      const pinCheck = validateIndianPincode(l.pincode);
-      const isRowValid =
-        phoneCheck.isValid && pinCheck.isValid && Boolean(l.customerName.trim());
-      const stateName = pinCheck.isValid
-        ? getIndianPostalStateFromPincode(pinCheck.normalized)
-        : "";
+      const cleanPhone = strip91FromPhone(l.customerPhone);
+      const cleanPin = (l.pincode || "").replace(/\D/g, "");
       const encryptedQr = encryptCustomerMiniQR({
         customerName: l.customerName,
-        customerPhone: l.customerPhone,
-        pincode: l.pincode,
+        customerPhone: cleanPhone,
+        pincode: cleanPin,
         itemCode: l.itemCode,
       });
       return {
         ...l,
-        phoneCheck,
-        pinCheck,
-        isRowValid,
-        stateName,
+        customerPhone: cleanPhone,
+        pincode: cleanPin,
         encryptedQr,
       };
     });
   }, [labels]);
 
-  // Export Queue with Encrypted TFQR1 Payloads for external label printers
+  // Export Queue with Encrypted TFQR1 Payloads
   const handleExportQueueExcel = () => {
     if (enrichedLabels.length === 0) return;
     const rows = enrichedLabels.map((item) => ({
       "Customer Name": item.customerName,
-      "Indian Mobile": item.phoneCheck.isValid
-        ? item.phoneCheck.formattedWith91
-        : item.customerPhone,
+      "Customer Phone": item.customerPhone,
       Pincode: item.pincode,
-      State: item.stateName || "",
       "Item Code": item.itemCode,
-      "Delivery Address": item.deliveryAddress || "",
+      "Delivery Address (Label Only)": item.deliveryAddress || "",
+      "Tracking Number (Optional)": item.awbHint || "",
       Copies: item.copies,
-      Validation: item.isRowValid ? "Valid" : "Needs Fix",
       Printed: item.printed ? "Yes" : "No",
-      "Encrypted Mini QR (TFQR1)": item.encryptedQr,
+      "Encrypted Mini QR (TFQR1 - No Address)": item.encryptedQr,
     }));
     const ws = XLSX.utils.json_to_sheet(rows);
     const wb = XLSX.utils.book_new();
@@ -908,15 +855,13 @@ export default function BulkLabelPrintTool({
       wb,
       `TrackFlow_Labels_Export_${new Date().toISOString().slice(0, 10)}.xlsx`
     );
-    showToast(`Exported ${rows.length} label row(s) with Encrypted TFQR1 codes.`);
+    showToast(`Exported ${rows.length} label row(s) to Excel.`);
   };
 
   // Filtered queue list for table view
   const filteredLabels = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     return enrichedLabels.filter((l) => {
-      if (queueFilter === "valid" && !l.isRowValid) return false;
-      if (queueFilter === "invalid" && l.isRowValid) return false;
       if (queueFilter === "unprinted" && l.printed) return false;
       if (queueFilter === "printed" && !l.printed) return false;
 
@@ -927,7 +872,7 @@ export default function BulkLabelPrintTool({
         l.pincode.toLowerCase().includes(q) ||
         l.itemCode.toLowerCase().includes(q) ||
         (l.deliveryAddress && l.deliveryAddress.toLowerCase().includes(q)) ||
-        l.stateName.toLowerCase().includes(q)
+        (l.awbHint && l.awbHint.toLowerCase().includes(q))
       );
     });
   }, [enrichedLabels, queueFilter, searchQuery]);
@@ -955,22 +900,9 @@ export default function BulkLabelPrintTool({
     return out;
   }, [enrichedLabels]);
 
-  const totalValidInQueue = useMemo(
-    () => enrichedLabels.filter((l) => l.isRowValid).length,
-    [enrichedLabels]
-  );
-  const totalInvalidInQueue = enrichedLabels.length - totalValidInQueue;
   const totalPrintedInQueue = useMemo(
     () => enrichedLabels.filter((l) => l.printed).length,
     [enrichedLabels]
-  );
-  const selectedInvalidRowCount = useMemo(
-    () => enrichedLabels.filter((l) => l.selected && !l.isRowValid).length,
-    [enrichedLabels]
-  );
-  const printableValidCount = useMemo(
-    () => printableExpandedLabels.filter((l) => l.isRowValid).length,
-    [printableExpandedLabels]
   );
 
   const handleToggleSelectAllVisible = () => {
@@ -993,7 +925,6 @@ export default function BulkLabelPrintTool({
     ) => {
       if (typeof document === "undefined" || totalCount === 0) return;
 
-      // Remove any previous print iframe if still present
       if (
         activePrintIframeRef.current &&
         document.body.contains(activePrintIframeRef.current)
@@ -1123,17 +1054,18 @@ export default function BulkLabelPrintTool({
                 word-break: break-word;
               }
               .address-line {
-                font-size: 9.5px;
+                font-size: ${labelLayout === "security_4col" ? "9px" : "10px"};
                 font-weight: 600;
-                color: #334155;
-                margin-top: 2px;
-                line-height: 1.25;
+                color: #1e293b;
+                margin-top: 3px;
+                line-height: 1.3;
+                word-break: break-word;
               }
               .pin-phone-row {
                 display: flex;
                 flex-wrap: wrap;
                 align-items: center;
-                gap: 5px;
+                gap: 6px;
                 margin-top: 5px;
               }
               .pin-box {
@@ -1146,14 +1078,9 @@ export default function BulkLabelPrintTool({
                 color: #0f172a;
                 background: #f8fafc;
               }
-              .state-pill {
-                font-size: 9px;
-                font-weight: 800;
-                color: #334155;
-              }
               .phone-line {
                 font-family: monospace;
-                font-size: 10px;
+                font-size: 10.5px;
                 font-weight: 800;
                 color: #0f172a;
                 margin-top: 3px;
@@ -1227,7 +1154,6 @@ export default function BulkLabelPrintTool({
         setLabels((prev) =>
           prev.map((l) => (printedIds.has(l.id) ? { ...l, printed: true } : l))
         );
-        // Generous fallback cleanup in case browser does not dispatch afterprint inside iframe
         setTimeout(cleanup, 60000);
       }, 160);
     },
@@ -1245,35 +1171,10 @@ export default function BulkLabelPrintTool({
     printMarkupInIframe(sheetEl.innerHTML, printableExpandedLabels.length, selectedIds);
   };
 
-  // Print ONLY valid rows synchronously using cloned DOM node, and deselect invalid rows in state
-  const handleSelectValidAndPrint = () => {
-    const sheetEl = printableSheetRef.current;
-    if (!sheetEl || printableValidCount === 0) {
-      showToast("No valid selected labels to print. Please fix invalid rows first.", "warn");
-      return;
-    }
-    const validIds = new Set(
-      enrichedLabels.filter((l) => l.selected && l.isRowValid).map((l) => l.id)
-    );
-    const cloned = sheetEl.cloneNode(true) as HTMLDivElement;
-    cloned.querySelectorAll('[data-valid="0"]').forEach((node) => node.remove());
-
-    setLabels((prev) =>
-      prev.map((item) => {
-        const isOk =
-          validateIndianPhone(item.customerPhone).isValid &&
-          validateIndianPincode(item.pincode).isValid &&
-          Boolean(item.customerName.trim());
-        return item.selected ? { ...item, selected: isOk } : item;
-      })
-    );
-
-    printMarkupInIframe(cloned.innerHTML, printableValidCount, validIds);
-  };
-
   // Print a single row via isolated hidden container (zero flicker or selection mutation)
   useEffect(() => {
-    if (!singlePrintTargetId || singlePrintHandledRef.current === singlePrintTargetId) return;
+    if (!singlePrintTargetId || singlePrintHandledRef.current === singlePrintTargetId)
+      return;
     const targetItem = enrichedLabels.find((l) => l.id === singlePrintTargetId);
     const singleSheet = singlePrintSheetRef.current;
     if (targetItem && singleSheet) {
@@ -1294,13 +1195,6 @@ export default function BulkLabelPrintTool({
   const handlePrintSingleRow = (targetId: string) => {
     const targetItem = enrichedLabels.find((l) => l.id === targetId);
     if (!targetItem) return;
-    if (!targetItem.isRowValid) {
-      showToast(
-        `Cannot quick-print "${targetItem.customerName}": invalid Indian mobile or 6-digit pincode.`,
-        "warn"
-      );
-      return;
-    }
     singlePrintHandledRef.current = null;
     setSinglePrintTargetId(targetId);
   };
@@ -1327,20 +1221,20 @@ export default function BulkLabelPrintTool({
             </div>
             <div>
               <h2 className="text-base sm:text-lg font-extrabold tracking-tight text-slate-900 dark:text-white">
-                Bulk Label Print Studio
+                Bulk Label Print &amp; Customer QR Studio
               </h2>
               <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-slate-500 dark:text-slate-400">
                 <span className="inline-flex items-center gap-1 font-semibold text-emerald-700 dark:text-emerald-400">
                   <Lock className="h-3 w-3" />
-                  TFQR1 Encrypted Mini QR
+                  Mini QR: Name, Phone, Pincode &amp; Item Code
                 </span>
                 <span aria-hidden="true">·</span>
                 <span>
-                  Name, Indian Mobile (+91 / 10-Digit), 6-Digit PIN &amp; Item Code
+                  Full Delivery Address printed on label (excluded from QR for instant scan)
                 </span>
                 <span aria-hidden="true">·</span>
                 <span className="font-mono tabular-nums font-semibold text-slate-700 dark:text-slate-300">
-                  {totalValidInQueue}/{enrichedLabels.length} ready
+                  {enrichedLabels.length} in queue
                 </span>
               </div>
             </div>
@@ -1498,15 +1392,7 @@ export default function BulkLabelPrintTool({
           </div>
 
           <span className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
-            Validates Indian Mobile (
-            <code className="font-mono font-bold text-indigo-600 dark:text-indigo-400">
-              +91
-            </code>{" "}
-            or{" "}
-            <code className="font-mono font-bold text-indigo-600 dark:text-indigo-400">
-              10-digit
-            </code>
-            ) &amp; 6-Digit PIN with State lookup
+            Scan Tracking Barcode + Label Mini QR at DTDC / India Post booking time to auto-match customer details
           </span>
         </div>
 
@@ -1533,64 +1419,30 @@ export default function BulkLabelPrintTool({
                 />
               </div>
 
-              {/* Indian Mobile (+91 or 10-digit) */}
+              {/* Customer Phone (automatically strips 91 if pasted/typed with 91) */}
               <div className="lg:col-span-3 space-y-1">
-                <div className="flex items-center justify-between gap-1">
-                  <label className="text-[11px] font-bold text-slate-600 dark:text-slate-400 flex items-center gap-1">
-                    <Phone className="h-3 w-3 text-slate-400" />
-                    <span>Indian Mobile *</span>
-                  </label>
-                  {formPhoneValidation && (
-                    <span
-                      className={`text-[10px] font-mono tabular-nums font-bold truncate ${
-                        formPhoneValidation.isValid
-                          ? "text-emerald-600 dark:text-emerald-400"
-                          : "text-rose-600 dark:text-rose-400"
-                      }`}
-                    >
-                      {formPhoneValidation.isValid
-                        ? `✓ ${formPhoneValidation.formattedWith91}`
-                        : "Invalid"}
-                    </span>
-                  )}
-                </div>
+                <label className="text-[11px] font-bold text-slate-600 dark:text-slate-400 flex items-center gap-1">
+                  <Phone className="h-3 w-3 text-slate-400" />
+                  <span>Phone Number *</span>
+                </label>
                 <input
                   type="tel"
                   value={formPhone}
                   onChange={(e) => {
-                    setFormPhone(e.target.value.replace(/[^0-9+\-\s]/g, "").slice(0, 16));
+                    setFormPhone(strip91FromPhone(e.target.value));
                     setFormError(null);
                   }}
-                  placeholder="+91 9847012345 or 9847012345"
-                  className={`w-full rounded-xl border px-3 py-2 text-xs font-mono tabular-nums font-semibold focus:outline-none ${
-                    formPhoneValidation
-                      ? formPhoneValidation.isValid
-                        ? "border-emerald-400 bg-emerald-50/30 text-slate-900 dark:border-emerald-700 dark:bg-emerald-950/20 dark:text-white"
-                        : "border-rose-400 bg-rose-50/30 text-slate-900 dark:border-rose-700 dark:bg-rose-950/20 dark:text-white"
-                      : "border-slate-200 bg-slate-50 text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-white"
-                  }`}
+                  placeholder="9847012345"
+                  className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-mono tabular-nums font-semibold text-slate-900 focus:border-indigo-600 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
                 />
               </div>
 
-              {/* 6-Digit Indian Pincode + Live State Badge */}
+              {/* Pincode */}
               <div className="lg:col-span-2 space-y-1">
-                <div className="flex items-center justify-between gap-1">
-                  <label className="text-[11px] font-bold text-slate-600 dark:text-slate-400 flex items-center gap-1">
-                    <MapPin className="h-3 w-3 text-slate-400" />
-                    <span>Pincode *</span>
-                  </label>
-                  {formPincodeValidation && (
-                    <span
-                      className={`text-[10px] font-bold truncate max-w-[95px] ${
-                        formPincodeValidation.isValid
-                          ? "text-emerald-600 dark:text-emerald-400"
-                          : "text-rose-600 dark:text-rose-400"
-                      }`}
-                    >
-                      {formPincodeValidation.isValid ? formPinState : "6 digits"}
-                    </span>
-                  )}
-                </div>
+                <label className="text-[11px] font-bold text-slate-600 dark:text-slate-400 flex items-center gap-1">
+                  <MapPin className="h-3 w-3 text-slate-400" />
+                  <span>Pincode *</span>
+                </label>
                 <input
                   type="text"
                   maxLength={6}
@@ -1600,13 +1452,7 @@ export default function BulkLabelPrintTool({
                     setFormError(null);
                   }}
                   placeholder="682001"
-                  className={`w-full rounded-xl border px-3 py-2 text-xs font-mono tabular-nums font-bold focus:outline-none ${
-                    formPincodeValidation
-                      ? formPincodeValidation.isValid
-                        ? "border-emerald-400 bg-emerald-50/30 text-slate-900 dark:border-emerald-700 dark:bg-emerald-950/20 dark:text-white"
-                        : "border-rose-400 bg-rose-50/30 text-slate-900 dark:border-rose-700 dark:bg-rose-950/20 dark:text-white"
-                      : "border-slate-200 bg-slate-50 text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-white"
-                  }`}
+                  className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-mono tabular-nums font-bold text-slate-900 focus:border-indigo-600 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
                 />
               </div>
 
@@ -1623,7 +1469,7 @@ export default function BulkLabelPrintTool({
                     setFormItemCode(e.target.value.toUpperCase());
                     setFormError(null);
                   }}
-                  placeholder="Auto or ITM-1042"
+                  placeholder="Auto or ITM-104"
                   className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-mono font-semibold uppercase text-slate-900 focus:border-indigo-600 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
                 />
               </div>
@@ -1640,7 +1486,9 @@ export default function BulkLabelPrintTool({
                     max={50}
                     value={formCopies}
                     onChange={(e) =>
-                      setFormCopies(Math.max(1, Math.min(50, parseInt(e.target.value, 10) || 1)))
+                      setFormCopies(
+                        Math.max(1, Math.min(50, parseInt(e.target.value, 10) || 1))
+                      )
                     }
                     className="w-full rounded-xl border border-slate-200 bg-slate-50 px-2 py-2 text-xs font-mono tabular-nums font-bold text-center text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-white"
                   />
@@ -1656,27 +1504,53 @@ export default function BulkLabelPrintTool({
               </div>
             </div>
 
-            {/* Optional Delivery Address Line */}
-            <div className="flex flex-col sm:flex-row sm:items-center gap-2 pt-1">
-              <span className="text-[11px] font-bold text-slate-500 dark:text-slate-400 shrink-0">
-                Delivery Address (Optional):
-              </span>
-              <input
-                type="text"
-                value={formAddress}
-                onChange={(e) => setFormAddress(e.target.value)}
-                placeholder="Street, Post Office, City / Landmark (Mini QR stays compact with Name, Phone, Pincode & Item Code)"
-                className="flex-1 rounded-xl border border-slate-200 bg-slate-50/70 px-3 py-1.5 text-xs text-slate-800 focus:border-indigo-500 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800/70 dark:text-slate-200"
-              />
-              {(formName || formPhone || formPincode || formItemCode || formAddress) && (
-                <button
-                  type="button"
-                  onClick={handleResetQuickAddForm}
-                  className="text-[11px] font-bold text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200 px-2 py-1 cursor-pointer shrink-0"
-                >
-                  Reset
-                </button>
-              )}
+            {/* Second Row: Full Delivery Address (for Label) + Optional Pre-Booked Tracking Number */}
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 pt-1">
+              <div className="lg:col-span-8 space-y-1">
+                <label className="text-[11px] font-bold text-slate-600 dark:text-slate-400 flex items-center justify-between">
+                  <span>Delivery Address (Printed on Parcel Label)</span>
+                  <span className="text-[10px] font-normal text-slate-400">
+                    Not stored in Mini QR
+                  </span>
+                </label>
+                <input
+                  type="text"
+                  value={formAddress}
+                  onChange={(e) => setFormAddress(e.target.value)}
+                  placeholder="House / Flat, Street, Post Office, City, Landmark"
+                  className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-900 focus:border-indigo-600 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
+                />
+              </div>
+
+              <div className="lg:col-span-4 space-y-1">
+                <div className="flex items-center justify-between">
+                  <label className="text-[11px] font-bold text-slate-600 dark:text-slate-400 flex items-center gap-1">
+                    <Hash className="h-3 w-3 text-slate-400" />
+                    <span>Tracking No. (Optional — if received earlier)</span>
+                  </label>
+                  {(formName ||
+                    formPhone ||
+                    formPincode ||
+                    formItemCode ||
+                    formAddress ||
+                    formAwbHint) && (
+                    <button
+                      type="button"
+                      onClick={handleResetQuickAddForm}
+                      className="text-[10px] font-bold text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200 cursor-pointer"
+                    >
+                      Reset
+                    </button>
+                  )}
+                </div>
+                <input
+                  type="text"
+                  value={formAwbHint}
+                  onChange={(e) => setFormAwbHint(e.target.value.toUpperCase())}
+                  placeholder="Leave blank if booking later at DTDC / India Post"
+                  className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-mono uppercase text-slate-900 focus:border-indigo-600 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
+                />
+              </div>
             </div>
           </form>
         )}
@@ -1690,13 +1564,13 @@ export default function BulkLabelPrintTool({
                 <code className="font-mono text-indigo-600 dark:text-indigo-400">
                   Name | Phone | Pincode | ItemCode | Address
                 </code>
-                ) or WhatsApp customer blocks separated by blank lines:
+                ) or WhatsApp customer blocks (any <code className="font-mono">91</code> prefix is removed automatically):
               </p>
               <button
                 type="button"
                 onClick={() =>
                   setSmartPasteText(
-                    `Arjun Nair | +91 9847112233 | 682016 | ITM-KOC-701 | Panampilly Nagar, Kochi\nDivya Menon | 9447889900 | 695014 | ITM-TVM-702 | Vazhuthacaud, Trivandrum\nSuresh Babu | 919840223344 | 600017 | ITM-MAA-703 | T Nagar, Chennai`
+                    `Arjun Nair | 9847112233 | 682016 | ITM-KOC-701 | Panampilly Nagar, Ernakulam, Kochi\nDivya Menon | 9447889900 | 695014 | ITM-TVM-702 | Vazhuthacaud, Thiruvananthapuram\nSuresh Babu | 9840223344 | 600017 | ITM-MAA-703 | Pondy Bazaar, T Nagar, Chennai`
                   )
                 }
                 className="text-[11px] font-bold text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer shrink-0"
@@ -1712,7 +1586,7 @@ export default function BulkLabelPrintTool({
                 setSmartPasteText(e.target.value);
                 setFormError(null);
               }}
-              placeholder={`Example 1 (Spreadsheet / Pipe / Comma lines):\nAnanya Menon, +91 9847012345, 682001, ITM-104, MG Road Kochi\n\nExample 2 (WhatsApp Address Block):\nRahul Sharma\nFort Commercial Complex, Mumbai\nPin: 400001\nPh: +91 98201 56789\nItem: ITM-209`}
+              placeholder={`Example 1 (Spreadsheet / Pipe / Comma lines):\nAnanya Menon, 9847012345, 682001, ITM-104, MG Road Ernakulam Kochi\n\nExample 2 (WhatsApp Address Block):\nRahul Sharma\nFort Commercial Complex, Mumbai\nPin: 400001\nPh: 9820156789\nItem: ITM-209`}
               className="w-full rounded-2xl border border-slate-200 bg-slate-50 p-3.5 font-mono text-xs text-slate-900 focus:border-indigo-600 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
             />
 
@@ -1776,8 +1650,10 @@ export default function BulkLabelPrintTool({
                 <input
                   type="text"
                   value={senderOfficePhone}
-                  onChange={(e) => setSenderOfficePhone(e.target.value)}
-                  placeholder="+91 9847000000"
+                  onChange={(e) =>
+                    setSenderOfficePhone(strip91FromPhone(e.target.value))
+                  }
+                  placeholder="9847000000"
                   className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-mono tabular-nums font-semibold text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-white"
                 />
               </div>
@@ -1785,14 +1661,14 @@ export default function BulkLabelPrintTool({
 
             <div className="flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400">
               <span>
-                Printed in the label header and Return Hub footer (shown on 2-Col and Thermal layouts).
+                Printed in the label header and Return Hub footer.
               </span>
               <button
                 type="button"
                 onClick={() => {
                   setSenderOfficeTitle(defaultOfficeName);
                   setSenderOfficeHub(defaultOfficeHub);
-                  setSenderOfficePhone(defaultOfficePhone);
+                  setSenderOfficePhone(strip91FromPhone(defaultOfficePhone));
                   showToast("Restored sender hub fields from your Profile defaults.");
                 }}
                 className="inline-flex items-center gap-1 font-bold text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer shrink-0"
@@ -1813,7 +1689,7 @@ export default function BulkLabelPrintTool({
       </div>
 
       {/* ================================================================= */}
-      {/* 3. QUEUE TABLE WITH VALIDATION FILTERS & 1-CLICK UTILITIES        */}
+      {/* 3. QUEUE TABLE                                                    */}
       {/* ================================================================= */}
       <div className="rounded-3xl border border-slate-200/90 bg-white p-4 sm:p-5 dark:border-slate-800 dark:bg-slate-900 space-y-3.5">
         <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-3 pb-3 border-b border-slate-100 dark:border-slate-800">
@@ -1822,8 +1698,6 @@ export default function BulkLabelPrintTool({
             {(
               [
                 { id: "all", label: `All (${enrichedLabels.length})` },
-                { id: "valid", label: `Ready (${totalValidInQueue})` },
-                { id: "invalid", label: `Needs Fix (${totalInvalidInQueue})` },
                 {
                   id: "unprinted",
                   label: `Unprinted (${enrichedLabels.length - totalPrintedInQueue})`,
@@ -1839,9 +1713,7 @@ export default function BulkLabelPrintTool({
                 onClick={() => setQueueFilter(tab.id)}
                 className={`rounded-xl px-3 py-1.5 text-xs font-bold tabular-nums transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
                   queueFilter === tab.id
-                    ? tab.id === "invalid" && totalInvalidInQueue > 0
-                      ? "bg-rose-600 text-white"
-                      : "bg-indigo-600 text-white"
+                    ? "bg-indigo-600 text-white"
                     : "bg-slate-100 text-slate-700 hover:bg-slate-200/70 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700"
                 }`}
               >
@@ -1850,31 +1722,8 @@ export default function BulkLabelPrintTool({
             ))}
           </div>
 
-          {/* Right: Bulk Queue Utilities & Search */}
+          {/* Right: Queue Utilities & Search */}
           <div className="flex flex-wrap items-center gap-2">
-            {enrichedLabels.length > 0 && (
-              <button
-                type="button"
-                onClick={handleNormalizeAllPhones}
-                className="inline-flex items-center gap-1 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 px-2.5 py-1.5 text-[11px] font-bold text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 cursor-pointer whitespace-nowrap shrink-0"
-                title="Format all valid 10-digit numbers to +91 XXXXXXXXXX"
-              >
-                <CheckCheck className="h-3.5 w-3.5 text-emerald-600" />
-                <span>Format Phones (+91)</span>
-              </button>
-            )}
-
-            {totalInvalidInQueue > 0 && (
-              <button
-                type="button"
-                onClick={handleSelectOnlyValid}
-                className="inline-flex items-center gap-1 rounded-xl border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 px-2.5 py-1.5 text-[11px] font-bold text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300 cursor-pointer whitespace-nowrap shrink-0"
-              >
-                <Filter className="h-3 w-3" />
-                <span>Select Only Valid</span>
-              </button>
-            )}
-
             {totalPrintedInQueue > 0 && (
               <>
                 <button
@@ -1904,8 +1753,8 @@ export default function BulkLabelPrintTool({
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search queue..."
-                className="rounded-xl border border-slate-200 bg-slate-50 pl-8 pr-3 py-1.5 text-xs text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 focus:outline-none w-40 sm:w-48"
+                placeholder="Search name, phone, address..."
+                className="rounded-xl border border-slate-200 bg-slate-50 pl-8 pr-3 py-1.5 text-xs text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 focus:outline-none w-48 sm:w-56"
               />
             </div>
 
@@ -1980,10 +1829,10 @@ export default function BulkLabelPrintTool({
                     />
                   </th>
                   <th className="py-2.5 px-2.5">Customer Name</th>
-                  <th className="py-2.5 px-2.5">Indian Mobile (+91 / 10D)</th>
-                  <th className="py-2.5 px-2.5">6-Digit PIN &amp; State</th>
+                  <th className="py-2.5 px-2.5">Phone Number</th>
+                  <th className="py-2.5 px-2.5">Pincode</th>
+                  <th className="py-2.5 px-2.5">Delivery Address (Printed on Label)</th>
                   <th className="py-2.5 px-2.5">Item Code</th>
-                  <th className="py-2.5 px-2.5">Delivery Address</th>
                   <th className="py-2.5 px-2 text-center">Copies</th>
                   <th className="py-2.5 px-2.5 text-right">Mini QR &amp; Actions</th>
                 </tr>
@@ -2017,11 +1866,7 @@ export default function BulkLabelPrintTool({
                           onChange={(e) =>
                             handleUpdateField(item.id, "customerName", e.target.value)
                           }
-                          className={`w-36 rounded-lg border px-2 py-1 text-xs font-semibold ${
-                            item.customerName.trim()
-                              ? "border-slate-200 bg-white text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
-                              : "border-rose-400 bg-rose-50 text-rose-900 dark:border-rose-700 dark:bg-rose-950/40 dark:text-rose-200"
-                          }`}
+                          className="w-36 rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
                         />
                         {item.printed && (
                           <span
@@ -2034,83 +1879,56 @@ export default function BulkLabelPrintTool({
                       </div>
                     </td>
 
-                    {/* Customer Phone + Live Indian Phone Status */}
+                    {/* Customer Phone (91 automatically removed) */}
                     <td className="py-2 px-2.5">
-                      <div className="flex items-center gap-1.5">
-                        <input
-                          type="tel"
-                          value={item.customerPhone}
-                          onChange={(e) =>
-                            handleUpdateField(
-                              item.id,
-                              "customerPhone",
-                              e.target.value
-                                .replace(/[^0-9+\-\s]/g, "")
-                                .slice(0, 16)
-                            )
-                          }
-                          className={`w-34 rounded-lg border px-2 py-1 text-xs font-mono tabular-nums font-semibold ${
-                            item.phoneCheck.isValid
-                              ? "border-slate-200 bg-white text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
-                              : "border-rose-400 bg-rose-50 text-rose-900 dark:border-rose-700 dark:bg-rose-950/40 dark:text-rose-200"
-                          }`}
-                        />
-                        <span
-                          title={
-                            item.phoneCheck.isValid
-                              ? `Valid Indian Mobile: ${item.phoneCheck.formattedWith91}`
-                              : item.phoneCheck.error
-                          }
-                          className={`inline-flex items-center rounded px-1.5 py-0.5 text-[9px] font-bold shrink-0 ${
-                            item.phoneCheck.isValid
-                              ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/70 dark:text-emerald-300"
-                              : "bg-rose-100 text-rose-700 dark:bg-rose-950/80 dark:text-rose-300"
-                          }`}
-                        >
-                          {item.phoneCheck.isValid
-                            ? item.phoneCheck.had91Prefix
-                              ? "+91 OK"
-                              : "10D OK"
-                            : "Invalid"}
-                        </span>
-                      </div>
+                      <input
+                        type="tel"
+                        value={item.customerPhone}
+                        onChange={(e) =>
+                          handleUpdateField(
+                            item.id,
+                            "customerPhone",
+                            strip91FromPhone(e.target.value)
+                          )
+                        }
+                        placeholder="9847012345"
+                        className="w-28 rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-mono tabular-nums font-semibold text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                      />
                     </td>
 
-                    {/* Pincode + Live State Lookup */}
+                    {/* Pincode */}
                     <td className="py-2 px-2.5">
-                      <div className="flex items-center gap-1.5">
-                        <input
-                          type="text"
-                          maxLength={6}
-                          value={item.pincode}
-                          onChange={(e) =>
-                            handleUpdateField(
-                              item.id,
-                              "pincode",
-                              e.target.value.replace(/\D/g, "").slice(0, 6)
-                            )
-                          }
-                          className={`w-20 rounded-lg border px-2 py-1 text-xs font-mono tabular-nums font-bold ${
-                            item.pinCheck.isValid
-                              ? "border-slate-200 bg-white text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
-                              : "border-rose-400 bg-rose-50 text-rose-900 dark:border-rose-700 dark:bg-rose-950/40 dark:text-rose-200"
-                          }`}
-                        />
-                        <span
-                          title={
-                            item.pinCheck.isValid
-                              ? item.pinCheck.regionHint
-                              : item.pinCheck.error
-                          }
-                          className={`inline-flex items-center rounded px-1.5 py-0.5 text-[9px] font-bold truncate max-w-[90px] ${
-                            item.pinCheck.isValid
-                              ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/70 dark:text-emerald-300"
-                              : "bg-rose-100 text-rose-700 dark:bg-rose-950/80 dark:text-rose-300"
-                          }`}
-                        >
-                          {item.pinCheck.isValid ? item.stateName : "Bad PIN"}
-                        </span>
-                      </div>
+                      <input
+                        type="text"
+                        maxLength={6}
+                        value={item.pincode}
+                        onChange={(e) =>
+                          handleUpdateField(
+                            item.id,
+                            "pincode",
+                            e.target.value.replace(/\D/g, "").slice(0, 6)
+                          )
+                        }
+                        placeholder="682001"
+                        className="w-20 rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-mono tabular-nums font-bold text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                      />
+                    </td>
+
+                    {/* Delivery Address (Printed on Label, excluded from QR) */}
+                    <td className="py-2 px-2.5">
+                      <input
+                        type="text"
+                        value={item.deliveryAddress || ""}
+                        onChange={(e) =>
+                          handleUpdateField(
+                            item.id,
+                            "deliveryAddress",
+                            e.target.value
+                          )
+                        }
+                        placeholder="House, Street, City..."
+                        className="w-56 rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+                      />
                     </td>
 
                     {/* Item Code */}
@@ -2126,23 +1944,6 @@ export default function BulkLabelPrintTool({
                           )
                         }
                         className="w-24 rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-mono font-bold uppercase text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
-                      />
-                    </td>
-
-                    {/* Delivery Address */}
-                    <td className="py-2 px-2.5">
-                      <input
-                        type="text"
-                        value={item.deliveryAddress || ""}
-                        onChange={(e) =>
-                          handleUpdateField(
-                            item.id,
-                            "deliveryAddress",
-                            e.target.value
-                          )
-                        }
-                        placeholder="Optional street/city..."
-                        className="w-40 rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
                       />
                     </td>
 
@@ -2212,16 +2013,7 @@ export default function BulkLabelPrintTool({
                         {onSimulateScanInIntake && (
                           <button
                             type="button"
-                            onClick={() => {
-                              if (!item.isRowValid) {
-                                showToast(
-                                  "Fix invalid Indian mobile or 6-digit pincode before testing scan in Add Consignment.",
-                                  "warn"
-                                );
-                                return;
-                              }
-                              onSimulateScanInIntake(item.encryptedQr);
-                            }}
+                            onClick={() => onSimulateScanInIntake(item.encryptedQr)}
                             className="inline-flex items-center gap-1 rounded-lg bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950/70 dark:hover:bg-indigo-900/70 px-2 py-1 text-[10px] font-bold text-indigo-700 dark:text-indigo-300 cursor-pointer"
                             title="Simulate scanning this Encrypted Mini QR in Add Consignment"
                           >
@@ -2265,25 +2057,21 @@ export default function BulkLabelPrintTool({
                     <div className="font-extrabold text-indigo-950 dark:text-indigo-200 flex items-center gap-1.5">
                       <Lock className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400 shrink-0" />
                       <span>
-                        Encrypted Office Mini QR Payload (protected from external scanners)
+                        Encrypted Office Mini QR Payload (Address excluded to keep QR compact)
                       </span>
                     </div>
                     <div className="font-mono text-[11px] bg-white dark:bg-slate-900 px-2.5 py-1 rounded-lg border border-indigo-200 dark:border-indigo-800 text-slate-800 dark:text-slate-200 break-all">
                       {target.encryptedQr}
                     </div>
-                    {decrypted.isValid && decrypted.data ? (
+                    {decrypted.isValid && decrypted.data && (
                       <div className="text-[11px] text-emerald-700 dark:text-emerald-300 font-semibold">
-                        ✓ Decrypted Preview:{" "}
+                        ✓ Feeds into Add Consignment:{" "}
                         <span className="font-mono">
-                          {decrypted.data.customerName} ·{" "}
-                          {decrypted.data.formattedPhone91} · PIN{" "}
-                          {decrypted.data.pincode} ({target.stateName}) · Item{" "}
+                          Name: {decrypted.data.customerName} · Phone:{" "}
+                          {decrypted.data.customerPhone} · PIN:{" "}
+                          {decrypted.data.pincode} · Item:{" "}
                           {decrypted.data.itemCode}
                         </span>
-                      </div>
-                    ) : (
-                      <div className="text-[11px] text-rose-600 dark:text-rose-400 font-semibold">
-                        ⚠ {decrypted.error}
                       </div>
                     )}
                   </div>
@@ -2312,10 +2100,10 @@ export default function BulkLabelPrintTool({
             </span>
             {(
               [
-                { id: "mini_3col", label: "3-Col Mini Stickers (21/A4)" },
+                { id: "mini_3col", label: "3-Col Labels (21/A4)" },
                 { id: "standard_2col", label: "2-Col Dispatch Labels (8/A4)" },
                 { id: "thermal_1col", label: "Thermal Roll (4×3\")" },
-                { id: "security_4col", label: "4-Col Compact QR Tags" },
+                { id: "security_4col", label: "4-Col Compact Labels" },
               ] as const
             ).map((opt) => (
               <button
@@ -2333,7 +2121,7 @@ export default function BulkLabelPrintTool({
             ))}
           </div>
 
-          {/* Label Text Privacy Controls (Mini QR always retains full encrypted data) */}
+          {/* Label Text Privacy Controls */}
           <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
@@ -2384,37 +2172,6 @@ export default function BulkLabelPrintTool({
           </div>
         </div>
 
-        {/* Invalid Row Print Guard Banner */}
-        {selectedInvalidRowCount > 0 && (
-          <div className="rounded-2xl border border-amber-200 bg-amber-50/90 dark:border-amber-900/60 dark:bg-amber-950/40 px-4 py-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs">
-            <div className="flex items-center gap-2 text-amber-900 dark:text-amber-200 font-semibold">
-              <AlertTriangle className="h-4 w-4 text-amber-600 dark:text-amber-400 shrink-0" />
-              <span>
-                {selectedInvalidRowCount} selected row(s) have an invalid Indian mobile number or 6-digit pincode. Their Mini QRs will fail camera scan validation.
-              </span>
-            </div>
-            <div className="flex items-center gap-2 shrink-0">
-              <button
-                type="button"
-                onClick={() => setQueueFilter("invalid")}
-                className="rounded-lg border border-amber-300 bg-white hover:bg-amber-100/60 px-2.5 py-1 text-[11px] font-bold text-amber-900 dark:border-amber-700 dark:bg-slate-900 dark:text-amber-200 cursor-pointer whitespace-nowrap"
-              >
-                Review Invalid
-              </button>
-              {printableValidCount > 0 && (
-                <button
-                  type="button"
-                  onClick={handleSelectValidAndPrint}
-                  className="inline-flex items-center gap-1 rounded-lg bg-amber-600 hover:bg-amber-700 px-3 py-1 text-[11px] font-extrabold text-white cursor-pointer whitespace-nowrap"
-                >
-                  <Printer className="h-3 w-3" />
-                  <span>Print Valid Only ({printableValidCount})</span>
-                </button>
-              )}
-            </div>
-          </div>
-        )}
-
         {/* Live Printable Sheet Preview & Print Source DOM */}
         <div
           ref={printableSheetRef}
@@ -2439,21 +2196,17 @@ export default function BulkLabelPrintTool({
               {printableExpandedLabels.map((item, idx) => {
                 const formattedPhoneText = formatPhoneForLabelDisplay(
                   item.customerPhone,
-                  item.phoneCheck,
                   phoneDisplayMode
                 );
 
                 return (
                   <div
                     key={`${item.id}-copy-${item.copyIndex}-${idx}`}
-                    data-valid={item.isRowValid ? "1" : "0"}
-                    className={`label-card rounded-xl border-2 ${
-                      item.isRowValid ? "border-slate-900" : "border-rose-600"
-                    } bg-white p-3.5 text-slate-950 flex items-stretch justify-between gap-3 break-inside-avoid ${
+                    className={`label-card rounded-xl border-2 border-slate-900 bg-white p-3.5 text-slate-950 flex items-stretch justify-between gap-3 break-inside-avoid ${
                       labelLayout === "thermal_1col" ? "thermal-break" : ""
                     }`}
                   >
-                    {/* Left Column: Customer Dispatch Information */}
+                    {/* Left Column: Customer Dispatch Information (Includes Delivery Address on Label) */}
                     <div className="label-left min-w-0 flex-1 flex flex-col justify-between">
                       <div>
                         <div className="label-header flex items-center justify-between gap-1 border-b border-slate-200 pb-1">
@@ -2461,7 +2214,7 @@ export default function BulkLabelPrintTool({
                             {senderOfficeTitle || "OFFICE DISPATCH"}
                           </span>
                           <span className="badge-dark rounded bg-slate-900 px-1.5 py-0.5 font-mono text-[8.5px] font-black text-white shrink-0">
-                            {item.isRowValid ? "MINI-QR" : "CHECK"}
+                            {item.awbHint ? `AWB: ${item.awbHint}` : "MINI-QR"}
                           </span>
                         </div>
 
@@ -2470,27 +2223,22 @@ export default function BulkLabelPrintTool({
                             Deliver To:
                           </div>
                           <div className="customer-name text-sm font-black text-slate-950 leading-tight break-words">
-                            {item.customerName || "Unnamed Customer"}
+                            {item.customerName || "Customer"}
                           </div>
-                          {item.deliveryAddress && labelLayout !== "security_4col" && (
-                            <div className="address-line text-[11px] font-semibold text-slate-700 mt-0.5 leading-snug">
+                          {item.deliveryAddress && (
+                            <div className="address-line text-[11px] font-semibold text-slate-800 mt-1 leading-snug break-words">
                               {item.deliveryAddress}
                             </div>
                           )}
                         </div>
 
-                        <div className="pin-phone-row flex flex-wrap items-center gap-1.5 mt-2">
+                        <div className="pin-phone-row flex flex-wrap items-center gap-2 mt-2">
                           <span className="pin-box rounded border-[1.5px] border-slate-900 bg-slate-50 px-2 py-0.5 font-mono tabular-nums text-xs font-black text-slate-950">
                             PIN: {item.pincode || "------"}
                           </span>
-                          {item.stateName && labelLayout !== "security_4col" && (
-                            <span className="state-pill text-[10px] font-extrabold text-slate-600">
-                              · {item.stateName}
-                            </span>
-                          )}
                         </div>
 
-                        {formattedPhoneText && labelLayout !== "security_4col" && (
+                        {formattedPhoneText && (
                           <div className="phone-line font-mono tabular-nums text-[11px] font-extrabold text-slate-900 mt-1">
                             Mob: {formattedPhoneText}
                           </div>
@@ -2526,7 +2274,7 @@ export default function BulkLabelPrintTool({
                       </div>
                     </div>
 
-                    {/* Right Column: Encrypted Mini QR Code for Office Camera Scan */}
+                    {/* Right Column: Encrypted Mini QR Code for Office Camera Scan (No Address in QR) */}
                     <div className="qr-col flex flex-col items-center justify-center shrink-0 border-l border-dashed border-slate-300 pl-2.5">
                       <MiniQrSvg
                         value={item.encryptedQr}
@@ -2552,12 +2300,13 @@ export default function BulkLabelPrintTool({
         {/* Dedicated offscreen sheet container for zero-flicker single-row quick print */}
         {singlePrintTargetId &&
           (() => {
-            const targetItem = enrichedLabels.find((l) => l.id === singlePrintTargetId);
+            const targetItem = enrichedLabels.find(
+              (l) => l.id === singlePrintTargetId
+            );
             if (!targetItem) return null;
             const copiesCount = Math.max(1, Math.min(50, targetItem.copies || 1));
             const formattedPhoneText = formatPhoneForLabelDisplay(
               targetItem.customerPhone,
-              targetItem.phoneCheck,
               phoneDisplayMode
             );
             return (
@@ -2576,28 +2325,32 @@ export default function BulkLabelPrintTool({
                             <span className="office-title">
                               {senderOfficeTitle || "OFFICE DISPATCH"}
                             </span>
-                            <span className="badge-dark">MINI-QR</span>
+                            <span className="badge-dark">
+                              {targetItem.awbHint
+                                ? `AWB: ${targetItem.awbHint}`
+                                : "MINI-QR"}
+                            </span>
                           </div>
                           <div>
                             <div className="deliver-label">Deliver To:</div>
                             <div className="customer-name">
-                              {targetItem.customerName || "Unnamed Customer"}
+                              {targetItem.customerName || "Customer"}
                             </div>
-                            {targetItem.deliveryAddress &&
-                              labelLayout !== "security_4col" && (
-                                <div className="address-line">
-                                  {targetItem.deliveryAddress}
-                                </div>
-                              )}
-                          </div>
-                          <div className="pin-phone-row">
-                            <span className="pin-box">PIN: {targetItem.pincode}</span>
-                            {targetItem.stateName && labelLayout !== "security_4col" && (
-                              <span className="state-pill">· {targetItem.stateName}</span>
+                            {targetItem.deliveryAddress && (
+                              <div className="address-line">
+                                {targetItem.deliveryAddress}
+                              </div>
                             )}
                           </div>
-                          {formattedPhoneText && labelLayout !== "security_4col" && (
-                            <div className="phone-line">Mob: {formattedPhoneText}</div>
+                          <div className="pin-phone-row">
+                            <span className="pin-box">
+                              PIN: {targetItem.pincode || "------"}
+                            </span>
+                          </div>
+                          {formattedPhoneText && (
+                            <div className="phone-line">
+                              Mob: {formattedPhoneText}
+                            </div>
                           )}
                         </div>
                         <div>
@@ -2618,7 +2371,9 @@ export default function BulkLabelPrintTool({
                               labelLayout === "thermal_1col") && (
                               <div className="return-line">
                                 From: {senderOfficeHub}
-                                {senderOfficePhone ? ` · ${senderOfficePhone}` : ""}
+                                {senderOfficePhone
+                                  ? ` · ${senderOfficePhone}`
+                                  : ""}
                               </div>
                             )}
                         </div>
