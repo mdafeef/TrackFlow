@@ -3,9 +3,9 @@ export type WorkspaceTabId = "dashboard" | "data" | "batches" | "labels" | "anal
 
 export const PUBLIC_TAB_PATHS: Record<PublicTabId, string> = {
   track: "/",
-  carriers: "/carriers",
-  features: "/features",
-  faq: "/faq",
+  carriers: "/",
+  features: "/",
+  faq: "/",
 };
 
 export const WORKSPACE_TAB_PATHS: Record<WorkspaceTabId, string> = {
@@ -35,21 +35,21 @@ export function resolveRouteFromPathname(pathname: string): ResolvedTabRoute {
         view: "single",
         publicTab: "carriers",
         workspaceTab: "dashboard",
-        canonicalPath: "/carriers",
+        canonicalPath: "/",
       };
     case "/features":
       return {
         view: "single",
         publicTab: "features",
         workspaceTab: "dashboard",
-        canonicalPath: "/features",
+        canonicalPath: "/",
       };
     case "/faq":
       return {
         view: "single",
         publicTab: "faq",
         workspaceTab: "dashboard",
-        canonicalPath: "/faq",
+        canonicalPath: "/",
       };
     case "/dashboard":
       return {

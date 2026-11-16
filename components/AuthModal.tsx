@@ -1,6 +1,7 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
+import { AnimatePresence, motion } from "motion/react";
 import {
   Lock,
   Mail,
@@ -52,7 +53,18 @@ export function AuthModal({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [copiedField, setCopiedField] = useState<string | null>(null);
 
-  if (!isOpen && !inlineMode) return null;
+  // Lock background scroll when popup modal is open to prevent mobile viewport shift & flicker
+  useEffect(() => {
+    if (!isOpen || inlineMode) return;
+    const prevHtmlOverflow = document.documentElement.style.overflow;
+    const prevBodyOverflow = document.body.style.overflow;
+    document.documentElement.style.overflow = "hidden";
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.documentElement.style.overflow = prevHtmlOverflow;
+      document.body.style.overflow = prevBodyOverflow;
+    };
+  }, [isOpen, inlineMode]);
 
   const handleCopyText = (key: string, value: string) => {
     if (typeof navigator !== "undefined" && navigator.clipboard) {
@@ -157,8 +169,13 @@ export function AuthModal({
   };
 
   const cardContent = (
-    <div
-      className="relative z-10 w-full max-w-md rounded-3xl border border-slate-200/90 bg-white p-5 sm:p-6 shadow-2xl dark:border-slate-800 dark:bg-slate-900 space-y-5 transform-gpu"
+    <motion.div
+      initial={{ opacity: 0, scale: 0.94, y: 18 }}
+      animate={{ opacity: 1, scale: 1, y: 0 }}
+      exit={{ opacity: 0, scale: 0.95, y: 12 }}
+      transition={{ duration: 0.24, ease: [0.16, 1, 0.3, 1] }}
+      style={{ WebkitBackfaceVisibility: "hidden", backfaceVisibility: "hidden" }}
+      className="relative z-10 my-auto w-full max-w-md rounded-3xl border border-slate-200/90 bg-white p-5 sm:p-6 shadow-2xl dark:border-slate-800 dark:bg-slate-900 space-y-5"
       onClick={(e) => e.stopPropagation()}
     >
       {/* Header */}
@@ -313,7 +330,7 @@ export function AuthModal({
                   value={identifier}
                   onChange={(e) => setIdentifier(e.target.value)}
                   placeholder="TF-DEMO-01 or demo@trackflow.in"
-                  className="w-full rounded-xl border border-slate-200 bg-slate-50 pl-9 pr-3 py-2 text-xs font-semibold text-slate-900 placeholder:text-slate-400 focus:border-indigo-500 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
+                  className="w-full rounded-xl border border-slate-200 bg-slate-50 pl-9 pr-3 py-2 text-base sm:text-xs font-semibold text-slate-900 placeholder:text-slate-400 focus:border-indigo-500 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
                   required
                 />
               </div>
@@ -330,7 +347,7 @@ export function AuthModal({
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="Enter password"
-                  className="w-full rounded-xl border border-slate-200 bg-slate-50 pl-9 pr-9 py-2 text-xs font-semibold text-slate-900 placeholder:text-slate-400 focus:border-indigo-500 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
+                  className="w-full rounded-xl border border-slate-200 bg-slate-50 pl-9 pr-9 py-2 text-base sm:text-xs font-semibold text-slate-900 placeholder:text-slate-400 focus:border-indigo-500 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
                   required
                 />
                 <button
@@ -358,7 +375,7 @@ export function AuthModal({
                     value={fullName}
                     onChange={(e) => setFullName(e.target.value)}
                     placeholder="Your Full Name"
-                    className="w-full rounded-xl border border-slate-200 bg-slate-50 pl-9 pr-3 py-2 text-xs font-semibold text-slate-900 placeholder:text-slate-400 focus:border-indigo-500 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
+                    className="w-full rounded-xl border border-slate-200 bg-slate-50 pl-9 pr-3 py-2 text-base sm:text-xs font-semibold text-slate-900 placeholder:text-slate-400 focus:border-indigo-500 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
                     required
                   />
                 </div>
@@ -381,7 +398,7 @@ export function AuthModal({
                       setErrorMsg(null);
                     }}
                     placeholder="10-digit number"
-                    className="w-full bg-transparent px-2.5 py-2 font-mono text-xs font-semibold text-slate-900 placeholder:font-sans placeholder:text-slate-400 focus:outline-none dark:text-white"
+                    className="w-full bg-transparent px-2.5 py-2 font-mono text-base sm:text-xs font-semibold text-slate-900 placeholder:font-sans placeholder:text-slate-400 focus:outline-none dark:text-white"
                   />
                 </div>
               </div>
@@ -398,7 +415,7 @@ export function AuthModal({
                   value={regEmail}
                   onChange={(e) => setRegEmail(e.target.value)}
                   placeholder="operator@company.com"
-                  className="w-full rounded-xl border border-slate-200 bg-slate-50 pl-9 pr-3 py-2 text-xs font-semibold text-slate-900 placeholder:text-slate-400 focus:border-indigo-500 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
+                  className="w-full rounded-xl border border-slate-200 bg-slate-50 pl-9 pr-3 py-2 text-base sm:text-xs font-semibold text-slate-900 placeholder:text-slate-400 focus:border-indigo-500 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
                   required
                 />
               </div>
@@ -415,7 +432,7 @@ export function AuthModal({
                   value={regPassword}
                   onChange={(e) => setRegPassword(e.target.value)}
                   placeholder="Min. 6 characters"
-                  className="w-full rounded-xl border border-slate-200 bg-slate-50 pl-9 pr-9 py-2 text-xs font-semibold text-slate-900 placeholder:text-slate-400 focus:border-indigo-500 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
+                  className="w-full rounded-xl border border-slate-200 bg-slate-50 pl-9 pr-9 py-2 text-base sm:text-xs font-semibold text-slate-900 placeholder:text-slate-400 focus:border-indigo-500 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
                   required
                 />
                 <button
@@ -440,7 +457,7 @@ export function AuthModal({
                     value={hubCity}
                     onChange={(e) => setHubCity(e.target.value)}
                     placeholder="Kochi Central Hub"
-                    className="w-full rounded-xl border border-slate-200 bg-slate-50 pl-9 pr-3 py-2 text-xs font-semibold text-slate-900 placeholder:text-slate-400 focus:border-indigo-500 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
+                    className="w-full rounded-xl border border-slate-200 bg-slate-50 pl-9 pr-3 py-2 text-base sm:text-xs font-semibold text-slate-900 placeholder:text-slate-400 focus:border-indigo-500 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
                   />
                 </div>
               </div>
@@ -458,7 +475,7 @@ export function AuthModal({
                     value={hubPincode}
                     onChange={(e) => setHubPincode(e.target.value.replace(/\D/g, "").slice(0, 6))}
                     placeholder="682001"
-                    className="w-full rounded-xl border border-slate-200 bg-slate-50 pl-9 pr-3 py-2 font-mono text-xs font-semibold text-slate-900 placeholder:text-slate-400 focus:border-indigo-500 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
+                    className="w-full rounded-xl border border-slate-200 bg-slate-50 pl-9 pr-3 py-2 font-mono text-base sm:text-xs font-semibold text-slate-900 placeholder:text-slate-400 focus:border-indigo-500 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
                   />
                 </div>
               </div>
@@ -500,27 +517,40 @@ export function AuthModal({
         </span>
         <span>Single Tracker is Free &amp; Public</span>
       </div>
-    </div>
+    </motion.div>
   );
 
   if (inlineMode) {
     return (
-      <div className="min-h-[calc(100vh-4rem)] flex items-center justify-center p-4 bg-slate-50 dark:bg-slate-950">
+      <div className="min-h-[calc(100vh-4rem)] w-full flex items-center justify-center px-4 py-12 sm:py-20 bg-slate-50 dark:bg-slate-950 overflow-y-auto">
         {cardContent}
       </div>
     );
   }
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/75 overscroll-contain transform-gpu"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget) {
-          onClose();
-        }
-      }}
-    >
-      {cardContent}
-    </div>
+    <AnimatePresence>
+      {isOpen && (
+        <motion.div
+          key="auth-modal-backdrop"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 0.2, ease: "easeOut" }}
+          className="fixed inset-0 z-50 overflow-y-auto overscroll-contain bg-slate-950/75"
+        >
+          <div
+            className="flex min-h-full items-center justify-center px-4 py-10 sm:py-16"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) {
+                onClose();
+              }
+            }}
+          >
+            {cardContent}
+          </div>
+        </motion.div>
+      )}
+    </AnimatePresence>
   );
 }

@@ -250,13 +250,16 @@ export function Navbar({
             {isDark ? <Sun className="h-4 w-4 text-amber-400" /> : <Moon className="h-4 w-4" />}
           </button>
 
-          {/* In Single Mode: Sign In or Dashboard (Removed from header when hamburger menu appears on < md since hamburger menu includes it) */}
+          {/* In Single Mode: Sign In or Dashboard */}
           {activeView === "single" && (
             !authUser ? (
               <button
                 type="button"
-                onClick={onOpenLogin}
-                className="hidden md:inline-flex h-8 sm:h-9 items-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-3 sm:px-3.5 py-1.5 text-xs font-bold text-white shadow-xs whitespace-nowrap shrink-0 transition-colors cursor-pointer"
+                onClick={() => {
+                  setIsMobileNavOpen(false);
+                  if (onOpenLogin) onOpenLogin();
+                }}
+                className="inline-flex h-8 sm:h-9 items-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-2.5 sm:px-3.5 py-1.5 text-xs font-bold text-white shadow-xs whitespace-nowrap shrink-0 transition-colors cursor-pointer"
               >
                 <LogIn className="h-3.5 w-3.5 shrink-0" />
                 <span>Sign In</span>
@@ -264,12 +267,15 @@ export function Navbar({
             ) : (
               <button
                 type="button"
-                onClick={() => onChangeView("bulk")}
-                className="hidden md:inline-flex h-8 sm:h-9 items-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-3 sm:px-3.5 py-1.5 text-xs font-bold text-white shadow-xs transition-colors cursor-pointer shrink-0"
+                onClick={() => {
+                  setIsMobileNavOpen(false);
+                  onChangeView("bulk");
+                }}
+                className="inline-flex h-8 sm:h-9 items-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-2.5 sm:px-3.5 py-1.5 text-xs font-bold text-white shadow-xs transition-colors cursor-pointer shrink-0"
                 title={`Open Dashboard (${authUser.fullName})`}
               >
                 <LayoutDashboard className="h-3.5 w-3.5 shrink-0" />
-                <span>Dashboard</span>
+                <span className="hidden xs:inline sm:inline">Dashboard</span>
               </button>
             )
           )}

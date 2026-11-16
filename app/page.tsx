@@ -101,9 +101,25 @@ function TrackingAppContent() {
   const handleSelectPublicTab = useCallback((tab: PublicTabId) => {
     setActiveView("single");
     setPublicTab(tab);
-    silentNavigateTab(PUBLIC_TAB_PATHS[tab]);
+    silentNavigateTab("/");
     if (typeof window !== "undefined") {
-      window.scrollTo({ top: 0, behavior: "smooth" });
+      setTimeout(() => {
+        const sectionIdMap: Record<PublicTabId, string> = {
+          track: "track-section",
+          carriers: "couriers-section",
+          features: "features-section",
+          faq: "faq-section",
+        };
+        const targetId = sectionIdMap[tab];
+        if (tab === "track") {
+          window.scrollTo({ top: 0, behavior: "smooth" });
+        } else {
+          const el = document.getElementById(targetId);
+          if (el) {
+            el.scrollIntoView({ behavior: "smooth", block: "start" });
+          }
+        }
+      }, 40);
     }
   }, []);
 
@@ -588,128 +604,118 @@ function TrackingAppContent() {
             />
           )
         ) : (
-          /* Single Tracker Public Tabs: Renders only the active tab in-page for instant load */
-          <>
-            {publicTab === "track" && (
-              <div className="animate-in fade-in duration-150">
-                {/* Hero & Search Section */}
-                <TrackerHero
-                  onSearch={(num, cId) => {
-                    performSearch(num, cId, true);
-                  }}
-                  isLoading={isLoading}
-                  initialTracking={
-                    activeResult
-                      ? activeResult.trackingNumber
-                      : notTrackableInfo
-                      ? notTrackableInfo.trackingNumber
-                      : ""
-                  }
-                  initialCourier={
-                    selectedCarrierFromDirectory ||
-                    (activeResult
-                      ? activeResult.courier.id
-                      : notTrackableInfo?.courierId
-                      ? notTrackableInfo.courierId
-                      : "")
-                  }
-                />
+          /* Single Tracker Front Page: Unified single-page layout with all sections */
+          <div>
+            {/* Hero & Search Section */}
+            <TrackerHero
+              onSearch={(num, cId) => {
+                performSearch(num, cId, true);
+              }}
+              isLoading={isLoading}
+              initialTracking={
+                activeResult
+                  ? activeResult.trackingNumber
+                  : notTrackableInfo
+                  ? notTrackableInfo.trackingNumber
+                  : ""
+              }
+              initialCourier={
+                selectedCarrierFromDirectory ||
+                (activeResult
+                  ? activeResult.courier.id
+                  : notTrackableInfo?.courierId
+                  ? notTrackableInfo.courierId
+                  : "")
+              }
+            />
 
-                {/* Scrolling Supported Partners Logo Ribbon */}
-                <PartnerMarquee />
+            {/* Scrolling Supported Partners Logo Ribbon */}
+            <PartnerMarquee />
 
-                {/* Streamlined Status Banner if activeResult is present outside modal or after modal dismissal */}
-                {activeResult && !isLoading && !isTrackingModalOpen && (
-                  <div className="mx-auto max-w-4xl px-4 sm:px-6 my-10">
-                    <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs dark:border-slate-800 dark:bg-slate-900 flex flex-col sm:flex-row items-center justify-between gap-4">
-                      <div className="flex items-center gap-3">
-                        <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 shrink-0">
-                          <Package className="h-5 w-5" />
-                        </div>
-                        <div>
-                          <div className="flex items-center gap-2">
-                            <span className="text-xs font-bold text-slate-900 dark:text-white">
-                              {activeResult.courier.name}
-                            </span>
-                            <span className="text-xs font-mono text-slate-500">
-                              #{activeResult.trackingNumber}
-                            </span>
-                            <span className="text-xs font-semibold text-emerald-600 dark:text-emerald-400">
-                              · {activeResult.overallStatus.phrase}
-                            </span>
-                          </div>
-                          {activeResult.bookingDetails.origin && activeResult.bookingDetails.destination ? (
-                            <p className="text-xs text-slate-500 dark:text-slate-400">
-                              {activeResult.bookingDetails.origin.split(",")[0]} → {activeResult.bookingDetails.destination.split(",")[0]}
-                            </p>
-                          ) : (
-                            <p className="text-xs text-slate-500 dark:text-slate-400">
-                              Last scan: {activeResult.overallStatus.timestamp}
-                            </p>
-                          )}
-                        </div>
+            {/* Streamlined Status Banner if activeResult is present outside modal or after modal dismissal */}
+            {activeResult && !isLoading && !isTrackingModalOpen && (
+              <div className="mx-auto max-w-4xl px-4 sm:px-6 my-10">
+                <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs dark:border-slate-800 dark:bg-slate-900 flex flex-col sm:flex-row items-center justify-between gap-4">
+                  <div className="flex items-center gap-3">
+                    <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 shrink-0">
+                      <Package className="h-5 w-5" />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-bold text-slate-900 dark:text-white">
+                          {activeResult.courier.name}
+                        </span>
+                        <span className="text-xs font-mono text-slate-500">
+                          #{activeResult.trackingNumber}
+                        </span>
+                        <span className="text-xs font-semibold text-emerald-600 dark:text-emerald-400">
+                          · {activeResult.overallStatus.phrase}
+                        </span>
                       </div>
-                      <div className="flex items-center gap-2 w-full sm:w-auto">
-                        <button
-                          type="button"
-                          onClick={() => setIsTrackingModalOpen(true)}
-                          className="flex-1 sm:flex-initial inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2 text-xs font-bold text-white hover:bg-indigo-700 shadow-xs cursor-pointer"
-                        >
-                          <span>View Details Popup</span>
-                          <ArrowRight className="h-3.5 w-3.5" />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={handleTrackNextOrder}
-                          className="flex-1 sm:flex-initial inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-800 dark:text-slate-200 cursor-pointer"
-                        >
-                          <PlusCircle className="h-3.5 w-3.5" />
-                          <span>New</span>
-                        </button>
-                      </div>
+                      {activeResult.bookingDetails.origin && activeResult.bookingDetails.destination ? (
+                        <p className="text-xs text-slate-500 dark:text-slate-400">
+                          {activeResult.bookingDetails.origin.split(",")[0]} → {activeResult.bookingDetails.destination.split(",")[0]}
+                        </p>
+                      ) : (
+                        <p className="text-xs text-slate-500 dark:text-slate-400">
+                          Last scan: {activeResult.overallStatus.timestamp}
+                        </p>
+                      )}
                     </div>
                   </div>
-                )}
+                  <div className="flex items-center gap-2 w-full sm:w-auto">
+                    <button
+                      type="button"
+                      onClick={() => setIsTrackingModalOpen(true)}
+                      className="flex-1 sm:flex-initial inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2 text-xs font-bold text-white hover:bg-indigo-700 shadow-xs cursor-pointer"
+                    >
+                      <span>View Details Popup</span>
+                      <ArrowRight className="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleTrackNextOrder}
+                      className="flex-1 sm:flex-initial inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-800 dark:text-slate-200 cursor-pointer"
+                    >
+                      <PlusCircle className="h-3.5 w-3.5" />
+                      <span>New</span>
+                    </button>
+                  </div>
+                </div>
               </div>
             )}
 
-            {publicTab === "carriers" && (
-              <div className="animate-in fade-in duration-150">
-                <CourierDirectory
-                  onSelectCourier={(courierId) => {
-                    setSelectedCarrierFromDirectory(courierId);
-                    handleSelectPublicTab("track");
-                    setTimeout(() => {
-                      if (typeof window !== "undefined") {
-                        window.dispatchEvent(
-                          new CustomEvent("trackflow:set-courier", {
-                            detail: { courierId },
-                          })
-                        );
-                      }
-                      const inputEl = document.getElementById("tracking-input") as HTMLInputElement | null;
-                      if (inputEl) {
-                        inputEl.focus();
-                        inputEl.select();
-                      }
-                    }, 120);
-                  }}
-                />
-              </div>
-            )}
+            {/* Supported Carriers Directory */}
+            <CourierDirectory
+              onSelectCourier={(courierId) => {
+                setSelectedCarrierFromDirectory(courierId);
+                setPublicTab("track");
+                if (typeof window !== "undefined") {
+                  window.scrollTo({ top: 0, behavior: "smooth" });
+                }
+                setTimeout(() => {
+                  if (typeof window !== "undefined") {
+                    window.dispatchEvent(
+                      new CustomEvent("trackflow:set-courier", {
+                        detail: { courierId },
+                      })
+                    );
+                  }
+                  const inputEl = document.getElementById("tracking-input") as HTMLInputElement | null;
+                  if (inputEl) {
+                    inputEl.focus();
+                    inputEl.select();
+                  }
+                }, 150);
+              }}
+            />
 
-            {publicTab === "features" && (
-              <div className="animate-in fade-in duration-150">
-                <FeaturesOverview />
-              </div>
-            )}
+            {/* Platform Features */}
+            <FeaturesOverview />
 
-            {publicTab === "faq" && (
-              <div className="animate-in fade-in duration-150">
-                <FaqSection />
-              </div>
-            )}
-          </>
+            {/* Frequently Asked Questions */}
+            <FaqSection />
+          </div>
         )}
       </main>
 
@@ -784,23 +790,6 @@ function TrackingAppContent() {
   );
 }
 
-const emptySubscribe = () => () => {};
-
 export default function HomePage() {
-  const isHydrated = React.useSyncExternalStore(
-    emptySubscribe,
-    () => true,
-    () => false
-  );
-
-  if (!isHydrated) {
-    return (
-      <div
-        className="min-h-screen w-full bg-slate-50 dark:bg-slate-950"
-        suppressHydrationWarning
-      />
-    );
-  }
-
   return <TrackingAppContent />;
 }
