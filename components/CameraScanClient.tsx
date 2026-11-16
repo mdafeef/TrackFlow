@@ -254,6 +254,8 @@ function CameraScanInner() {
     });
   }, []);
 
+  const [cameraRetryTick, setCameraRetryTick] = useState(0);
+
   useEffect(() => {
     guideModeRef.current = cameraGuideMode;
   }, [cameraGuideMode]);
@@ -890,28 +892,7 @@ function CameraScanInner() {
 
       const normalizedCode = identification.normalized;
 
-      // 4. For 1D barcodes, require 2 consistent frame reads within 850ms to eliminate false partial reads
-      if (!is2DQr) {
-        const pending = pendingCandidateRef.current;
-        if (pending.code === normalizedCode && now - pending.lastSeen < 850) {
-          pending.count += 1;
-          pending.lastSeen = now;
-        } else {
-          pendingCandidateRef.current = {
-            code: normalizedCode,
-            count: 1,
-            firstSeen: now,
-            lastSeen: now,
-          };
-          return false;
-        }
-
-        if (pendingCandidateRef.current.count < 2) {
-          return false;
-        }
-      }
-
-      // Confirmed valid scan! Lock scanner for 1.25s so moving away doesn't trigger false secondary scans
+      // 4. Regex-validated consignment formats (India Post, DTDC, BlueDart, Delhivery, etc.) are accepted immediately!
       pendingCandidateRef.current = { code: "", count: 0, firstSeen: 0, lastSeen: 0 };
       invalidCandidateRef.current = { code: "", count: 0, lastSeen: 0 };
       lastScannedRef.current = { code: normalizedCode, timestamp: now };
@@ -1107,7 +1088,19 @@ function CameraScanInner() {
         if (!decodedPass1) {
           // PASS 2: Enhance contrast & sharpness for wrinkled / damaged labels inside Guide Box
           const { hasLabelCandidate } = enhanceDamagedLabelROI(ctx, targetW, targetH);
+          let decodedPass2 = false;
           if (hasLabelCandidate) {
+            decodedPass2 = await tryDecodeCanvas(canvas, ctx, activeGuideMode);
+          }
+
+          // PASS 3: Full-frame square fallback if the barcode/QR sits slightly outside the inner crop
+          if (!decodedPass2) {
+            const fullScale = Math.min(1, 640 / Math.max(vw, vh));
+            const fullW = Math.max(120, Math.floor(vw * fullScale));
+            const fullH = Math.max(120, Math.floor(vh * fullScale));
+            if (canvas.width !== fullW) canvas.width = fullW;
+            if (canvas.height !== fullH) canvas.height = fullH;
+            ctx.drawImage(video, 0, 0, vw, vh, 0, 0, fullW, fullH);
             await tryDecodeCanvas(canvas, ctx, activeGuideMode);
           }
         }
@@ -1121,6 +1114,7 @@ function CameraScanInner() {
 
     const startCamera = async () => {
       try {
+        setCameraError(null);
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
           setCameraError("Camera access is not supported in this browser.");
           return;
@@ -1128,14 +1122,38 @@ function CameraScanInner() {
 
         let stream = cameraStreamRef.current;
         if (!stream || !stream.active) {
-          stream = await navigator.mediaDevices.getUserMedia({
-            video: {
-              facingMode: { ideal: "environment" },
-              width: { ideal: 1280 },
-              height: { ideal: 1280 },
+          const constraintAttempts: MediaStreamConstraints[] = [
+            {
+              video: {
+                facingMode: { ideal: "environment" },
+                width: { ideal: 1280 },
+                height: { ideal: 720 },
+              },
+              audio: false,
             },
-            audio: false,
-          });
+            {
+              video: { facingMode: "environment" },
+              audio: false,
+            },
+            {
+              video: true,
+              audio: false,
+            },
+          ];
+
+          let lastErr: unknown = null;
+          for (const constraints of constraintAttempts) {
+            try {
+              stream = await navigator.mediaDevices.getUserMedia(constraints);
+              if (stream) break;
+            } catch (err) {
+              lastErr = err;
+            }
+          }
+
+          if (!stream) {
+            throw lastErr || new Error("Unable to start camera stream");
+          }
         }
 
         if (isCancelled) {
@@ -1158,6 +1176,13 @@ function CameraScanInner() {
               };
               setIsHwZoomSupported(true);
             }
+            if (Array.isArray(caps.focusMode) && caps.focusMode.includes("continuous")) {
+              videoTrack
+                .applyConstraints({
+                  advanced: [{ focusMode: "continuous" } as unknown as MediaTrackConstraintSet],
+                })
+                .catch(() => {});
+            }
           } catch {
             // ignore
           }
@@ -1165,6 +1190,7 @@ function CameraScanInner() {
 
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
+          videoRef.current.setAttribute("playsinline", "true");
           await videoRef.current.play().catch(() => {});
         }
 
@@ -1186,7 +1212,7 @@ function CameraScanInner() {
       isCancelled = true;
       if (loopTimerId) clearTimeout(loopTimerId);
     };
-  }, [extractCandidateScannedCode, handleStageScannedCode, playScanBeep]);
+  }, [extractCandidateScannedCode, handleStageScannedCode, playScanBeep, cameraRetryTick]);
 
   // Cleanup camera tracks on unmount
   useEffect(() => {
@@ -1574,8 +1600,19 @@ function CameraScanInner() {
         {/* Fixed Square Camera Space (No Focus Option) */}
         <div className="relative flex flex-col items-center justify-center w-full my-auto">
           {cameraError && (
-            <div className="mb-2.5 w-full max-w-[340px] sm:max-w-[380px] rounded-xl border border-amber-700/80 bg-amber-950/90 px-3.5 py-2 text-xs font-semibold text-amber-200 text-center">
-              {cameraError}
+            <div className="mb-2.5 w-full max-w-[340px] sm:max-w-[380px] rounded-xl border border-amber-700/80 bg-amber-950/90 px-3.5 py-2.5 text-xs font-semibold text-amber-200 flex items-center justify-between gap-2">
+              <span className="text-left leading-snug">{cameraError}</span>
+              <button
+                type="button"
+                onClick={() => {
+                  stopCameraStream();
+                  setCameraError(null);
+                  setCameraRetryTick((prev) => prev + 1);
+                }}
+                className="shrink-0 rounded-lg bg-amber-500 hover:bg-amber-400 px-2.5 py-1 text-[11px] font-bold text-slate-950 transition-colors cursor-pointer"
+              >
+                Retry Camera
+              </button>
             </div>
           )}
 

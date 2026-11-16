@@ -683,6 +683,7 @@ export function BulkDashboard({
   const [recentStagedCode, setRecentStagedCode] = useState<string | null>(null);
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [cameraGuideMode, setCameraGuideMode] = useState<"barcode" | "qr" | "both">("both");
+  const cameraGuideModeRef = useRef<"barcode" | "qr" | "both">("both");
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [cameraScanSuccess, setCameraScanSuccess] = useState<{ code: string; carrier: string } | null>(null);
   const [isAutoZoomFocusEnabled, setIsAutoZoomFocusEnabled] = useState<boolean>(true);
@@ -727,6 +728,10 @@ export function BulkDashboard({
   useEffect(() => {
     customerQrScanStepRef.current = customerQrScanStep;
   }, [customerQrScanStep]);
+
+  useEffect(() => {
+    cameraGuideModeRef.current = cameraGuideMode;
+  }, [cameraGuideMode]);
 
   useEffect(() => {
     try {
@@ -1662,71 +1667,51 @@ export function BulkDashboard({
 
     const zxingReader = new MultiFormatReader();
     const hints = new Map();
-    const formats =
-      cameraGuideMode === "barcode"
-        ? [
-            BarcodeFormat.CODE_128,
-            BarcodeFormat.CODE_39,
-            BarcodeFormat.CODE_93,
-            BarcodeFormat.CODABAR,
-            BarcodeFormat.EAN_13,
-            BarcodeFormat.EAN_8,
-            BarcodeFormat.ITF,
-            BarcodeFormat.UPC_A,
-            BarcodeFormat.UPC_E,
-          ]
-        : cameraGuideMode === "qr"
-        ? [BarcodeFormat.QR_CODE, BarcodeFormat.DATA_MATRIX, BarcodeFormat.PDF_417, BarcodeFormat.AZTEC]
-        : [
-            BarcodeFormat.QR_CODE,
-            BarcodeFormat.CODE_128,
-            BarcodeFormat.CODE_39,
-            BarcodeFormat.CODE_93,
-            BarcodeFormat.CODABAR,
-            BarcodeFormat.EAN_13,
-            BarcodeFormat.EAN_8,
-            BarcodeFormat.ITF,
-            BarcodeFormat.UPC_A,
-            BarcodeFormat.UPC_E,
-            BarcodeFormat.DATA_MATRIX,
-            BarcodeFormat.PDF_417,
-            BarcodeFormat.AZTEC,
-          ];
-    hints.set(DecodeHintType.POSSIBLE_FORMATS, formats);
+    hints.set(DecodeHintType.POSSIBLE_FORMATS, [
+      BarcodeFormat.QR_CODE,
+      BarcodeFormat.CODE_128,
+      BarcodeFormat.CODE_39,
+      BarcodeFormat.CODE_93,
+      BarcodeFormat.CODABAR,
+      BarcodeFormat.EAN_13,
+      BarcodeFormat.EAN_8,
+      BarcodeFormat.ITF,
+      BarcodeFormat.UPC_A,
+      BarcodeFormat.UPC_E,
+      BarcodeFormat.DATA_MATRIX,
+      BarcodeFormat.PDF_417,
+      BarcodeFormat.AZTEC,
+    ]);
     hints.set(DecodeHintType.TRY_HARDER, true);
     zxingReader.setHints(hints);
 
     let nativeDetector: {
-      detect: (source: HTMLCanvasElement) => Promise<Array<{ rawValue?: string }>>;
+      detect: (source: HTMLCanvasElement) => Promise<Array<{ rawValue?: string; format?: string }>>;
     } | null = null;
     if (typeof window !== "undefined" && "BarcodeDetector" in window) {
       try {
         const NativeBarcodeDetector = (window as unknown as {
           BarcodeDetector: new (opts: { formats: string[] }) => {
-            detect: (source: HTMLCanvasElement) => Promise<Array<{ rawValue?: string }>>;
+            detect: (source: HTMLCanvasElement) => Promise<Array<{ rawValue?: string; format?: string }>>;
           };
         }).BarcodeDetector;
-        const nativeFormats =
-          cameraGuideMode === "barcode"
-            ? ["code_128", "code_39", "code_93", "codabar", "ean_13", "ean_8", "itf", "upc_a", "upc_e"]
-            : cameraGuideMode === "qr"
-            ? ["qr_code", "data_matrix", "pdf417", "aztec"]
-            : [
-                "qr_code",
-                "code_128",
-                "code_39",
-                "code_93",
-                "codabar",
-                "ean_13",
-                "ean_8",
-                "itf",
-                "upc_a",
-                "upc_e",
-                "data_matrix",
-                "pdf417",
-                "aztec",
-              ];
-        nativeDetector = new NativeBarcodeDetector({ formats: nativeFormats });
+        nativeDetector = new NativeBarcodeDetector({
+          formats: [
+            "qr_code",
+            "code_128",
+            "code_39",
+            "code_93",
+            "codabar",
+            "ean_13",
+            "ean_8",
+            "itf",
+            "upc_a",
+            "upc_e",
+            "data_matrix",
+            "pdf417",
+            "aztec",
+          ],
+        });
       } catch {
         nativeDetector = null;
       }
@@ -1846,7 +1831,7 @@ export function BulkDashboard({
           pendingCourierName:
             detectedCarrier?.shortName || detectedCarrier?.name || "Auto-Detected",
         });
-        if (cameraGuideMode === "barcode") {
+        if (cameraGuideModeRef.current === "barcode") {
           setCameraGuideMode("both");
         }
         playChime(true);
@@ -1880,17 +1865,26 @@ export function BulkDashboard({
     const tryDecodeROI = async (canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D): Promise<boolean> => {
       const w = canvas.width;
       const h = canvas.height;
+      const activeMode = cameraGuideModeRef.current;
 
       if (nativeDetector) {
         try {
           const detected = await nativeDetector.detect(canvas);
-          if (detected && detected.length > 0 && detected[0].rawValue) {
-            if (handleDetectedValue(detected[0].rawValue)) return true;
+          if (detected && detected.length > 0) {
+            for (const item of detected) {
+              if (!item.rawValue) continue;
+              const fmt = (item.format || "").toLowerCase();
+              const is2D =
+                fmt === "qr_code" || fmt === "data_matrix" || fmt === "pdf417" || fmt === "aztec";
+              if (activeMode === "barcode" && is2D) continue;
+              if (activeMode === "qr" && !is2D && fmt !== "") continue;
+              if (handleDetectedValue(item.rawValue)) return true;
+            }
           }
         } catch {}
       }
 
-      if (cameraGuideMode !== "barcode") {
+      if (activeMode !== "barcode") {
         try {
           const imageData = ctx.getImageData(0, 0, w, h);
           const qrResult = jsQR(imageData.data, w, h, {
@@ -1907,15 +1901,34 @@ export function BulkDashboard({
         const binaryBitmap = new BinaryBitmap(new HybridBinarizer(luminanceSource));
         const result = zxingReader.decodeWithState(binaryBitmap);
         if (result && result.getText()) {
-          if (handleDetectedValue(result.getText())) return true;
+          const zFmt = result.getBarcodeFormat();
+          const is2D =
+            zFmt === BarcodeFormat.QR_CODE ||
+            zFmt === BarcodeFormat.DATA_MATRIX ||
+            zFmt === BarcodeFormat.PDF_417 ||
+            zFmt === BarcodeFormat.AZTEC;
+          if (
+            !(activeMode === "barcode" && is2D) &&
+            !(activeMode === "qr" && !is2D) &&
+            handleDetectedValue(result.getText())
+          ) {
+            return true;
+          }
         }
-      } catch {}
+      } catch {
+        // normal when no barcode in frame
+      } finally {
+        try {
+          zxingReader.reset();
+        } catch {}
+      }
 
       return false;
     };
 
     const startCameraAndScanner = async () => {
       try {
+        setCameraError(null);
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
           setCameraError("Camera access is not supported in this browser.");
           return;
@@ -1923,14 +1936,38 @@ export function BulkDashboard({
 
         let stream = cameraStreamRef.current;
         if (!stream || !stream.active) {
-          stream = await navigator.mediaDevices.getUserMedia({
-            video: {
-              facingMode: { ideal: "environment" },
-              width: { ideal: 1920 },
-              height: { ideal: 1080 },
+          const constraintAttempts: MediaStreamConstraints[] = [
+            {
+              video: {
+                facingMode: { ideal: "environment" },
+                width: { ideal: 1280 },
+                height: { ideal: 720 },
+              },
+              audio: false,
             },
-            audio: false,
-          });
+            {
+              video: { facingMode: "environment" },
+              audio: false,
+            },
+            {
+              video: true,
+              audio: false,
+            },
+          ];
+
+          let lastErr: unknown = null;
+          for (const constraints of constraintAttempts) {
+            try {
+              stream = await navigator.mediaDevices.getUserMedia(constraints);
+              if (stream) break;
+            } catch (err) {
+              lastErr = err;
+            }
+          }
+
+          if (!stream) {
+            throw lastErr || new Error("Unable to start camera stream");
+          }
         }
 
         if (isCancelled) {
@@ -1964,6 +2001,7 @@ export function BulkDashboard({
 
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
+          videoRef.current.setAttribute("playsinline", "true");
           await videoRef.current.play().catch(() => {});
         }
 
@@ -1971,22 +2009,26 @@ export function BulkDashboard({
           scanCanvasRef.current = document.createElement("canvas");
         }
 
-        // Continuous frame decoding every 180ms strictly inside the Guide Box ROI
+        // Continuous frame decoding every 160ms with Guide ROI + Full-frame fallback
         scanIntervalId = setInterval(async () => {
           if (isCancelled || !videoRef.current || !scanCanvasRef.current) return;
           const video = videoRef.current;
+          if (video.paused && video.srcObject) {
+            video.play().catch(() => {});
+          }
           if (video.readyState < 2 || video.videoWidth === 0 || video.videoHeight === 0) return;
 
           const vw = video.videoWidth;
           const vh = video.videoHeight;
+          const activeMode = cameraGuideModeRef.current;
 
-          // Calculate source crop strictly matching the Guide Frame
+          // Calculate source crop matching the Guide Frame
           let roiWidthRatio = 0.76;
           let roiHeightRatio = 0.48;
-          if (cameraGuideMode === "barcode") {
+          if (activeMode === "barcode") {
             roiWidthRatio = 0.78;
             roiHeightRatio = 0.28;
-          } else if (cameraGuideMode === "qr") {
+          } else if (activeMode === "qr") {
             const squareSide = Math.min(vw, vh) * 0.54;
             roiWidthRatio = squareSide / vw;
             roiHeightRatio = squareSide / vh;
@@ -2013,7 +2055,7 @@ export function BulkDashboard({
           const ctx = canvas.getContext("2d", { willReadFrequently: true });
           if (!ctx) return;
 
-          // Draw ONLY the cropped Guide Box region
+          // Draw the cropped Guide Box region
           ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, w, h);
 
           // Pass 1: Standard decode on Guide ROI
@@ -2111,7 +2153,16 @@ export function BulkDashboard({
               }
             }
           }
-        }, 180);
+
+          // Pass 3: Full-frame fallback pass if barcode/QR is slightly outside the inner crop
+          const fullScale = Math.min(1, 640 / Math.max(vw, vh));
+          const fullW = Math.max(120, Math.floor(vw * fullScale));
+          const fullH = Math.max(120, Math.floor(vh * fullScale));
+          if (canvas.width !== fullW) canvas.width = fullW;
+          if (canvas.height !== fullH) canvas.height = fullH;
+          ctx.drawImage(video, 0, 0, vw, vh, 0, 0, fullW, fullH);
+          await tryDecodeROI(canvas, ctx);
+        }, 160);
       } catch {
         if (!isCancelled) {
           setCameraError("Camera permission not granted or camera unavailable on this device.");
@@ -2127,7 +2178,6 @@ export function BulkDashboard({
     };
   }, [
     isCameraActive,
-    cameraGuideMode,
     isAutoNextEnabled,
     isAutoZoomFocusEnabled,
     intakeCourier,
