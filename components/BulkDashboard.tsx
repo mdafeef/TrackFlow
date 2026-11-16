@@ -139,6 +139,9 @@ const resolveShipmentIsoDate = (s: BulkShipment): string => {
   return getTodayIso();
 };
 
+const STATIC_TODAY_ISO = "2026-11-14";
+const STATIC_YESTERDAY_ISO = "2026-11-13";
+
 const DEFAULT_SHIPMENTS: BulkShipment[] = [
   {
     id: "bulk-1",
@@ -156,8 +159,8 @@ const DEFAULT_SHIPMENTS: BulkShipment[] = [
     lastUpdated: "Today, 01:44 PM",
     lastLocation: "Nedumkunnam SO",
     recipientName: "Dr. K. R. Nair",
-    customerPhone: "9847011223",
-    importedDate: getTodayIso(),
+    customerPhone: "9847263819",
+    importedDate: STATIC_TODAY_ISO,
   },
   {
     id: "bulk-2",
@@ -174,8 +177,8 @@ const DEFAULT_SHIPMENTS: BulkShipment[] = [
     lastUpdated: "Today, 10:30 AM",
     lastLocation: "Kottakkal Hub",
     recipientName: "Ananya Sharma",
-    customerPhone: "9895122334",
-    importedDate: getTodayIso(),
+    customerPhone: "9895417263",
+    importedDate: STATIC_TODAY_ISO,
   },
   {
     id: "bulk-3",
@@ -192,8 +195,8 @@ const DEFAULT_SHIPMENTS: BulkShipment[] = [
     lastUpdated: "Today, 08:15 AM",
     lastLocation: "Kanpur Transit Hub",
     recipientName: "Vikram Patel",
-    customerPhone: "9415033445",
-    importedDate: getTodayIso(),
+    customerPhone: "9415829374",
+    importedDate: STATIC_TODAY_ISO,
   },
   {
     id: "bulk-4",
@@ -211,8 +214,8 @@ const DEFAULT_SHIPMENTS: BulkShipment[] = [
     lastLocation: "Chennai Central Hub",
     returnReason: "Addressee Moved / Incomplete Address",
     recipientName: "R. Ramanathan",
-    customerPhone: "9840144556",
-    importedDate: getTodayIso(),
+    customerPhone: "9840638192",
+    importedDate: STATIC_TODAY_ISO,
   },
   {
     id: "bulk-5",
@@ -230,12 +233,12 @@ const DEFAULT_SHIPMENTS: BulkShipment[] = [
     lastLocation: "Bangalore Return Hub",
     returnReason: "Consignee Refused Acceptance",
     recipientName: "Mathews Thomas",
-    customerPhone: "9447255667",
+    customerPhone: "9447391826",
     isImported: true,
     batchId: "batch-demo-1",
     batchName: "Batch #1 • sample_records.xlsx",
     importedAt: "Yesterday, 04:45 PM",
-    importedDate: getYesterdayIso(),
+    importedDate: STATIC_YESTERDAY_ISO,
   },
   {
     id: "bulk-6",
@@ -252,12 +255,12 @@ const DEFAULT_SHIPMENTS: BulkShipment[] = [
     lastUpdated: "Today, 06:40 AM",
     lastLocation: "Chennai Air Hub",
     recipientName: "Pooja Verma",
-    customerPhone: "9820366778",
+    customerPhone: "9820746193",
     isImported: true,
     batchId: "batch-demo-1",
     batchName: "Batch #1 • sample_records.xlsx",
     importedAt: "Yesterday, 04:45 PM",
-    importedDate: getYesterdayIso(),
+    importedDate: STATIC_YESTERDAY_ISO,
   },
 ];
 
@@ -277,14 +280,16 @@ export function BulkDashboard({
   onProfileUpdated,
 }: BulkDashboardProps) {
   const router = useRouter();
-  // Shipments state with batch metadata normalization
-  const [shipments, setShipments] = useState<BulkShipment[]>(() => {
-    if (typeof window !== "undefined") {
-      try {
-        const stored = localStorage.getItem("trackflow_bulk_shipments");
-        if (stored) {
-          const list: BulkShipment[] = JSON.parse(stored);
-          return list.map((s) => {
+  // Shipments state with deterministic SSR initialization and client mount hydration
+  const [shipments, setShipments] = useState<BulkShipment[]>(DEFAULT_SHIPMENTS);
+
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem("trackflow_bulk_shipments");
+      if (stored) {
+        const list: BulkShipment[] = JSON.parse(stored);
+        setShipments(
+          list.map((s) => {
             const extractedPin = s.pincode || (s.destination.match(/\b\d{6}\b/)?.[0] ?? "");
             const resolvedIso = resolveShipmentIsoDate(s);
             if (s.isImported && !s.batchId) {
@@ -302,14 +307,22 @@ export function BulkDashboard({
               pincode: extractedPin || undefined,
               importedDate: resolvedIso,
             };
-          });
-        }
-      } catch (e) {
-        console.error(e);
+          })
+        );
+      } else {
+        const todayIso = getTodayIso();
+        const yesterdayIso = getYesterdayIso();
+        setShipments(
+          DEFAULT_SHIPMENTS.map((s) => ({
+            ...s,
+            importedDate: s.isImported ? yesterdayIso : todayIso,
+          }))
+        );
       }
+    } catch (e) {
+      console.error(e);
     }
-    return DEFAULT_SHIPMENTS;
-  });
+  }, []);
 
   const [searchFilter, setSearchFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | "delivered" | "in_transit" | "out_for_delivery" | "returned" | "booked">("all");
@@ -433,12 +446,12 @@ export function BulkDashboard({
   const [analyticsDateFilter, setAnalyticsDateFilter] = useState<
     "all" | "today" | "yesterday" | "last_7_days" | "custom"
   >("all");
-  const [customStartDate, setCustomStartDate] = useState<string>(() => getYesterdayIso());
-  const [customEndDate, setCustomEndDate] = useState<string>(() => getTodayIso());
+  const [customStartDate, setCustomStartDate] = useState<string>(STATIC_YESTERDAY_ISO);
+  const [customEndDate, setCustomEndDate] = useState<string>(STATIC_TODAY_ISO);
   const [isCustomCalendarOpen, setIsCustomCalendarOpen] = useState<boolean>(false);
-  const [calendarMonthCursor, setCalendarMonthCursor] = useState<{ year: number; month: number }>(() => {
-    const now = new Date();
-    return { year: now.getFullYear(), month: now.getMonth() };
+  const [calendarMonthCursor, setCalendarMonthCursor] = useState<{ year: number; month: number }>({
+    year: 2026,
+    month: 10,
   });
   const [calendarPickingField, setCalendarPickingField] = useState<"start" | "end">("start");
 
@@ -446,10 +459,21 @@ export function BulkDashboard({
   const [backupDateFilter, setBackupDateFilter] = useState<
     "all" | "today" | "yesterday" | "last_7_days" | "custom"
   >("all");
-  const [backupStartDate, setBackupStartDate] = useState<string>(() => getYesterdayIso());
-  const [backupEndDate, setBackupEndDate] = useState<string>(() => getTodayIso());
+  const [backupStartDate, setBackupStartDate] = useState<string>(STATIC_YESTERDAY_ISO);
+  const [backupEndDate, setBackupEndDate] = useState<string>(STATIC_TODAY_ISO);
   const [isBackupCalendarOpen, setIsBackupCalendarOpen] = useState<boolean>(false);
   const [backupCalendarPickingField, setBackupCalendarPickingField] = useState<"start" | "end">("start");
+
+  useEffect(() => {
+    const todayIso = getTodayIso();
+    const yesterdayIso = getYesterdayIso();
+    const now = new Date();
+    setCustomStartDate(yesterdayIso);
+    setCustomEndDate(todayIso);
+    setBackupStartDate(yesterdayIso);
+    setBackupEndDate(todayIso);
+    setCalendarMonthCursor({ year: now.getFullYear(), month: now.getMonth() });
+  }, []);
 
   const [exportStatusTarget, setExportStatusTarget] = useState<
     "all" | "booked" | "in_transit" | "out_for_delivery" | "delivered" | "returned"
@@ -469,29 +493,38 @@ export function BulkDashboard({
       return {
         fullName: authUser.fullName,
         email: authUser.email,
-        phone: authUser.phone,
+        phone: strip91FromPhone(authUser.phone || "") || "9847263819",
         companyName: authUser.companyName,
         role: authUser.role,
         hubCity: authUser.hubCity,
         hubPincode: authUser.hubPincode,
       };
     }
-    if (typeof window !== "undefined") {
-      try {
-        const raw = localStorage.getItem("trackflow_user_profile");
-        if (raw) return JSON.parse(raw);
-      } catch {}
-    }
     return {
       fullName: "Mhd Afeef",
       email: "mhdafeef@gmail.com",
-      phone: "9847011223",
+      phone: "9847263819",
       companyName: "TrackFlow Logistics Operations",
       role: "Operations Admin",
       hubCity: "Kochi Central Hub",
       hubPincode: "682001",
     };
   });
+
+  useEffect(() => {
+    if (authUser) return;
+    try {
+      const raw = localStorage.getItem("trackflow_user_profile");
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        setUserProfile({
+          ...parsed,
+          phone: strip91FromPhone(parsed.phone || "") || "9847263819",
+        });
+      }
+    } catch {}
+  }, [authUser]);
+
   const [profileSavedMsg, setProfileSavedMsg] = useState<string | null>(null);
 
   const [prevAuthEmail, setPrevAuthEmail] = useState<string | undefined>(authUser?.email);
@@ -500,7 +533,7 @@ export function BulkDashboard({
     setUserProfile({
       fullName: authUser.fullName,
       email: authUser.email,
-      phone: authUser.phone,
+      phone: strip91FromPhone(authUser.phone || "") || "9847263819",
       companyName: authUser.companyName,
       role: authUser.role,
       hubCity: authUser.hubCity,
@@ -528,38 +561,22 @@ export function BulkDashboard({
   // Auto-check Settings
   // Automatic Background Check is ON by default (15 minutes = 900 seconds)
   const [isAutoCheckEnabled, setIsAutoCheckEnabled] = useState<boolean>(true);
+  const [checkIntervalSec, setCheckIntervalSec] = useState(900);
+  const [secondsRemaining, setSecondsRemaining] = useState(900);
 
   useEffect(() => {
     try {
       localStorage.setItem("trackflow_auto_enabled", "true");
+      const storedInterval = localStorage.getItem("trackflow_auto_interval");
+      if (storedInterval) {
+        const val = parseInt(storedInterval, 10);
+        if (val > 0) {
+          setCheckIntervalSec(val);
+          setSecondsRemaining(val);
+        }
+      }
     } catch {}
   }, []);
-
-  const [checkIntervalSec, setCheckIntervalSec] = useState(() => {
-    if (typeof window !== "undefined") {
-      try {
-        const storedInterval = localStorage.getItem("trackflow_auto_interval");
-        if (storedInterval) {
-          const val = parseInt(storedInterval, 10);
-          if (val > 0) return val;
-        }
-      } catch {}
-    }
-    return 900; // 15 minutes default
-  });
-
-  const [secondsRemaining, setSecondsRemaining] = useState(() => {
-    if (typeof window !== "undefined") {
-      try {
-        const storedInterval = localStorage.getItem("trackflow_auto_interval");
-        if (storedInterval) {
-          const val = parseInt(storedInterval, 10);
-          if (val > 0) return val;
-        }
-      } catch {}
-    }
-    return 900;
-  });
 
   const [isRefreshing, setIsRefreshing] = useState(false);
 
@@ -1325,7 +1342,7 @@ export function BulkDashboard({
   const handleOpenEditShipment = (item: BulkShipment) => {
     setEditingShipment(item);
     setEditCustomerName(item.recipientName || "");
-    setEditCustomerPhone(item.customerPhone || "");
+    setEditCustomerPhone(strip91FromPhone(item.customerPhone || ""));
     setEditPincode(item.pincode || "");
     setEditItemCode(item.itemCode || "");
     setEditDestination(item.destination || "");
@@ -1335,6 +1352,7 @@ export function BulkDashboard({
   // Save Edited Consignment & Customer Details
   const handleSaveEditShipment = () => {
     if (!editingShipment) return;
+    const cleanEditedPhone = strip91FromPhone(editCustomerPhone);
     const updated = shipments.map((s) => {
       if (s.id !== editingShipment.id) return s;
       const statusText =
@@ -1350,7 +1368,7 @@ export function BulkDashboard({
       return {
         ...s,
         recipientName: editCustomerName.trim() || undefined,
-        customerPhone: editCustomerPhone.trim() || undefined,
+        customerPhone: cleanEditedPhone || undefined,
         pincode: editPincode.trim() || undefined,
         itemCode: editItemCode.trim() || undefined,
         destination: editDestination.trim() || s.destination,
@@ -5994,13 +6012,22 @@ export function BulkDashboard({
                     <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1.5">
                       Contact Mobile Number
                     </label>
-                    <div className="relative">
-                      <Phone className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
+                    <div className="flex items-center rounded-xl border border-slate-200 bg-slate-50 focus-within:border-indigo-500 focus-within:bg-white dark:border-slate-700 dark:bg-slate-800 overflow-hidden">
+                      <span className="select-none border-r border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-700/70 px-3 py-2 font-mono text-xs font-bold text-slate-600 dark:text-slate-300 shrink-0">
+                        91
+                      </span>
                       <input
                         type="tel"
-                        value={userProfile.phone}
-                        onChange={(e) => setUserProfile({ ...userProfile, phone: e.target.value })}
-                        className="w-full rounded-xl border border-slate-200 bg-slate-50 pl-9 pr-3 py-2 font-mono text-xs font-semibold text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-white focus:border-indigo-500 focus:outline-none"
+                        inputMode="numeric"
+                        value={strip91FromPhone(userProfile.phone)}
+                        onChange={(e) =>
+                          setUserProfile({
+                            ...userProfile,
+                            phone: strip91FromPhone(e.target.value),
+                          })
+                        }
+                        placeholder="10-digit number"
+                        className="w-full bg-transparent px-3 py-2 font-mono text-xs font-semibold text-slate-900 placeholder:font-sans placeholder:text-slate-400 focus:outline-none dark:text-white"
                       />
                     </div>
                   </div>
@@ -6111,15 +6138,21 @@ export function BulkDashboard({
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1">
-                    Customer Number
+                    Customer Mobile
                   </label>
-                  <input
-                    type="tel"
-                    value={editCustomerPhone}
-                    onChange={(e) => setEditCustomerPhone(e.target.value)}
-                    placeholder="e.g. 9847011223"
-                    className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-xs font-semibold text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-white focus:border-indigo-500 focus:outline-none"
-                  />
+                  <div className="flex items-center rounded-xl border border-slate-200 bg-slate-50 focus-within:border-indigo-500 focus-within:bg-white dark:border-slate-700 dark:bg-slate-800 overflow-hidden">
+                    <span className="select-none border-r border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-700/70 px-2.5 py-2 font-mono text-xs font-bold text-slate-600 dark:text-slate-300 shrink-0">
+                      91
+                    </span>
+                    <input
+                      type="tel"
+                      inputMode="numeric"
+                      value={editCustomerPhone}
+                      onChange={(e) => setEditCustomerPhone(strip91FromPhone(e.target.value))}
+                      placeholder="10-digit number"
+                      className="w-full bg-transparent px-2.5 py-2 font-mono text-xs font-semibold text-slate-900 placeholder:font-sans placeholder:text-slate-400 focus:outline-none dark:text-white"
+                    />
+                  </div>
                 </div>
 
                 <div>
@@ -7788,17 +7821,23 @@ export function BulkDashboard({
                         className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 focus:border-indigo-500 focus:outline-none"
                       />
 
-                      {/* Customer Phone (automatically strips 91 if entered with 91) */}
-                      <input
-                        type="tel"
-                        placeholder="Customer Phone Number"
-                        value={intakePhone}
-                        onChange={(e) => {
-                          setIntakePhone(strip91FromPhone(e.target.value));
-                          setIntakeError("");
-                        }}
-                        className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-mono text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 focus:border-indigo-500 focus:outline-none"
-                      />
+                      {/* Customer Mobile Number (Fixed 91 + 10 digits, automatically strips 91 if pasted) */}
+                      <div className="flex items-center rounded-xl border border-slate-200 bg-slate-50 focus-within:border-indigo-500 focus-within:bg-white dark:border-slate-700 dark:bg-slate-900 overflow-hidden">
+                        <span className="select-none border-r border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 px-2.5 py-2 font-mono text-xs font-bold text-slate-600 dark:text-slate-300 shrink-0">
+                          91
+                        </span>
+                        <input
+                          type="tel"
+                          inputMode="numeric"
+                          placeholder="10-digit mobile number"
+                          value={intakePhone}
+                          onChange={(e) => {
+                            setIntakePhone(strip91FromPhone(e.target.value));
+                            setIntakeError("");
+                          }}
+                          className="w-full bg-transparent px-2.5 py-2 text-xs font-mono text-slate-900 placeholder:font-sans placeholder:text-slate-400 focus:outline-none dark:text-slate-200"
+                        />
+                      </div>
 
                       {/* Pincode */}
                       <input
@@ -8110,21 +8149,27 @@ export function BulkDashboard({
                                   />
                                 </td>
 
-                                {/* Customer Number (Editable) */}
+                                {/* Customer Mobile Number (Editable, Fixed 91 + 10 digits) */}
                                 <td className="py-2.5 px-3 font-mono">
-                                  <input
-                                    type="tel"
-                                    placeholder="Mobile Number"
-                                    value={item.customerPhone || ""}
-                                    onChange={(e) =>
-                                      handleUpdateStagedCustomerField(
-                                        item.id,
-                                        "customerPhone",
-                                        e.target.value.replace(/[^0-9+\-\s]/g, "").slice(0, 15)
-                                      )
-                                    }
-                                    className="w-28 rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-mono text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
-                                  />
+                                  <div className="inline-flex items-center rounded-lg border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800 overflow-hidden">
+                                    <span className="select-none border-r border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-700/70 px-1.5 py-1 font-mono text-[10px] font-bold text-slate-500 dark:text-slate-300 shrink-0">
+                                      91
+                                    </span>
+                                    <input
+                                      type="tel"
+                                      inputMode="numeric"
+                                      placeholder="10 digits"
+                                      value={strip91FromPhone(item.customerPhone || "")}
+                                      onChange={(e) =>
+                                        handleUpdateStagedCustomerField(
+                                          item.id,
+                                          "customerPhone",
+                                          strip91FromPhone(e.target.value)
+                                        )
+                                      }
+                                      className="w-22 bg-transparent px-2 py-1 text-[11px] font-mono text-slate-800 placeholder:font-sans placeholder:text-slate-400 focus:outline-none dark:text-slate-200"
+                                    />
+                                  </div>
                                 </td>
 
                                 {/* Pincode (Editable) */}

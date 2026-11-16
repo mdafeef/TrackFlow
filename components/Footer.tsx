@@ -36,8 +36,8 @@ export function Footer() {
         </div>
 
         <div className="pt-6 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-slate-400 dark:text-slate-500">
-          <div>
-            © {new Date().getFullYear()} TrackFlow. Free & Open Parcel Tracking for Everyone.
+          <div suppressHydrationWarning>
+            © 2026 TrackFlow. Free &amp; Open Parcel Tracking for Everyone.
           </div>
           <div className="flex items-center gap-6">
             <span>All trademarks and brand logos belong to their respective courier carriers.</span>

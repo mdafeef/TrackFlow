@@ -13,13 +13,13 @@ import {
   KeyRound,
   Building2,
   MapPin,
-  Phone,
   Sparkles,
   Copy,
   LogIn,
   UserPlus,
 } from "lucide-react";
 import { AuthUserProfile } from "@/app/api/auth/route";
+import { strip91FromPhone } from "@/lib/customerQrCrypto";
 
 interface AuthModalProps {
   isOpen: boolean;
@@ -63,6 +63,7 @@ export function AuthModal({
   };
 
   const executeAuthRequest = async (payload: Record<string, string>) => {
+    if (isSubmitting) return;
     setErrorMsg(null);
     setIsSubmitting(true);
     try {
@@ -76,31 +77,36 @@ export function AuthModal({
         throw new Error(data.error || "Authentication failed. Please check your credentials.");
       }
 
+      const normalizedUser: AuthUserProfile = {
+        ...data.user,
+        phone: strip91FromPhone(data.user.phone || "") || "9847263819",
+      };
+
       try {
-        localStorage.setItem("trackflow_auth_user", JSON.stringify(data.user));
+        localStorage.setItem("trackflow_auth_user", JSON.stringify(normalizedUser));
         if (data.token) {
           localStorage.setItem("trackflow_auth_token", data.token);
         }
         localStorage.setItem(
           "trackflow_user_profile",
           JSON.stringify({
-            fullName: data.user.fullName,
-            email: data.user.email,
-            phone: data.user.phone,
-            companyName: data.user.companyName,
-            role: data.user.role,
-            hubCity: data.user.hubCity,
-            hubPincode: data.user.hubPincode,
+            fullName: normalizedUser.fullName,
+            email: normalizedUser.email,
+            phone: normalizedUser.phone,
+            companyName: normalizedUser.companyName,
+            role: normalizedUser.role,
+            hubCity: normalizedUser.hubCity,
+            hubPincode: normalizedUser.hubPincode,
           })
         );
       } catch {
         // ignore storage errors
       }
 
-      onSuccess(data.user, data.token);
+      setIsSubmitting(false);
+      onSuccess(normalizedUser, data.token);
     } catch (err: unknown) {
       setErrorMsg((err as Error)?.message || "Could not sign in.");
-    } finally {
       setIsSubmitting(false);
     }
   };
@@ -114,12 +120,17 @@ export function AuthModal({
         password,
       });
     } else {
+      const cleanPhone = strip91FromPhone(phone);
+      if (phone.trim() && cleanPhone.length !== 10) {
+        setErrorMsg("Mobile number must be exactly 10 digits.");
+        return;
+      }
       await executeAuthRequest({
         action: "register",
         fullName: fullName.trim(),
         email: regEmail.trim(),
         password: regPassword,
-        phone: phone.trim() || "9847011223",
+        phone: cleanPhone || "9847263819",
         companyName: companyName.trim() || "TrackFlow Operations",
         hubCity: hubCity.trim() || "Kochi Central Hub",
         hubPincode: hubPincode.trim() || "682001",
@@ -147,7 +158,7 @@ export function AuthModal({
 
   const cardContent = (
     <div
-      className="relative z-10 w-full max-w-md rounded-3xl border border-slate-200/90 bg-white p-5 sm:p-6 shadow-2xl dark:border-slate-800 dark:bg-slate-900 space-y-5 animate-in fade-in zoom-in-95 duration-150"
+      className="relative z-10 w-full max-w-md rounded-3xl border border-slate-200/90 bg-white p-5 sm:p-6 shadow-2xl dark:border-slate-800 dark:bg-slate-900 space-y-5 transform-gpu"
       onClick={(e) => e.stopPropagation()}
     >
       {/* Header */}
@@ -357,14 +368,20 @@ export function AuthModal({
                 <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
                   Mobile Number
                 </label>
-                <div className="relative">
-                  <Phone className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
+                <div className="flex items-center rounded-xl border border-slate-200 bg-slate-50 focus-within:border-indigo-500 focus-within:bg-white dark:border-slate-700 dark:bg-slate-800 overflow-hidden">
+                  <span className="select-none border-r border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-700/70 px-2.5 py-2 font-mono text-xs font-bold text-slate-600 dark:text-slate-300 shrink-0">
+                    91
+                  </span>
                   <input
                     type="tel"
+                    inputMode="numeric"
                     value={phone}
-                    onChange={(e) => setPhone(e.target.value)}
-                    placeholder="9847011223"
-                    className="w-full rounded-xl border border-slate-200 bg-slate-50 pl-9 pr-3 py-2 font-mono text-xs font-semibold text-slate-900 placeholder:text-slate-400 focus:border-indigo-500 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
+                    onChange={(e) => {
+                      setPhone(strip91FromPhone(e.target.value));
+                      setErrorMsg(null);
+                    }}
+                    placeholder="10-digit number"
+                    className="w-full bg-transparent px-2.5 py-2 font-mono text-xs font-semibold text-slate-900 placeholder:font-sans placeholder:text-slate-400 focus:outline-none dark:text-white"
                   />
                 </div>
               </div>
@@ -436,8 +453,10 @@ export function AuthModal({
                   <MapPin className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
                   <input
                     type="text"
+                    inputMode="numeric"
+                    maxLength={6}
                     value={hubPincode}
-                    onChange={(e) => setHubPincode(e.target.value)}
+                    onChange={(e) => setHubPincode(e.target.value.replace(/\D/g, "").slice(0, 6))}
                     placeholder="682001"
                     className="w-full rounded-xl border border-slate-200 bg-slate-50 pl-9 pr-3 py-2 font-mono text-xs font-semibold text-slate-900 placeholder:text-slate-400 focus:border-indigo-500 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
                   />
@@ -456,7 +475,7 @@ export function AuthModal({
         <button
           type="submit"
           disabled={isSubmitting}
-          className="w-full flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-700 hover:to-violet-700 py-2.5 text-xs font-bold text-white shadow-sm shadow-indigo-500/20 transition-all cursor-pointer disabled:opacity-60"
+          className="w-full flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-700 hover:to-violet-700 py-2.5 text-xs font-bold text-white shadow-sm shadow-indigo-500/20 transition-colors cursor-pointer disabled:opacity-60"
         >
           {isSubmitting ? (
             <div className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
@@ -494,8 +513,12 @@ export function AuthModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs animate-in fade-in duration-150"
-      onClick={onClose}
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/75 overscroll-contain transform-gpu"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) {
+          onClose();
+        }
+      }}
     >
       {cardContent}
     </div>

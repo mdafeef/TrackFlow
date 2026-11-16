@@ -48,26 +48,26 @@ export function strip91FromPhone(rawPhone: string): string {
   // Check if explicitly prefixed with +91, 091, or "91 " / "91-"
   if (/^(?:\+?0?91[\s\-().]+)\d+/i.test(trimmed)) {
     const rest = trimmed.replace(/^(?:\+?0?91[\s\-().]+)/i, "").replace(/\D/g, "");
-    return rest.length > 10 ? rest.slice(0, 10) : rest;
+    return rest.slice(0, 10);
   }
 
   const digits = trimmed.replace(/\D/g, "");
   if (!digits) return "";
 
   if (digits.length === 13 && digits.startsWith("091")) {
-    return digits.slice(3);
+    return digits.slice(3, 13);
   }
   if (digits.length === 12 && digits.startsWith("91")) {
-    return digits.slice(2);
+    return digits.slice(2, 12);
   }
   if (digits.length === 11 && digits.startsWith("0")) {
-    return digits.slice(1);
+    return digits.slice(1, 11);
   }
   if (digits.length > 10 && digits.startsWith("91")) {
     return digits.slice(2, 12);
   }
 
-  return digits;
+  return digits.slice(0, 10);
 }
 
 /**
@@ -112,7 +112,7 @@ export function getIndianPostalStateFromPincode(pincode: string): string {
 }
 
 /**
- * Normalizes a phone number by removing `91` / `+91` / `0` prefix and feeding the clean number.
+ * Normalizes a phone number by removing `91` / `+91` / `0` prefix and enforcing a 10-digit Indian mobile number.
  */
 export function validateIndianPhone(rawPhone: string): IndianPhoneValidationResult {
   const trimmed = (rawPhone || "").trim();
@@ -123,7 +123,7 @@ export function validateIndianPhone(rawPhone: string): IndianPhoneValidationResu
       formattedWith91: "",
       with91Compact: "",
       had91Prefix: false,
-      error: "Customer phone number is required.",
+      error: "Mobile number is required.",
     };
   }
 
@@ -133,22 +133,22 @@ export function validateIndianPhone(rawPhone: string): IndianPhoneValidationResu
     (rawDigits.length > 10 && (rawDigits.startsWith("91") || rawDigits.startsWith("091")));
 
   const cleanNumber = strip91FromPhone(trimmed);
-  if (!cleanNumber) {
+  if (cleanNumber.length !== 10) {
     return {
       isValid: false,
-      normalized10: "",
-      formattedWith91: "",
-      with91Compact: "",
+      normalized10: cleanNumber,
+      formattedWith91: cleanNumber ? `91 ${cleanNumber}` : "",
+      with91Compact: cleanNumber ? `91${cleanNumber}` : "",
       had91Prefix,
-      error: "Please enter a valid phone number.",
+      error: "Mobile number must be 10 digits.",
     };
   }
 
   return {
     isValid: true,
     normalized10: cleanNumber,
-    formattedWith91: cleanNumber,
-    with91Compact: cleanNumber,
+    formattedWith91: `91 ${cleanNumber}`,
+    with91Compact: `91${cleanNumber}`,
     had91Prefix,
   };
 }

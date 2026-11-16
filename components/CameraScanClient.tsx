@@ -126,27 +126,16 @@ function enhanceDamagedLabelROI(
   return { hasLabelCandidate };
 }
 
-export function CameraScanClient() {
+const emptyScanSubscribe = () => () => {};
+
+function CameraScanInner() {
   const router = useRouter();
 
   // Camera & Decoder state
   const [cameraGuideMode, setCameraGuideMode] = useState<"barcode" | "qr" | "both">("both");
   const [isAutoNextEnabled, setIsAutoNextEnabled] = useState<boolean>(true);
   const [isPasteAnywayEnabled, setIsPasteAnywayEnabled] = useState<boolean>(false);
-  const [isScanCustomerQrEnabled, setIsScanCustomerQrEnabled] = useState<boolean>(() => {
-    if (typeof window !== "undefined") {
-      try {
-        const rawCtx = sessionStorage.getItem(SCAN_CONTEXT_KEY);
-        if (rawCtx) {
-          const parsed = JSON.parse(rawCtx);
-          if (typeof parsed.scanCustomerQr === "boolean") return parsed.scanCustomerQr;
-        }
-        const saved = localStorage.getItem("trackflow_scan_customer_qr");
-        if (saved === "false") return false;
-      } catch {}
-    }
-    return true;
-  });
+  const [isScanCustomerQrEnabled, setIsScanCustomerQrEnabled] = useState<boolean>(true);
   const [customerQrScanStep, setCustomerQrScanStep] = useState<{
     step: "awaiting_awb" | "awaiting_customer_qr";
     pendingAwb: string;
@@ -197,34 +186,13 @@ export function CameraScanClient() {
   } | null>(null);
 
   // Default Status: ALWAYS "booked" by default when adding new consignments
-  const [defaultStatus, setDefaultStatus] = useState<StatusOption>(() => {
-    if (typeof window !== "undefined") {
-      try {
-        const rawCtx = sessionStorage.getItem(SCAN_CONTEXT_KEY);
-        if (rawCtx) {
-          const parsed = JSON.parse(rawCtx);
-          if (parsed.defaultStatus) return parsed.defaultStatus;
-        }
-      } catch {}
-    }
-    return "booked";
-  });
+  const [defaultStatus, setDefaultStatus] = useState<StatusOption>("booked");
   const [isStatusMenuOpen, setIsStatusMenuOpen] = useState<boolean>(false);
 
   // Staged Consignments scanned during session
-  const [stagedItems, setStagedItems] = useState<BulkShipment[]>(() => {
-    if (typeof window !== "undefined") {
-      try {
-        const existingStaged = localStorage.getItem(STAGED_STORAGE_KEY);
-        if (existingStaged) {
-          const parsedStaged = JSON.parse(existingStaged);
-          if (Array.isArray(parsedStaged)) return parsedStaged;
-        }
-      } catch {}
-    }
-    return [];
-  });
+  const [stagedItems, setStagedItems] = useState<BulkShipment[]>([]);
   const stagedItemsRef = useRef<BulkShipment[]>(stagedItems);
+  const hasHydratedStorageRef = useRef<boolean>(false);
   const [isQueueExpanded, setIsQueueExpanded] = useState<boolean>(false);
   const [isCancelConfirmOpen, setIsCancelConfirmOpen] = useState<boolean>(false);
   const [duplicateAlert, setDuplicateAlert] = useState<{ text: string; ts: number } | null>(null);
@@ -249,6 +217,42 @@ export function CameraScanClient() {
     pincode: string;
     itemCode: string;
   } | null>(null);
+
+  // Hydrate client storage after mount to prevent SSR/Client hydration mismatch
+  useEffect(() => {
+    queueMicrotask(() => {
+      try {
+        const rawCtx = sessionStorage.getItem(SCAN_CONTEXT_KEY);
+        if (rawCtx) {
+          const parsed = JSON.parse(rawCtx);
+          if (typeof parsed.scanCustomerQr === "boolean") {
+            setIsScanCustomerQrEnabled(parsed.scanCustomerQr);
+            isScanCustomerQrEnabledRef.current = parsed.scanCustomerQr;
+          }
+          if (parsed.defaultStatus) {
+            setDefaultStatus(parsed.defaultStatus);
+            defaultStatusRef.current = parsed.defaultStatus;
+          }
+        } else {
+          const savedQr = localStorage.getItem("trackflow_scan_customer_qr");
+          if (savedQr === "false") {
+            setIsScanCustomerQrEnabled(false);
+            isScanCustomerQrEnabledRef.current = false;
+          }
+        }
+
+        const existingStaged = localStorage.getItem(STAGED_STORAGE_KEY);
+        if (existingStaged) {
+          const parsedStaged = JSON.parse(existingStaged);
+          if (Array.isArray(parsedStaged)) {
+            setStagedItems(parsedStaged);
+            stagedItemsRef.current = parsedStaged;
+          }
+        }
+      } catch {}
+      hasHydratedStorageRef.current = true;
+    });
+  }, []);
 
   useEffect(() => {
     guideModeRef.current = cameraGuideMode;
@@ -288,6 +292,7 @@ export function CameraScanClient() {
 
   useEffect(() => {
     isScanCustomerQrEnabledRef.current = isScanCustomerQrEnabled;
+    if (!hasHydratedStorageRef.current) return;
     try {
       localStorage.setItem("trackflow_scan_customer_qr", String(isScanCustomerQrEnabled));
     } catch {}
@@ -299,6 +304,7 @@ export function CameraScanClient() {
 
   useEffect(() => {
     stagedItemsRef.current = stagedItems;
+    if (!hasHydratedStorageRef.current) return;
     try {
       localStorage.setItem(STAGED_STORAGE_KEY, JSON.stringify(stagedItems));
     } catch {
@@ -2071,4 +2077,23 @@ export function CameraScanClient() {
       )}
     </div>
   );
+}
+
+export function CameraScanClient() {
+  const isHydrated = React.useSyncExternalStore(
+    emptyScanSubscribe,
+    () => true,
+    () => false
+  );
+
+  if (!isHydrated) {
+    return (
+      <div
+        className="fixed inset-0 bg-slate-950"
+        suppressHydrationWarning
+      />
+    );
+  }
+
+  return <CameraScanInner />;
 }

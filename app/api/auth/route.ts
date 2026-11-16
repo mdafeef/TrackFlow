@@ -34,13 +34,24 @@ function hashPassword(password: string, salt: string): string {
 
 const DEFAULT_DEMO_SALT = "trackflow_demo_salt_2026";
 
+function normalize10DigitPhone(raw: string): string {
+  const trimmed = (raw || "").trim();
+  if (!trimmed) return "9847263819";
+  const digits = trimmed.replace(/\D/g, "");
+  if (digits.length === 13 && digits.startsWith("091")) return digits.slice(3, 13);
+  if (digits.length === 12 && digits.startsWith("91")) return digits.slice(2, 12);
+  if (digits.length === 11 && digits.startsWith("0")) return digits.slice(1, 11);
+  if (digits.length > 10 && digits.startsWith("91")) return digits.slice(2, 12);
+  return digits.slice(0, 10) || "9847263819";
+}
+
 const SEED_USERS: StoredUserRecord[] = [
   {
     id: "usr-demo-01",
     loginId: "TF-DEMO-01",
     email: "demo@trackflow.in",
     fullName: "Mhd Afeef",
-    phone: "9847011223",
+    phone: "9847263819",
     companyName: "TrackFlow Logistics",
     role: "Operations Admin",
     hubCity: "Kochi Central Hub",
@@ -53,7 +64,7 @@ const SEED_USERS: StoredUserRecord[] = [
     loginId: "TF-ADMIN-01",
     email: "mhdafeef@gmail.com",
     fullName: "Mhd Afeef",
-    phone: "9847011223",
+    phone: "9847263819",
     companyName: "TrackFlow Logistics",
     role: "Workspace Owner",
     hubCity: "Kochi Central Hub",
@@ -92,7 +103,7 @@ function toPublicProfile(user: StoredUserRecord): AuthUserProfile {
     loginId: user.loginId,
     email: user.email,
     fullName: user.fullName,
-    phone: user.phone,
+    phone: normalize10DigitPhone(user.phone),
     companyName: user.companyName,
     role: user.role,
     hubCity: user.hubCity,
@@ -222,7 +233,7 @@ export async function POST(req: NextRequest) {
         .trim()
         .toLowerCase();
       const password = String(body.password || "");
-      const phone = String(body.phone || "9847011223").trim();
+      const phone = normalize10DigitPhone(String(body.phone || "9847263819"));
       const companyName = String(body.companyName || "TrackFlow Operations").trim();
       const hubCity = String(body.hubCity || "Kochi Central Hub").trim();
       const hubPincode = String(body.hubPincode || "682001").trim();
@@ -298,13 +309,17 @@ export async function POST(req: NextRequest) {
         );
       }
 
+      const normalizedPhone = profileUpdate.phone
+        ? normalize10DigitPhone(profileUpdate.phone)
+        : undefined;
+
       const updatedUsers = users.map((u) => {
         if (u.id === profileUpdate.id || u.email.toLowerCase() === profileUpdate.email?.toLowerCase()) {
           return {
             ...u,
             fullName: profileUpdate.fullName || u.fullName,
             email: profileUpdate.email || u.email,
-            phone: profileUpdate.phone || u.phone,
+            phone: normalizedPhone || normalize10DigitPhone(u.phone),
             companyName: profileUpdate.companyName || u.companyName,
             role: profileUpdate.role || u.role,
             hubCity: profileUpdate.hubCity || u.hubCity,
@@ -320,7 +335,7 @@ export async function POST(req: NextRequest) {
         loginId: profileUpdate.loginId || "TF-DEMO-01",
         email: profileUpdate.email,
         fullName: profileUpdate.fullName || "Operator",
-        phone: profileUpdate.phone || "",
+        phone: normalizedPhone || "9847263819",
         companyName: profileUpdate.companyName || "TrackFlow Logistics",
         role: profileUpdate.role || "Operations Admin",
         hubCity: profileUpdate.hubCity || "Kochi Central Hub",

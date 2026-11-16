@@ -82,7 +82,7 @@ const INITIAL_SAMPLE_LABELS: LabelPrintItem[] = [
   {
     id: "lbl-1",
     customerName: "Ananya Menon",
-    customerPhone: "9847012345",
+    customerPhone: "9847263819",
     pincode: "682001",
     itemCode: "ITM-KRL-104",
     deliveryAddress: "Flat 4B, Lotus Residency, MG Road, Ernakulam, Kochi",
@@ -93,7 +93,7 @@ const INITIAL_SAMPLE_LABELS: LabelPrintItem[] = [
   {
     id: "lbl-2",
     customerName: "Rahul Sharma",
-    customerPhone: "9820156789",
+    customerPhone: "9820746193",
     pincode: "400001",
     itemCode: "ITM-BOM-209",
     deliveryAddress: "2nd Floor, Fort Commercial Complex, D.N. Road, Mumbai",
@@ -104,7 +104,7 @@ const INITIAL_SAMPLE_LABELS: LabelPrintItem[] = [
   {
     id: "lbl-3",
     customerName: "Karthik Nair",
-    customerPhone: "9447123987",
+    customerPhone: "9447391826",
     pincode: "695001",
     itemCode: "ITM-TVM-312",
     deliveryAddress: "TC 24/812, Statue Junction, MG Road, Thiruvananthapuram",
@@ -115,7 +115,7 @@ const INITIAL_SAMPLE_LABELS: LabelPrintItem[] = [
   {
     id: "lbl-4",
     customerName: "Priya Venkatesh",
-    customerPhone: "9840911223",
+    customerPhone: "9840638192",
     pincode: "600001",
     itemCode: "ITM-MAA-418",
     deliveryAddress: "No. 18, Armenian Street, Parrys Corner, George Town, Chennai",
@@ -347,7 +347,7 @@ export default function BulkLabelPrintTool({
   shipments = [],
   defaultOfficeName = "TRACKFLOW DISPATCH HUB",
   defaultOfficeHub = "Kochi GPO Hub (682001)",
-  defaultOfficePhone = "9847000000",
+  defaultOfficePhone = "9847529184",
   onSimulateScanInIntake,
 }: BulkLabelPrintToolProps) {
   const [labels, setLabels] = useState<LabelPrintItem[]>(INITIAL_SAMPLE_LABELS);
@@ -529,8 +529,8 @@ export default function BulkLabelPrintTool({
     }
 
     const cleanPhone = strip91FromPhone(formPhone);
-    if (!cleanPhone) {
-      setFormError("Please enter Customer Phone Number.");
+    if (cleanPhone.length !== 10) {
+      setFormError("Please enter a valid 10-digit Customer Mobile Number.");
       return;
     }
 
@@ -698,7 +698,7 @@ export default function BulkLabelPrintTool({
     const sampleRows = [
       {
         "Customer Name": "Ananya Menon",
-        "Customer Number": "9847012345",
+        "Customer Number": "9847263819",
         Pincode: "682001",
         "Item Code": "ITM-KRL-104",
         "Delivery Address": "Flat 4B, Lotus Residency, MG Road, Ernakulam, Kochi",
@@ -707,7 +707,7 @@ export default function BulkLabelPrintTool({
       },
       {
         "Customer Name": "Vikramaditya Rao",
-        "Customer Number": "9845098765",
+        "Customer Number": "9845628391",
         Pincode: "560001",
         "Item Code": "ITM-BLR-502",
         "Delivery Address": "14 Brigade Road, Ashok Nagar, Bengaluru",
@@ -716,7 +716,7 @@ export default function BulkLabelPrintTool({
       },
       {
         "Customer Name": "Meera Krishnan",
-        "Customer Number": "9446011223",
+        "Customer Number": "9446827153",
         Pincode: "673001",
         "Item Code": "ITM-CLT-881",
         "Delivery Address": "SM Street, Palayam, Kozhikode",
@@ -1419,22 +1419,28 @@ export default function BulkLabelPrintTool({
                 />
               </div>
 
-              {/* Customer Phone (automatically strips 91 if pasted/typed with 91) */}
+              {/* Customer Mobile Number (Fixed 91 + 10 digits, automatically strips 91 if pasted) */}
               <div className="lg:col-span-3 space-y-1">
                 <label className="text-[11px] font-bold text-slate-600 dark:text-slate-400 flex items-center gap-1">
                   <Phone className="h-3 w-3 text-slate-400" />
-                  <span>Phone Number *</span>
+                  <span>Mobile Number *</span>
                 </label>
-                <input
-                  type="tel"
-                  value={formPhone}
-                  onChange={(e) => {
-                    setFormPhone(strip91FromPhone(e.target.value));
-                    setFormError(null);
-                  }}
-                  placeholder="9847012345"
-                  className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-mono tabular-nums font-semibold text-slate-900 focus:border-indigo-600 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
-                />
+                <div className="flex items-center rounded-xl border border-slate-200 bg-slate-50 focus-within:border-indigo-600 focus-within:bg-white dark:border-slate-700 dark:bg-slate-800 overflow-hidden">
+                  <span className="select-none border-r border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-700/70 px-2.5 py-2 font-mono text-xs font-bold text-slate-600 dark:text-slate-300 shrink-0">
+                    91
+                  </span>
+                  <input
+                    type="tel"
+                    inputMode="numeric"
+                    value={formPhone}
+                    onChange={(e) => {
+                      setFormPhone(strip91FromPhone(e.target.value));
+                      setFormError(null);
+                    }}
+                    placeholder="10-digit number"
+                    className="w-full bg-transparent px-2.5 py-2 text-xs font-mono tabular-nums font-semibold text-slate-900 placeholder:font-sans placeholder:text-slate-400 focus:outline-none dark:text-white"
+                  />
+                </div>
               </div>
 
               {/* Pincode */}
@@ -1570,7 +1576,7 @@ export default function BulkLabelPrintTool({
                 type="button"
                 onClick={() =>
                   setSmartPasteText(
-                    `Arjun Nair | 9847112233 | 682016 | ITM-KOC-701 | Panampilly Nagar, Ernakulam, Kochi\nDivya Menon | 9447889900 | 695014 | ITM-TVM-702 | Vazhuthacaud, Thiruvananthapuram\nSuresh Babu | 9840223344 | 600017 | ITM-MAA-703 | Pondy Bazaar, T Nagar, Chennai`
+                    `Arjun Nair | 9895417263 | 682016 | ITM-KOC-701 | Panampilly Nagar, Ernakulam, Kochi\nDivya Menon | 9447582914 | 695014 | ITM-TVM-702 | Vazhuthacaud, Thiruvananthapuram\nSuresh Babu | 9840719283 | 600017 | ITM-MAA-703 | Pondy Bazaar, T Nagar, Chennai`
                   )
                 }
                 className="text-[11px] font-bold text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer shrink-0"
@@ -1586,7 +1592,7 @@ export default function BulkLabelPrintTool({
                 setSmartPasteText(e.target.value);
                 setFormError(null);
               }}
-              placeholder={`Example 1 (Spreadsheet / Pipe / Comma lines):\nAnanya Menon, 9847012345, 682001, ITM-104, MG Road Ernakulam Kochi\n\nExample 2 (WhatsApp Address Block):\nRahul Sharma\nFort Commercial Complex, Mumbai\nPin: 400001\nPh: 9820156789\nItem: ITM-209`}
+              placeholder={`Example 1 (Spreadsheet / Pipe / Comma lines):\nAnanya Menon, 9847263819, 682001, ITM-104, MG Road Ernakulam Kochi\n\nExample 2 (WhatsApp Address Block):\nRahul Sharma\nFort Commercial Complex, Mumbai\nPin: 400001\nPh: 9820746193\nItem: ITM-209`}
               className="w-full rounded-2xl border border-slate-200 bg-slate-50 p-3.5 font-mono text-xs text-slate-900 focus:border-indigo-600 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
             />
 
@@ -1645,17 +1651,23 @@ export default function BulkLabelPrintTool({
               <div className="space-y-1">
                 <label className="text-[11px] font-bold text-slate-600 dark:text-slate-400 flex items-center gap-1">
                   <Phone className="h-3 w-3 text-slate-400" />
-                  <span>Sender Support Phone</span>
+                  <span>Sender Support Mobile</span>
                 </label>
-                <input
-                  type="text"
-                  value={senderOfficePhone}
-                  onChange={(e) =>
-                    setSenderOfficePhone(strip91FromPhone(e.target.value))
-                  }
-                  placeholder="9847000000"
-                  className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-mono tabular-nums font-semibold text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-white"
-                />
+                <div className="flex items-center rounded-xl border border-slate-200 bg-slate-50 focus-within:border-indigo-600 focus-within:bg-white dark:border-slate-700 dark:bg-slate-800 overflow-hidden">
+                  <span className="select-none border-r border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-700/70 px-2.5 py-2 font-mono text-xs font-bold text-slate-600 dark:text-slate-300 shrink-0">
+                    91
+                  </span>
+                  <input
+                    type="tel"
+                    inputMode="numeric"
+                    value={senderOfficePhone}
+                    onChange={(e) =>
+                      setSenderOfficePhone(strip91FromPhone(e.target.value))
+                    }
+                    placeholder="10-digit number"
+                    className="w-full bg-transparent px-2.5 py-2 text-xs font-mono tabular-nums font-semibold text-slate-900 placeholder:font-sans placeholder:text-slate-400 focus:outline-none dark:text-white"
+                  />
+                </div>
               </div>
             </div>
 
@@ -1829,7 +1841,7 @@ export default function BulkLabelPrintTool({
                     />
                   </th>
                   <th className="py-2.5 px-2.5">Customer Name</th>
-                  <th className="py-2.5 px-2.5">Phone Number</th>
+                  <th className="py-2.5 px-2.5">Mobile Number</th>
                   <th className="py-2.5 px-2.5">Pincode</th>
                   <th className="py-2.5 px-2.5">Delivery Address (Printed on Label)</th>
                   <th className="py-2.5 px-2.5">Item Code</th>
@@ -1879,21 +1891,27 @@ export default function BulkLabelPrintTool({
                       </div>
                     </td>
 
-                    {/* Customer Phone (91 automatically removed) */}
+                    {/* Customer Mobile Number (Fixed 91 + 10 digits) */}
                     <td className="py-2 px-2.5">
-                      <input
-                        type="tel"
-                        value={item.customerPhone}
-                        onChange={(e) =>
-                          handleUpdateField(
-                            item.id,
-                            "customerPhone",
-                            strip91FromPhone(e.target.value)
-                          )
-                        }
-                        placeholder="9847012345"
-                        className="w-28 rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-mono tabular-nums font-semibold text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
-                      />
+                      <div className="inline-flex items-center rounded-lg border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800 overflow-hidden">
+                        <span className="select-none border-r border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-700/70 px-1.5 py-1 font-mono text-[11px] font-bold text-slate-500 dark:text-slate-300 shrink-0">
+                          91
+                        </span>
+                        <input
+                          type="tel"
+                          inputMode="numeric"
+                          value={item.customerPhone}
+                          onChange={(e) =>
+                            handleUpdateField(
+                              item.id,
+                              "customerPhone",
+                              strip91FromPhone(e.target.value)
+                            )
+                          }
+                          placeholder="10 digits"
+                          className="w-24 bg-transparent px-2 py-1 text-xs font-mono tabular-nums font-semibold text-slate-900 placeholder:font-sans placeholder:text-slate-400 focus:outline-none dark:text-slate-100"
+                        />
+                      </div>
                     </td>
 
                     {/* Pincode */}

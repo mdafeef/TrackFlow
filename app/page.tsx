@@ -1,7 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, Suspense, useCallback } from "react";
-import { useSearchParams } from "next/navigation";
+import React, { useState, useEffect, useCallback } from "react";
 import {
   Share2,
   BookmarkCheck,
@@ -53,8 +52,6 @@ import {
 } from "@/lib/tabRoutes";
 
 function TrackingAppContent() {
-  const searchParams = useSearchParams();
-
   const [activeResult, setActiveResult] = useState<TrackingResult | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -186,7 +183,7 @@ function TrackingAppContent() {
           } catch {}
         }
 
-        // Verify or hydrate session with backend /api/auth
+        // Verify or hydrate session with backend /api/auth without triggering redundant state updates
         const token = localStorage.getItem("trackflow_auth_token");
         fetch("/api/auth", {
           method: "GET",
@@ -195,8 +192,16 @@ function TrackingAppContent() {
           .then((r) => r.json())
           .then((data) => {
             if (data?.authenticated && data?.user) {
-              setAuthUser(data.user);
-              localStorage.setItem("trackflow_auth_user", JSON.stringify(data.user));
+              setAuthUser((prev) => {
+                const nextJson = JSON.stringify(data.user);
+                if (prev && JSON.stringify(prev) === nextJson) {
+                  return prev;
+                }
+                try {
+                  localStorage.setItem("trackflow_auth_user", nextJson);
+                } catch {}
+                return data.user;
+              });
             }
           })
           .catch(() => {});
@@ -432,7 +437,7 @@ function TrackingAppContent() {
       clearTimeout(timer);
       window.removeEventListener("popstate", handlePopState);
     };
-  }, [searchParams, performSearch]);
+  }, [performSearch]);
 
   // Watchlist helpers (synced to Service Worker offline cache)
   const handleAddToWatchlist = () => {
@@ -760,7 +765,7 @@ function TrackingAppContent() {
 
       {/* Real Workspace Login & Registration Modal */}
       <AuthModal
-        isOpen={isAuthModalOpen}
+        isOpen={isAuthModalOpen && !(activeView === "bulk" && !authUser)}
         onClose={() => setIsAuthModalOpen(false)}
         onSuccess={(user) => {
           setAuthUser(user);
@@ -779,16 +784,23 @@ function TrackingAppContent() {
   );
 }
 
+const emptySubscribe = () => () => {};
+
 export default function HomePage() {
-  return (
-    <Suspense
-      fallback={
-        <div className="min-h-screen flex items-center justify-center bg-slate-50 dark:bg-slate-950">
-          <div className="h-8 w-8 animate-spin rounded-full border-3 border-indigo-600 border-t-transparent" />
-        </div>
-      }
-    >
-      <TrackingAppContent />
-    </Suspense>
+  const isHydrated = React.useSyncExternalStore(
+    emptySubscribe,
+    () => true,
+    () => false
   );
+
+  if (!isHydrated) {
+    return (
+      <div
+        className="min-h-screen w-full bg-slate-50 dark:bg-slate-950"
+        suppressHydrationWarning
+      />
+    );
+  }
+
+  return <TrackingAppContent />;
 }
