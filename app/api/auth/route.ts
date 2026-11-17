@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import crypto from "crypto";
 import fs from "fs";
+import {
+  SESSION_COOKIE_NAME,
+  signSessionToken,
+  verifySessionToken,
+} from "@/lib/authSession";
 
 export interface AuthUserProfile {
   id: string;
@@ -19,14 +24,7 @@ interface StoredUserRecord extends AuthUserProfile {
   salt: string;
 }
 
-const SESSION_COOKIE_NAME = "trackflow_auth_session";
 const USERS_STORAGE_PATH = "/tmp/trackflow_registered_users.json";
-
-// Server-side runtime signing key (generated once per server process or derived deterministically)
-const AUTH_SIGNING_KEY = crypto
-  .createHash("sha256")
-  .update("trackflow-enterprise-auth-v1-signing-key")
-  .digest("hex");
 
 function hashPassword(password: string, salt: string): string {
   return crypto.scryptSync(password, salt, 64).toString("hex");
@@ -111,37 +109,7 @@ function toPublicProfile(user: StoredUserRecord): AuthUserProfile {
   };
 }
 
-function signSessionToken(user: AuthUserProfile): string {
-  const payload = {
-    user,
-    exp: Date.now() + 1000 * 60 * 60 * 24 * 7, // 7 days
-  };
-  const encoded = Buffer.from(JSON.stringify(payload), "utf-8").toString("base64url");
-  const sig = crypto
-    .createHmac("sha256", AUTH_SIGNING_KEY)
-    .update(encoded)
-    .digest("base64url");
-  return `${encoded}.${sig}`;
-}
 
-function verifySessionToken(token: string | undefined | null): AuthUserProfile | null {
-  if (!token || !token.includes(".")) return null;
-  try {
-    const [encoded, sig] = token.split(".");
-    if (!encoded || !sig) return null;
-    const expectedSig = crypto
-      .createHmac("sha256", AUTH_SIGNING_KEY)
-      .update(encoded)
-      .digest("base64url");
-    if (sig !== expectedSig) return null;
-    const decoded = JSON.parse(Buffer.from(encoded, "base64url").toString("utf-8"));
-    if (!decoded || !decoded.user || typeof decoded.exp !== "number") return null;
-    if (Date.now() > decoded.exp) return null;
-    return decoded.user as AuthUserProfile;
-  } catch {
-    return null;
-  }
-}
 
 export async function GET(req: NextRequest) {
   const cookieToken = req.cookies.get(SESSION_COOKIE_NAME)?.value;
@@ -164,6 +132,11 @@ export async function POST(req: NextRequest) {
     if (action === "logout") {
       const res = NextResponse.json({ success: true, authenticated: false, user: null });
       res.cookies.delete(SESSION_COOKIE_NAME);
+      res.cookies.set("trackflow_active_view", "single", {
+        sameSite: "lax",
+        path: "/",
+        maxAge: 60 * 60 * 24 * 7,
+      });
       return res;
     }
 
@@ -219,6 +192,11 @@ export async function POST(req: NextRequest) {
 
       res.cookies.set(SESSION_COOKIE_NAME, token, {
         httpOnly: true,
+        sameSite: "lax",
+        path: "/",
+        maxAge: 60 * 60 * 24 * 7,
+      });
+      res.cookies.set("trackflow_active_view", "bulk", {
         sameSite: "lax",
         path: "/",
         maxAge: 60 * 60 * 24 * 7,
@@ -292,6 +270,11 @@ export async function POST(req: NextRequest) {
 
       res.cookies.set(SESSION_COOKIE_NAME, token, {
         httpOnly: true,
+        sameSite: "lax",
+        path: "/",
+        maxAge: 60 * 60 * 24 * 7,
+      });
+      res.cookies.set("trackflow_active_view", "bulk", {
         sameSite: "lax",
         path: "/",
         maxAge: 60 * 60 * 24 * 7,

@@ -113,9 +113,28 @@ export function resolveRouteFromPathname(pathname: string): ResolvedTabRoute {
   }
 }
 
+export function syncViewCookies(
+  view: "single" | "bulk",
+  workspaceTab?: WorkspaceTabId
+) {
+  if (typeof window === "undefined") return;
+  try {
+    document.cookie = `trackflow_active_view=${view}; path=/; max-age=604800; SameSite=Lax`;
+    if (workspaceTab) {
+      document.cookie = `trackflow_workspace_tab=${workspaceTab}; path=/; max-age=604800; SameSite=Lax`;
+      localStorage.setItem("trackflow_workspace_tab", workspaceTab);
+    }
+    localStorage.setItem("trackflow_active_view", view);
+  } catch {
+    // Ignore storage/cookie errors
+  }
+}
+
 export function silentNavigateTab(targetPath: string, replace: boolean = false) {
   if (typeof window === "undefined") return;
   try {
+    const resolved = resolveRouteFromPathname(targetPath);
+    syncViewCookies(resolved.view, resolved.workspaceTab);
     const currentPath = window.location.pathname;
     if (currentPath !== targetPath || window.location.search) {
       const nextState = {
@@ -133,3 +152,4 @@ export function silentNavigateTab(targetPath: string, replace: boolean = false) 
     // Ignore history API errors in restricted iframe contexts
   }
 }
+

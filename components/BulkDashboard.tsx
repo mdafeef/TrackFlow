@@ -271,6 +271,7 @@ interface BulkDashboardProps {
   authUser?: AuthUserProfile | null;
   onLogout?: () => void;
   onProfileUpdated?: (profile: AuthUserProfile) => void;
+  initialMenu?: SidebarMenuId;
 }
 
 export function BulkDashboard({
@@ -278,6 +279,7 @@ export function BulkDashboard({
   authUser,
   onLogout,
   onProfileUpdated,
+  initialMenu = "dashboard",
 }: BulkDashboardProps) {
   const router = useRouter();
   // Shipments state with deterministic SSR initialization and client mount hydration
@@ -326,7 +328,7 @@ export function BulkDashboard({
 
   const [searchFilter, setSearchFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | "delivered" | "in_transit" | "out_for_delivery" | "returned" | "booked">("all");
-  const [activeMenu, setActiveMenuState] = useState<SidebarMenuId>("dashboard");
+  const [activeMenu, setActiveMenuState] = useState<SidebarMenuId>(initialMenu);
 
   useEffect(() => {
     if (typeof window !== "undefined") {

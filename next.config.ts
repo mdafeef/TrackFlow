@@ -52,7 +52,7 @@ const nextConfig: NextConfig = {
     ];
     return tabPaths.map((source) => ({
       source,
-      destination: '/',
+      destination: `/?__tf_path=${encodeURIComponent(source.toLowerCase())}`,
     }));
   },
   webpack: (config, {dev}) => {
