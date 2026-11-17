@@ -102,8 +102,8 @@ const emptyScanSubscribe = () => () => {};
 function CameraScanInner() {
   const router = useRouter();
 
-  // Camera & Decoder state
-  const [cameraGuideMode, setCameraGuideMode] = useState<"barcode" | "qr" | "both">("both");
+  // Camera & Decoder state: Tracking Code = "barcode" only, Customer Data = "qr" only (no "both" mode)
+  const [cameraGuideMode, setCameraGuideMode] = useState<"barcode" | "qr">("barcode");
   const [isAutoNextEnabled, setIsAutoNextEnabled] = useState<boolean>(true);
   const [isPasteAnywayEnabled, setIsPasteAnywayEnabled] = useState<boolean>(false);
   const [isScanCustomerQrEnabled, setIsScanCustomerQrEnabled] = useState<boolean>(true);
@@ -170,7 +170,7 @@ function CameraScanInner() {
   const audioCtxRef = useRef<AudioContext | null>(null);
 
   // Refs synced with UI state so the camera loop never restarts when buttons are clicked
-  const guideModeRef = useRef<"barcode" | "qr" | "both">(cameraGuideMode);
+  const guideModeRef = useRef<"barcode" | "qr">(cameraGuideMode);
   const defaultStatusRef = useRef<StatusOption>(defaultStatus);
   const isSoundEnabledRef = useRef<boolean>(isSoundEnabled);
   const isPasteAnywayEnabledRef = useRef<boolean>(isPasteAnywayEnabled);
@@ -240,17 +240,17 @@ function CameraScanInner() {
   const toggleScanCustomerQr = useCallback(() => {
     setIsScanCustomerQrEnabled((prev) => {
       const next = !prev;
-      if (!next) {
-        const resetState = {
-          step: "awaiting_awb" as const,
-          pendingAwb: "",
-          pendingCourierId: "",
-          pendingCourierName: "",
-          pendingFormatLabel: "",
-        };
-        customerQrScanStepRef.current = resetState;
-        setCustomerQrScanStep(resetState);
-      }
+      const resetState = {
+        step: "awaiting_awb" as const,
+        pendingAwb: "",
+        pendingCourierId: "",
+        pendingCourierName: "",
+        pendingFormatLabel: "",
+      };
+      customerQrScanStepRef.current = resetState;
+      setCustomerQrScanStep(resetState);
+      guideModeRef.current = "barcode";
+      setCameraGuideMode("barcode");
       return next;
     });
   }, []);
@@ -564,10 +564,9 @@ function CameraScanInner() {
         };
         customerQrScanStepRef.current = nextStepState;
         setCustomerQrScanStep(nextStepState);
-        if (guideModeRef.current === "barcode") {
-          guideModeRef.current = "both";
-          setCameraGuideMode("both");
-        }
+        // Step 2 scans Customer Data QR ONLY -> switch guide strictly to QR box
+        guideModeRef.current = "qr";
+        setCameraGuideMode("qr");
         // Short 320ms cooldown after Step 1 so the user can immediately scan the Customer Mini QR right next to the barcode
         scanCooldownUntilRef.current = Date.now() + 320;
         playScanBeep(true);
@@ -625,6 +624,9 @@ function CameraScanInner() {
       };
       customerQrScanStepRef.current = resetStepState;
       setCustomerQrScanStep(resetStepState);
+      // Step 1 scans Tracking Code Barcode ONLY -> switch guide strictly back to Barcode box
+      guideModeRef.current = "barcode";
+      setCameraGuideMode("barcode");
       lastScannedRef.current = { code: cleanNum, timestamp: Date.now() };
       scanCooldownUntilRef.current = Date.now() + (isAutoNextEnabledRef.current ? 750 : 1400);
 
@@ -777,8 +779,14 @@ function CameraScanInner() {
         return false;
       }
 
-      // STRICT STEP ISOLATION: If we ARE in Step 2 (awaiting_customer_qr), ignore all non-Customer-QR codes (e.g. tracking barcodes/QRs)!
+      // STRICT STEP ISOLATION:
+      // - Step 2 (awaiting_customer_qr): Customer Data QR Code scan ONLY (ignore all 1D barcodes & non-customer codes)
       if (isAwaitingCustomerQr) {
+        return false;
+      }
+
+      // - Step 1 / Tracking Code scan: Barcode scanner ONLY! Never accept 2D QR codes as tracking numbers.
+      if (is2DQr) {
         return false;
       }
 
@@ -791,17 +799,15 @@ function CameraScanInner() {
       }
 
       // Reject 1D motion-blur / edge misreads containing non-alphanumeric symbol noise (e.g. "E%8,W%-]/IN" from Code39/Code93)
-      if (!is2DQr) {
-        const compactCheck = candidate.replace(/\s+/g, "");
-        if (
-          /[^A-Z0-9-]/i.test(compactCheck) ||
-          compactCheck.startsWith("-") ||
-          compactCheck.endsWith("-") ||
-          compactCheck.includes("--") ||
-          compactCheck.length < 6
-        ) {
-          return false;
-        }
+      const compactCheck = candidate.replace(/\s+/g, "");
+      if (
+        /[^A-Z0-9-]/i.test(compactCheck) ||
+        compactCheck.startsWith("-") ||
+        compactCheck.endsWith("-") ||
+        compactCheck.includes("--") ||
+        compactCheck.length < 6
+      ) {
+        return false;
       }
 
       // Ignore same barcode within 2.5 seconds of last scan
@@ -873,7 +879,7 @@ function CameraScanInner() {
     const tryDecodeCanvas = async (
       canvas: HTMLCanvasElement,
       ctx: CanvasRenderingContext2D,
-      effectiveMode: "barcode" | "qr" | "both",
+      effectiveMode: "barcode" | "qr",
       allowHistogramFallback: boolean
     ): Promise<boolean> => {
       const w = canvas.width;
@@ -909,7 +915,7 @@ function CameraScanInner() {
                   fmt === "aztec" ||
                   item.rawValue.trim().toUpperCase().startsWith("TFQR1:");
                 if (effectiveMode === "barcode" && is2D) continue;
-                if (effectiveMode === "qr" && !is2D && fmt !== "") continue;
+                if (effectiveMode === "qr" && !is2D) continue;
 
                 if (processDecodedCandidate(item.rawValue, is2D)) {
                   return true;
@@ -925,15 +931,11 @@ function CameraScanInner() {
         }
       }
 
-      // 2. When scanning 1D Barcodes ("barcode" or "both"), run zxingBarcodeReader FIRST
-      // so a nearby Customer Mini QR never masks the 1D Tracking Barcode on the same label!
-      let luminanceSource: HTMLCanvasElementLuminanceSource | null = null;
-      let hybridBitmap: BinaryBitmap | null = null;
-
-      if (effectiveMode !== "qr") {
+      // 2. Tracking Code Mode ("barcode"): Run 1D Barcode reader ONLY
+      if (effectiveMode === "barcode") {
         try {
-          luminanceSource = new HTMLCanvasElementLuminanceSource(canvas);
-          hybridBitmap = new BinaryBitmap(new HybridBinarizer(luminanceSource));
+          const luminanceSource = new HTMLCanvasElementLuminanceSource(canvas);
+          const hybridBitmap = new BinaryBitmap(new HybridBinarizer(luminanceSource));
           const result1D = zxingBarcodeReader.decodeWithState(hybridBitmap);
           if (result1D && result1D.getText()) {
             if (processDecodedCandidate(result1D.getText(), false)) {
@@ -947,57 +949,52 @@ function CameraScanInner() {
             zxingBarcodeReader.reset();
           } catch {}
         }
+        return false;
       }
 
-      // 3. When QR scanning is active ("qr" or "both"), run jsQR and zxingQrReader
-      if (effectiveMode !== "barcode") {
+      // 3. Customer Data Mode ("qr"): Run 2D QR readers ONLY (jsQR + zxingQrReader)
+      try {
+        const imageData = ctx.getImageData(0, 0, w, h);
+        const qrResult = jsQR(imageData.data, w, h, {
+          inversionAttempts: allowHistogramFallback ? "attemptBoth" : "dontInvert",
+        });
+        if (qrResult && qrResult.data) {
+          if (processDecodedCandidate(qrResult.data, true)) {
+            return true;
+          }
+        }
+      } catch {
+        // continue
+      }
+
+      try {
+        const luminanceSource = new HTMLCanvasElementLuminanceSource(canvas);
+        const hybridBitmap = new BinaryBitmap(new HybridBinarizer(luminanceSource));
         try {
-          const imageData = ctx.getImageData(0, 0, w, h);
-          const qrResult = jsQR(imageData.data, w, h, {
-            inversionAttempts: allowHistogramFallback ? "attemptBoth" : "dontInvert",
-          });
-          if (qrResult && qrResult.data) {
-            if (processDecodedCandidate(qrResult.data, true)) {
+          const result2D = zxingQrReader.decodeWithState(hybridBitmap);
+          if (result2D && result2D.getText()) {
+            if (processDecodedCandidate(result2D.getText(), true)) {
               return true;
             }
           }
         } catch {
-          // continue
-        }
-
-        try {
-          if (!luminanceSource) {
-            luminanceSource = new HTMLCanvasElementLuminanceSource(canvas);
-          }
-          if (!hybridBitmap) {
-            hybridBitmap = new BinaryBitmap(new HybridBinarizer(luminanceSource));
-          }
-          try {
-            const result2D = zxingQrReader.decodeWithState(hybridBitmap);
-            if (result2D && result2D.getText()) {
-              if (processDecodedCandidate(result2D.getText(), true)) {
+          zxingQrReader.reset();
+          if (allowHistogramFallback) {
+            const histBitmap = new BinaryBitmap(new GlobalHistogramBinarizer(luminanceSource));
+            const resultHist = zxingQrReader.decodeWithState(histBitmap);
+            if (resultHist && resultHist.getText()) {
+              if (processDecodedCandidate(resultHist.getText(), true)) {
                 return true;
               }
             }
-          } catch {
-            zxingQrReader.reset();
-            if (allowHistogramFallback) {
-              const histBitmap = new BinaryBitmap(new GlobalHistogramBinarizer(luminanceSource));
-              const resultHist = zxingQrReader.decodeWithState(histBitmap);
-              if (resultHist && resultHist.getText()) {
-                if (processDecodedCandidate(resultHist.getText(), true)) {
-                  return true;
-                }
-              }
-            }
           }
-        } catch {
-          // normal when no QR in frame
-        } finally {
-          try {
-            zxingQrReader.reset();
-          } catch {}
         }
+      } catch {
+        // normal when no QR in frame
+      } finally {
+        try {
+          zxingQrReader.reset();
+        } catch {}
       }
 
       return false;
@@ -1091,17 +1088,9 @@ function CameraScanInner() {
           return;
         }
 
-        // STEP 1 (Awaiting Tracking Code ONLY): Dedicated fast Tracking Code pipeline
-        const activeGuideMode = guideModeRef.current;
-        let roiWidthRatio = 0.82;
-        let roiHeightRatio = 0.54;
-        if (activeGuideMode === "barcode") {
-          roiWidthRatio = 0.84;
-          roiHeightRatio = 0.36;
-        } else if (activeGuideMode === "qr") {
-          roiWidthRatio = 0.66;
-          roiHeightRatio = 0.66;
-        }
+        // STEP 1 (Awaiting Tracking Code ONLY): Dedicated fast 1D Barcode-only pipeline
+        const roiWidthRatio = 0.84;
+        const roiHeightRatio = 0.36;
 
         const cropW = Math.max(64, Math.floor(squareSide * roiWidthRatio));
         const cropH = Math.max(64, Math.floor(squareSide * roiHeightRatio));
@@ -1119,14 +1108,14 @@ function CameraScanInner() {
         const ctx = canvas.getContext("2d", { willReadFrequently: true });
         if (!ctx) return;
 
-        // Pass 1: Standard decode on Guide Box ROI
+        // Pass 1: Standard 1D Barcode decode on Barcode Guide Box ROI
         ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, targetW, targetH);
-        if (await tryDecodeCanvas(canvas, ctx, activeGuideMode, false)) return;
+        if (await tryDecodeCanvas(canvas, ctx, "barcode", false)) return;
 
         // Pass 2 (only every 3rd tick to keep CPU <10%): Lightweight contrast stretch for low-contrast / wrinkled labels
         if (tickCounter % 3 === 0) {
           if (fastContrastStretchROI(ctx, targetW, targetH)) {
-            await tryDecodeCanvas(canvas, ctx, activeGuideMode, false);
+            await tryDecodeCanvas(canvas, ctx, "barcode", false);
           }
         }
       } catch {
@@ -1366,22 +1355,25 @@ function CameraScanInner() {
       <div className="flex-1 flex flex-col items-center justify-between px-3.5 sm:px-6 py-3 overflow-y-auto gap-3">
         {/* Top Control Strip Above Square Camera: Guide Mode + Default Status (Booked) + Customer QR + No Rule */}
         <div className="w-full max-w-md flex flex-wrap items-center justify-between gap-2 shrink-0">
-          {/* Guide Mode Selector */}
-          <div className="inline-flex items-center gap-0.5 rounded-xl bg-slate-900 p-1 border border-slate-800">
-            {(["barcode", "qr", "both"] as const).map((m) => (
-              <button
-                key={m}
-                type="button"
-                onClick={() => setCameraGuideMode(m)}
-                className={`px-2.5 py-1 rounded-lg text-[11px] font-bold capitalize transition-all cursor-pointer ${
-                  cameraGuideMode === m
-                    ? "bg-indigo-600 text-white shadow-2xs"
-                    : "text-slate-400 hover:text-slate-200"
-                }`}
-              >
-                {m === "qr" ? "QR" : m}
-              </button>
-            ))}
+          {/* Active Step Scanner Mode Badge (Tracking Code = Barcode Only, Customer Data = QR Only) */}
+          <div
+            className={`inline-flex items-center gap-1.5 rounded-xl px-2.5 py-1.5 text-[11px] font-bold border ${
+              isScanCustomerQrEnabled && customerQrScanStep.step === "awaiting_customer_qr"
+                ? "bg-indigo-600/20 border-indigo-500/50 text-indigo-300"
+                : "bg-emerald-500/15 border-emerald-500/40 text-emerald-300"
+            }`}
+          >
+            {isScanCustomerQrEnabled && customerQrScanStep.step === "awaiting_customer_qr" ? (
+              <>
+                <QrCode className="h-3.5 w-3.5" />
+                <span>QR Only (Customer)</span>
+              </>
+            ) : (
+              <>
+                <ScanLine className="h-3.5 w-3.5" />
+                <span>Barcode Only (Tracking)</span>
+              </>
+            )}
           </div>
 
           {/* Default Status Dropdown (Defaults to Booked, never opens keyboard) */}
@@ -1599,8 +1591,8 @@ function CameraScanInner() {
               />
             )}
 
-            {/* Guide Frame (Strictly scans inside this frame; no text note overlay) */}
-            {cameraGuideMode === "barcode" && (
+            {/* Step-Isolated Single Guide Frame: Barcode Guide ONLY for Tracking ID, QR Guide ONLY for Customer Data */}
+            {!(isScanCustomerQrEnabled && customerQrScanStep.step === "awaiting_customer_qr") ? (
               <div
                 className={`relative z-10 w-[84%] h-[38%] rounded-2xl border-2 pointer-events-none shadow-[0_0_0_9999px_rgba(2,6,23,0.58)] flex items-center justify-center transition-colors ${
                   cameraScanSuccess
@@ -1614,9 +1606,7 @@ function CameraScanInner() {
                   <div className="w-[92%] h-0.5 bg-red-500 shadow-[0_0_14px_#ef4444] animate-pulse" />
                 )}
               </div>
-            )}
-
-            {cameraGuideMode === "qr" && (
+            ) : (
               <div
                 className={`relative z-10 w-[68%] h-[68%] rounded-2xl border-2 pointer-events-none shadow-[0_0_0_9999px_rgba(2,6,23,0.58)] flex items-center justify-center transition-colors ${
                   cameraScanSuccess
@@ -1628,23 +1618,6 @@ function CameraScanInner() {
               >
                 {!cameraScanSuccess && !formatError && (
                   <div className="w-[88%] h-0.5 bg-red-500 shadow-[0_0_14px_#ef4444] animate-pulse" />
-                )}
-              </div>
-            )}
-
-            {cameraGuideMode === "both" && (
-              <div
-                className={`relative z-10 w-[82%] h-[68%] rounded-2xl border-2 pointer-events-none shadow-[0_0_0_9999px_rgba(2,6,23,0.58)] flex items-center justify-center transition-colors ${
-                  cameraScanSuccess
-                    ? "border-emerald-400"
-                    : formatError
-                    ? "border-rose-500 bg-rose-500/15"
-                    : "border-white/85"
-                }`}
-              >
-                <div className="w-[62%] aspect-square rounded-xl border border-white/40" />
-                {!cameraScanSuccess && !formatError && (
-                  <div className="absolute left-3 right-3 h-0.5 bg-red-500 shadow-[0_0_14px_#ef4444] animate-pulse" />
                 )}
               </div>
             )}

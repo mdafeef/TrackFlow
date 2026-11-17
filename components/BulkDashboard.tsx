@@ -687,8 +687,8 @@ export function BulkDashboard({
   const customerQrScanStepRef = useRef(customerQrScanStep);
   const [recentStagedCode, setRecentStagedCode] = useState<string | null>(null);
   const [isCameraActive, setIsCameraActive] = useState(false);
-  const [cameraGuideMode, setCameraGuideMode] = useState<"barcode" | "qr" | "both">("both");
-  const cameraGuideModeRef = useRef<"barcode" | "qr" | "both">("both");
+  const [cameraGuideMode, setCameraGuideMode] = useState<"barcode" | "qr">("barcode");
+  const cameraGuideModeRef = useRef<"barcode" | "qr">("barcode");
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [cameraScanSuccess, setCameraScanSuccess] = useState<{ code: string; carrier: string } | null>(null);
   const [isEnhancingDamagedLabel, setIsEnhancingDamagedLabel] = useState<boolean>(false);
@@ -1747,7 +1747,7 @@ export function BulkDashboard({
       }
     }
 
-    const handleDetectedValue = (rawVal: string): boolean => {
+    const handleDetectedValue = (rawVal: string, is2DQr: boolean): boolean => {
       const trimmedRaw = (rawVal || "").trim();
       if (!trimmedRaw) return false;
 
@@ -1791,6 +1791,8 @@ export function BulkDashboard({
           };
           customerQrScanStepRef.current = resetStep;
           setCustomerQrScanStep(resetStep);
+          cameraGuideModeRef.current = "barcode";
+          setCameraGuideMode("barcode");
           handleStageConsignmentRef.current(
             pendingAwb,
             pendingCourier || undefined,
@@ -1815,8 +1817,14 @@ export function BulkDashboard({
         return false;
       }
 
-      // STRICT STEP ISOLATION: While waiting for Step 2 (Customer Mini QR), ignore all non-Customer-QR reads!
+      // STRICT STEP ISOLATION:
+      // - Step 2 (awaiting_customer_qr): Customer Data QR Code scan ONLY! Ignore all non-Customer-QR reads.
       if (isAwaitingCustomerQr) {
+        return false;
+      }
+
+      // - Step 1 / Tracking Code scan: 1D Barcode scanner ONLY! Never accept 2D QR codes as tracking numbers.
+      if (is2DQr) {
         return false;
       }
 
@@ -1857,7 +1865,7 @@ export function BulkDashboard({
       const detectedCarrier = identification.courier || autoDetectCourier(cleanAwb);
 
       // If 2-Step "Scan Customer Data QR" is ON:
-      // 1st scan locks in the Tracking Number (AWB) and automatically switches scanner ready for Step 2 (Customer Data QR)
+      // 1st scan locks in the Tracking Number (AWB) and automatically switches scanner ready for Step 2 (Customer Data QR ONLY)
       if (isScanCustomerQrEnabledRef.current) {
         setIntakeError("");
         setFlaggedInvalidCode(null);
@@ -1874,10 +1882,8 @@ export function BulkDashboard({
         };
         customerQrScanStepRef.current = nextStep;
         setCustomerQrScanStep(nextStep);
-        if (cameraGuideModeRef.current === "barcode") {
-          cameraGuideModeRef.current = "both";
-          setCameraGuideMode("both");
-        }
+        cameraGuideModeRef.current = "qr";
+        setCameraGuideMode("qr");
         playChime(true);
         setCameraScanSuccess({
           code: `Step 1 OK: ${cleanAwb}`,
@@ -1917,7 +1923,7 @@ export function BulkDashboard({
     const tryDecodeROI = async (
       canvas: HTMLCanvasElement,
       ctx: CanvasRenderingContext2D,
-      activeMode: "barcode" | "qr" | "both",
+      activeMode: "barcode" | "qr",
       invertQr: boolean
     ): Promise<boolean> => {
       const w = canvas.width;
@@ -1950,42 +1956,22 @@ export function BulkDashboard({
                   fmt === "aztec" ||
                   item.rawValue.trim().toUpperCase().startsWith("TFQR1:");
                 if (activeMode === "barcode" && is2D) continue;
-                if (activeMode === "qr" && !is2D && fmt !== "") continue;
-                if (handleDetectedValue(item.rawValue)) return true;
+                if (activeMode === "qr" && !is2D) continue;
+                if (handleDetectedValue(item.rawValue, is2D)) return true;
               }
             }
           }
         } catch {}
       }
 
-      // 2. jsQR for 2D QR codes
-      if (activeMode !== "barcode") {
+      // 2. Tracking Code Mode ("barcode"): Run 1D Barcode reader ONLY
+      if (activeMode === "barcode") {
         try {
-          const imageData = ctx.getImageData(0, 0, w, h);
-          const qrResult = jsQR(imageData.data, w, h, {
-            inversionAttempts: invertQr ? "attemptBoth" : "dontInvert",
-          });
-          if (qrResult && qrResult.data) {
-            if (handleDetectedValue(qrResult.data)) return true;
-          }
-        } catch {}
-      }
-
-      // 3. ZXing — run 1D Barcode reader and 2D QR reader separately so a Customer Mini QR on the same label never masks or blocks a 1D Tracking Barcode in Step 1
-      let luminanceSource: HTMLCanvasElementLuminanceSource | null = null;
-      const getLuminance = () => {
-        if (!luminanceSource) {
-          luminanceSource = new HTMLCanvasElementLuminanceSource(canvas);
-        }
-        return luminanceSource;
-      };
-
-      if (activeMode === "barcode" || activeMode === "both") {
-        try {
-          const binaryBitmap = new BinaryBitmap(new HybridBinarizer(getLuminance()));
+          const luminanceSource = new HTMLCanvasElementLuminanceSource(canvas);
+          const binaryBitmap = new BinaryBitmap(new HybridBinarizer(luminanceSource));
           const result = zxingBarcodeReader.decodeWithState(binaryBitmap);
           if (result && result.getText()) {
-            if (handleDetectedValue(result.getText())) return true;
+            if (handleDetectedValue(result.getText(), false)) return true;
           }
         } catch {
           // normal when no 1D barcode in frame
@@ -1994,22 +1980,33 @@ export function BulkDashboard({
             zxingBarcodeReader.reset();
           } catch {}
         }
+        return false;
       }
 
-      if (activeMode === "qr" || activeMode === "both") {
-        try {
-          const binaryBitmap = new BinaryBitmap(new HybridBinarizer(getLuminance()));
-          const result = zxingQrReader.decodeWithState(binaryBitmap);
-          if (result && result.getText()) {
-            if (handleDetectedValue(result.getText())) return true;
-          }
-        } catch {
-          // normal when no 2D code in frame
-        } finally {
-          try {
-            zxingQrReader.reset();
-          } catch {}
+      // 3. Customer Data Mode ("qr"): Run 2D QR readers ONLY (jsQR + zxingQrReader)
+      try {
+        const imageData = ctx.getImageData(0, 0, w, h);
+        const qrResult = jsQR(imageData.data, w, h, {
+          inversionAttempts: invertQr ? "attemptBoth" : "dontInvert",
+        });
+        if (qrResult && qrResult.data) {
+          if (handleDetectedValue(qrResult.data, true)) return true;
         }
+      } catch {}
+
+      try {
+        const luminanceSource = new HTMLCanvasElementLuminanceSource(canvas);
+        const binaryBitmap = new BinaryBitmap(new HybridBinarizer(luminanceSource));
+        const result = zxingQrReader.decodeWithState(binaryBitmap);
+        if (result && result.getText()) {
+          if (handleDetectedValue(result.getText(), true)) return true;
+        }
+      } catch {
+        // normal when no 2D code in frame
+      } finally {
+        try {
+          zxingQrReader.reset();
+        } catch {}
       }
 
       return false;
@@ -2077,18 +2074,9 @@ export function BulkDashboard({
           return;
         }
 
-        // STEP 1 (Awaiting Tracking Code ONLY): Fast Guide ROI pass
-        const activeMode = cameraGuideModeRef.current;
-        let roiWidthRatio = 0.78;
-        let roiHeightRatio = 0.46;
-        if (activeMode === "barcode") {
-          roiWidthRatio = 0.8;
-          roiHeightRatio = 0.3;
-        } else if (activeMode === "qr") {
-          const sq = minSide * 0.56;
-          roiWidthRatio = sq / vw;
-          roiHeightRatio = sq / vh;
-        }
+        // STEP 1 (Awaiting Tracking Code ONLY): Dedicated 1D Barcode-only pass
+        const roiWidthRatio = 0.8;
+        const roiHeightRatio = 0.3;
 
         const cropW = Math.max(64, Math.floor(vw * roiWidthRatio));
         const cropH = Math.max(64, Math.floor(vh * roiHeightRatio));
@@ -2107,7 +2095,7 @@ export function BulkDashboard({
         if (!ctx) return;
 
         ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, w, h);
-        await tryDecodeROI(canvas, ctx, activeMode, false);
+        await tryDecodeROI(canvas, ctx, "barcode", false);
       } catch {
         // ignore frame error
       } finally {
@@ -7183,40 +7171,24 @@ export function BulkDashboard({
                 {/* Camera Mode Switcher, Auto-Zoom/Focus Controls & Auto-Next Bar */}
                 <div className="flex flex-wrap items-center justify-between gap-2 px-4 sm:px-6 py-3 bg-slate-900/90 border-b border-slate-800 shrink-0">
                   <div className="flex flex-wrap items-center gap-2">
-                    <div className="inline-flex items-center gap-1 rounded-xl bg-slate-950 p-1 border border-slate-800 text-xs font-bold">
-                      <button
-                        type="button"
-                        onClick={() => setCameraGuideMode("barcode")}
-                        className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
-                          cameraGuideMode === "barcode"
-                            ? "bg-indigo-600 text-white shadow-xs"
-                            : "text-slate-400 hover:text-slate-200"
-                        }`}
-                      >
-                        Barcode
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setCameraGuideMode("qr")}
-                        className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
-                          cameraGuideMode === "qr"
-                            ? "bg-indigo-600 text-white shadow-xs"
-                            : "text-slate-400 hover:text-slate-200"
-                        }`}
-                      >
-                        QR
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setCameraGuideMode("both")}
-                        className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
-                          cameraGuideMode === "both"
-                            ? "bg-indigo-600 text-white shadow-xs"
-                            : "text-slate-400 hover:text-slate-200"
-                        }`}
-                      >
-                        Both
-                      </button>
+                    <div
+                      className={`inline-flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-bold border ${
+                        isScanCustomerQrEnabled && customerQrScanStep.step === "awaiting_customer_qr"
+                          ? "bg-indigo-600/20 border-indigo-500/50 text-indigo-300"
+                          : "bg-emerald-500/15 border-emerald-500/40 text-emerald-300"
+                      }`}
+                    >
+                      {isScanCustomerQrEnabled && customerQrScanStep.step === "awaiting_customer_qr" ? (
+                        <>
+                          <QrCode className="h-3.5 w-3.5" />
+                          <span>QR Only (Customer Data)</span>
+                        </>
+                      ) : (
+                        <>
+                          <ScanLine className="h-3.5 w-3.5" />
+                          <span>Barcode Only (Tracking Code)</span>
+                        </>
+                      )}
                     </div>
                   </div>
 
@@ -7224,7 +7196,22 @@ export function BulkDashboard({
                     {/* Scan Customer Data QR ON/OFF Toggle */}
                     <button
                       type="button"
-                      onClick={() => setIsScanCustomerQrEnabled((prev) => !prev)}
+                      onClick={() => {
+                        setIsScanCustomerQrEnabled((prev) => {
+                          const next = !prev;
+                          const resetStep = {
+                            step: "awaiting_awb" as const,
+                            pendingAwb: "",
+                            pendingCourierId: "",
+                            pendingCourierName: "",
+                          };
+                          customerQrScanStepRef.current = resetStep;
+                          setCustomerQrScanStep(resetStep);
+                          cameraGuideModeRef.current = "barcode";
+                          setCameraGuideMode("barcode");
+                          return next;
+                        });
+                      }}
                       className={`inline-flex items-center gap-1.5 rounded-xl border px-2.5 py-1 text-[11px] font-extrabold transition-colors cursor-pointer ${
                         isScanCustomerQrEnabled
                           ? "border-indigo-500/60 bg-indigo-500/15 text-indigo-300"
@@ -7333,12 +7320,16 @@ export function BulkDashboard({
                           onClick={() => {
                             const pending = customerQrScanStep.pendingAwb;
                             const courier = customerQrScanStep.pendingCourierId;
-                            setCustomerQrScanStep({
-                              step: "awaiting_awb",
+                            const resetStep = {
+                              step: "awaiting_awb" as const,
                               pendingAwb: "",
                               pendingCourierId: "",
                               pendingCourierName: "",
-                            });
+                            };
+                            customerQrScanStepRef.current = resetStep;
+                            setCustomerQrScanStep(resetStep);
+                            cameraGuideModeRef.current = "barcode";
+                            setCameraGuideMode("barcode");
                             handleStageConsignment(
                               pending,
                               courier || undefined,
@@ -7422,8 +7413,8 @@ export function BulkDashboard({
                       <div className="absolute left-8 right-8 h-0.5 bg-red-500 shadow-[0_0_14px_#ef4444] animate-pulse z-10 pointer-events-none" />
                     )}
 
-                    {/* Clean Guide Frame Only (with outside mask indicating active scan area) */}
-                    {cameraGuideMode === "barcode" && (
+                    {/* Step-Isolated Single Guide Frame: Barcode Guide ONLY for Tracking Code, QR Guide ONLY for Customer Data */}
+                    {!(isScanCustomerQrEnabled && customerQrScanStep.step === "awaiting_customer_qr") ? (
                       <div
                         className={`relative z-10 w-4/5 max-w-sm h-28 rounded-xl border-2 pointer-events-none shadow-[0_0_0_9999px_rgba(2,6,23,0.52)] transition-colors ${
                           cameraScanSuccess
@@ -7433,9 +7424,7 @@ export function BulkDashboard({
                             : "border-white/80"
                         }`}
                       />
-                    )}
-
-                    {cameraGuideMode === "qr" && (
+                    ) : (
                       <div
                         className={`relative z-10 w-48 h-48 sm:w-52 sm:h-52 rounded-2xl border-2 pointer-events-none shadow-[0_0_0_9999px_rgba(2,6,23,0.52)] transition-colors ${
                           cameraScanSuccess
@@ -7445,20 +7434,6 @@ export function BulkDashboard({
                             : "border-white/80"
                         }`}
                       />
-                    )}
-
-                    {cameraGuideMode === "both" && (
-                      <div
-                        className={`relative z-10 w-4/5 max-w-md h-44 rounded-2xl border-2 pointer-events-none shadow-[0_0_0_9999px_rgba(2,6,23,0.52)] flex items-center justify-center transition-colors ${
-                          cameraScanSuccess
-                            ? "border-emerald-400 bg-emerald-500/15"
-                            : isEnhancingDamagedLabel
-                            ? "border-amber-400"
-                            : "border-white/75"
-                        }`}
-                      >
-                        <div className="w-32 h-32 rounded-xl border border-white/50" />
-                      </div>
                     )}
 
                     {/* Quick Success Mark Overlay when Barcode or QR is Read & Added */}
