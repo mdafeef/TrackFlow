@@ -9,15 +9,17 @@ export interface RearCameraOption {
 }
 
 export const PREFERRED_CAMERA_STORAGE_KEY = "trackflow_preferred_rear_camera_id";
+const PRIMARY_MAIN_CAMERA_CACHE_KEY = "trackflow_primary_main_camera_id";
 
 /**
- * Easy one-line toggle to hide the Camera Switcher button once confirmed.
+ * Camera switcher option disabled — always uses Primary Main 1x camera automatically.
  */
-export const SHOW_CAMERA_SWITCHER_OPTION = true;
+export const SHOW_CAMERA_SWITCHER_OPTION = false;
 
 /**
- * Scores a videoinput device to identify the phone's primary Normal 1x Photo Camera
- * and penalize Ultra-Wide (0.5x), Macro, Depth, Telephoto, or Front cameras.
+ * Scores a videoinput device to identify the phone's Primary Main 1x Photo Camera
+ * across all Android (Samsung, Xiaomi, Redmi, Oppo, Vivo, OnePlus, Pixel, Realme, Motorola)
+ * and iOS (iPhone) models, while penalizing Ultra-Wide (0.5x), Macro, Depth, Telephoto, or Front cameras.
  */
 export function scoreRearCameraDevice(
   device: MediaDeviceInfo,
@@ -29,71 +31,79 @@ export function scoreRearCameraDevice(
   // Identify front/selfie cameras
   const isFront =
     /\b(front|user|selfie|facetime)\b/i.test(lower) ||
-    /camera2?\s*1\s*,\s*facing\s*front/i.test(lower);
+    /camera2?\s*\d+\s*,\s*facing\s*front/i.test(lower) ||
+    /\bfacing\s*front\b/i.test(lower);
 
   if (isFront) {
     return { isFront: true, score: -999, shortLabel: "Front" };
   }
 
   let score = 0;
-  let kindTag = "Normal 1x";
+  let kindTag = "Main 1x";
 
-  // 1. Android Camera2 API convention: "camera2 0, facing back" is ALWAYS the primary 1x normal photo camera
-  if (/camera2?\s*0\s*,\s*facing\s*(back|environment)/i.test(lower)) {
-    score += 140;
+  // 1. Android Camera2 API convention: "camera2 0, facing back" or "0, facing back" is ALWAYS the primary 1x normal photo camera
+  if (/(?:camera2?\s*)?\b0\s*,\s*facing\s*(back|environment)/i.test(lower)) {
+    score += 180;
     kindTag = "Main 1x";
   }
 
-  // 2. iOS / Standard exact normal rear camera names
+  // 2. iOS / Standard exact primary rear camera names
   if (
     lower === "back camera" ||
     lower === "rear camera" ||
     lower === "back normal camera" ||
-    lower === "main camera"
+    lower === "main camera" ||
+    lower === "back wide camera"
   ) {
-    score += 130;
+    score += 160;
     kindTag = "Main 1x";
   } else if (/\b(main|primary|normal|standard)\b/i.test(lower)) {
-    score += 80;
+    score += 100;
     kindTag = "Main 1x";
   }
 
   // 3. Generic rear indicator
   if (/\b(back|rear|environment)\b/i.test(lower)) {
-    score += 30;
+    score += 35;
   }
 
-  // 4. Strongly penalize Ultra-Wide (0.5x), Macro, Depth, Telephoto, Dual/Triple virtual lenses
+  // 4. Strongly penalize Ultra-Wide (0.5x/0.6x), Wide-Angle auxiliary, Macro, Depth, Telephoto, and Multi-lens virtual cameras
   if (
-    /\b(ultra[\s-]*wide|ultrawide|0\.5x?|0\.6x?|wide[\s-]*angle|fisheye)\b/i.test(
+    /\b(ultra[\s-]*wide|ultrawide|super[\s-]*wide|0\.5x?|0\.6x?|wide[\s-]*angle|fisheye)\b/i.test(
       lower
     )
   ) {
-    score -= 160;
+    score -= 220;
     kindTag = "Ultra-Wide";
-  } else if (/\b(macro|depth|bokeh|mono|monochrome|ir|infrared)\b/i.test(lower)) {
-    score -= 180;
+  } else if (/\b(macro|depth|bokeh|mono|monochrome|ir|infrared|tof)\b/i.test(lower)) {
+    score -= 240;
     kindTag = "Macro/Aux";
   } else if (/\b(tele|telephoto|periscope|zoom)\b/i.test(lower)) {
-    score -= 90;
+    score -= 140;
     kindTag = "Telephoto";
-  } else if (/\b(dual|triple|multi|logical|virtual)\b/i.test(lower)) {
-    score -= 45;
+  } else if (/\b(dual|triple|quad|multi|logical|virtual)\b/i.test(lower)) {
+    score -= 60;
     kindTag = "Multi-Lens";
   }
 
-  // 5. On Android devices with generic labels or multiple back sensors, index 0 is the primary 1x sensor,
-  // whereas higher indices (camera2 2, camera2 3) are secondary wide/macro sensors.
-  score += Math.max(0, 25 - rearIndex * 10);
+  // 5. Penalize higher camera2 sensor numbers ("camera2 2, facing back", "camera2 3, facing back", etc.)
+  const camNumMatch = lower.match(/camera2?\s*(\d+)\s*,\s*facing\s*(back|environment)/i);
+  if (camNumMatch) {
+    const sensorNum = parseInt(camNumMatch[1], 10);
+    if (sensorNum > 0) {
+      score -= sensorNum * 45;
+    }
+  }
+
+  // 6. First rear sensor in hardware enumeration order (rearIndex === 0) is the primary main sensor on mobile OSes
+  score += Math.max(0, 45 - rearIndex * 20);
 
   const shortLabel = `${kindTag} (#${rearIndex + 1})`;
   return { isFront: false, score, shortLabel };
 }
 
 /**
- * Enumerates all rear videoinput devices (falling back to all videoinputs if none are labeled front/back)
- * and sorts them so index 0 in the returned list is the best Normal 1x Photo Camera,
- * while preserving physical sensor order in `index`.
+ * Enumerates all rear videoinput devices and identifies the single best Primary Main 1x Camera.
  */
 export async function discoverRearCameras(): Promise<{
   cameras: RearCameraOption[];
@@ -108,7 +118,11 @@ export async function discoverRearCameras(): Promise<{
   }
 
   try {
-    const allDevices = await navigator.mediaDevices.enumerateDevices();
+    const enumeratePromise = navigator.mediaDevices.enumerateDevices();
+    const timeoutPromise = new Promise<MediaDeviceInfo[]>((resolve) =>
+      setTimeout(() => resolve([]), 1200)
+    );
+    const allDevices = await Promise.race([enumeratePromise, timeoutPromise]);
     const videoInputs = allDevices.filter((d) => d.kind === "videoinput" && d.deviceId);
     if (videoInputs.length === 0) {
       return { cameras: [], bestNormalCamera: null };
@@ -131,7 +145,6 @@ export async function discoverRearCameras(): Promise<{
       }
     }
 
-    // Fallback if all cameras were filtered out (e.g. desktop webcam labeled "FaceTime HD Camera")
     if (scored.length === 0) {
       videoInputs.forEach((dev, idx) => {
         scored.push({
@@ -155,8 +168,7 @@ export async function discoverRearCameras(): Promise<{
 }
 
 /**
- * Checks whether a MediaStreamTrack supports continuous autofocus (which primary 1x photo sensors support,
- * whereas many cheap ultra-wide 0.5x sensors are fixed-focus).
+ * Checks whether a MediaStreamTrack supports continuous autofocus.
  */
 export function inspectTrackFocusAndZoom(videoTrack: MediaStreamTrack | undefined): {
   hasContinuousFocus: boolean;
@@ -177,57 +189,38 @@ export function inspectTrackFocusAndZoom(videoTrack: MediaStreamTrack | undefine
       focusModes.includes("continuous") ||
       focusModes.includes("single-shot");
 
-    let hasZoom = false;
-    let minZoom = 1;
-    let maxZoom = 1;
-    if (caps.zoom && typeof caps.zoom === "object") {
-      const z = caps.zoom as { min?: number; max?: number };
-      minZoom = z.min ?? 1;
-      maxZoom = Math.min(z.max ?? 3, 3);
-      hasZoom = maxZoom > 1.05;
-    }
-
-    return { hasContinuousFocus, hasZoom, minZoom, maxZoom };
+    return { hasContinuousFocus, hasZoom: false, minZoom: 1, maxZoom: 1 };
   } catch {
     return { hasContinuousFocus: true, hasZoom: false, minZoom: 1, maxZoom: 1 };
   }
 }
 
 /**
- * Applies continuous autofocus (and optional hardware zoom) to a video track.
+ * Applies continuous autofocus to a video track non-blockingly with a strict timeout guard
+ * so mobile browsers never hang waiting for applyConstraints.
  */
 export async function applyContinuousFocusToTrack(
-  videoTrack: MediaStreamTrack | undefined,
-  zoomLevel?: number
+  videoTrack: MediaStreamTrack | undefined
 ): Promise<void> {
   if (!videoTrack || typeof videoTrack.getCapabilities !== "function") return;
   try {
     const caps = videoTrack.getCapabilities() as Record<string, unknown>;
-    const advancedObj: Record<string, unknown> = {};
+    if (!Array.isArray(caps.focusMode)) return;
 
-    if (Array.isArray(caps.focusMode)) {
-      if (caps.focusMode.includes("continuous")) {
-        advancedObj.focusMode = "continuous";
-      } else if (caps.focusMode.includes("single-shot")) {
-        advancedObj.focusMode = "single-shot";
-      }
+    let desiredFocusMode = "";
+    if (caps.focusMode.includes("continuous")) {
+      desiredFocusMode = "continuous";
+    } else if (caps.focusMode.includes("single-shot")) {
+      desiredFocusMode = "single-shot";
     }
 
-    if (
-      typeof zoomLevel === "number" &&
-      caps.zoom &&
-      typeof caps.zoom === "object"
-    ) {
-      const z = caps.zoom as { min?: number; max?: number };
-      const minZ = z.min ?? 1;
-      const maxZ = Math.min(z.max ?? 3, 3);
-      advancedObj.zoom = Math.max(minZ, Math.min(maxZ, zoomLevel));
-    }
-
-    if (Object.keys(advancedObj).length > 0) {
-      await videoTrack.applyConstraints({
-        advanced: [advancedObj as unknown as MediaTrackConstraintSet],
-      });
+    if (desiredFocusMode && typeof videoTrack.applyConstraints === "function") {
+      await Promise.race([
+        videoTrack.applyConstraints({
+          advanced: [{ focusMode: desiredFocusMode } as unknown as MediaTrackConstraintSet],
+        }),
+        new Promise<void>((resolve) => setTimeout(resolve, 350)),
+      ]);
     }
   } catch {
     // Ignore unsupported constraint errors on specific devices
@@ -246,7 +239,7 @@ export async function triggerTapToFocusOnTrack(
     if (!Array.isArray(caps.focusMode)) return;
 
     if (caps.focusMode.includes("single-shot")) {
-      await videoTrack
+      videoTrack
         .applyConstraints({
           advanced: [{ focusMode: "single-shot" } as unknown as MediaTrackConstraintSet],
         })
@@ -260,7 +253,7 @@ export async function triggerTapToFocusOnTrack(
             advanced: [{ focusMode: "continuous" } as unknown as MediaTrackConstraintSet],
           })
           .catch(() => {});
-      }, 320);
+      }, 260);
     }
   } catch {
     // ignore
@@ -268,45 +261,41 @@ export async function triggerTapToFocusOnTrack(
 }
 
 /**
- * Opens a MediaStream guaranteed to prefer:
- * 1) Any explicit targetDeviceId (or user's saved preferred camera in localStorage)
- * 2) Otherwise the highest-ranked Normal 1x Photo Camera (with continuous autofocus verification)
+ * Always opens the phone's default Primary Main 1x Photo Camera automatically on any phone model.
+ * Caches the verified primary sensor ID in sessionStorage so subsequent opens require only a single
+ * getUserMedia call, and waits briefly after track.stop() when switching so Android Camera2 HAL never hangs.
  */
-export async function openNormalPhotoCameraStream(
-  explicitDeviceId?: string | null
-): Promise<{
+export async function openNormalPhotoCameraStream(): Promise<{
   stream: MediaStream;
   activeDeviceId: string;
   rearCameras: RearCameraOption[];
 }> {
-  let targetId = explicitDeviceId || null;
-  if (!targetId && typeof window !== "undefined") {
+  let targetId: string | null = null;
+
+  if (typeof window !== "undefined") {
     try {
-      targetId = localStorage.getItem(PREFERRED_CAMERA_STORAGE_KEY);
+      localStorage.removeItem(PREFERRED_CAMERA_STORAGE_KEY);
+      targetId = sessionStorage.getItem(PRIMARY_MAIN_CAMERA_CACHE_KEY);
     } catch {}
   }
 
-  // Pre-discover if permission was already granted earlier
-  const preDiscovery = await discoverRearCameras();
-  if (
-    !targetId &&
-    preDiscovery.bestNormalCamera &&
-    preDiscovery.cameras.some((c) => Boolean(c.rawLabel && !c.rawLabel.startsWith("Camera ")))
-  ) {
-    targetId = preDiscovery.bestNormalCamera.deviceId;
+  // 1. Pre-discover if camera permission was already granted earlier
+  if (!targetId) {
+    const preDiscovery = await discoverRearCameras();
+    const hasRealLabels = preDiscovery.cameras.some((c) =>
+      Boolean(c.rawLabel && !/^Camera \d+$/i.test(c.rawLabel.trim()))
+    );
+    if (hasRealLabels && preDiscovery.bestNormalCamera) {
+      targetId = preDiscovery.bestNormalCamera.deviceId;
+      try {
+        sessionStorage.setItem(PRIMARY_MAIN_CAMERA_CACHE_KEY, targetId);
+      } catch {}
+    }
   }
 
   const openStreamForDevice = async (devId: string | null): Promise<MediaStream | null> => {
     const attempts: MediaStreamConstraints[] = devId
       ? [
-          {
-            video: {
-              deviceId: { exact: devId },
-              width: { ideal: 1920 },
-              height: { ideal: 1080 },
-            },
-            audio: false,
-          },
           {
             video: {
               deviceId: { exact: devId },
@@ -321,14 +310,6 @@ export async function openNormalPhotoCameraStream(
           },
         ]
       : [
-          {
-            video: {
-              facingMode: { ideal: "environment" },
-              width: { ideal: 1920 },
-              height: { ideal: 1080 },
-            },
-            audio: false,
-          },
           {
             video: {
               facingMode: { ideal: "environment" },
@@ -360,14 +341,17 @@ export async function openNormalPhotoCameraStream(
 
   let stream = await openStreamForDevice(targetId);
   if (!stream && targetId) {
-    // Saved deviceId might be stale; clear and open environment camera
+    try {
+      sessionStorage.removeItem(PRIMARY_MAIN_CAMERA_CACHE_KEY);
+    } catch {}
+    targetId = null;
     stream = await openStreamForDevice(null);
   }
   if (!stream) {
     throw new Error("Unable to start camera stream");
   }
 
-  // Now that permission is granted, enumerate full rear camera list with hardware labels
+  // 2. Verify the opened lens is the Primary Main 1x camera
   const postDiscovery = await discoverRearCameras();
   const rearCameras = postDiscovery.cameras;
   const bestNormal = postDiscovery.bestNormalCamera;
@@ -379,49 +363,40 @@ export async function openNormalPhotoCameraStream(
       : {};
   let activeDeviceId = currentSettings.deviceId || targetId || "";
 
-  // If the user didn't explicitly pick a camera yet, verify the browser didn't open an Ultra-Wide / Fixed-Focus lens
-  if (!explicitDeviceId && !targetId && rearCameras.length > 1 && bestNormal) {
+  if (bestNormal && rearCameras.length > 1 && activeDeviceId !== bestNormal.deviceId) {
     const currentCamOption = rearCameras.find((c) => c.deviceId === activeDeviceId);
     const currentCaps = inspectTrackFocusAndZoom(currentTrack);
-
-    const openedWrongLens =
-      (currentCamOption && currentCamOption.deviceId !== bestNormal.deviceId && currentCamOption.score < bestNormal.score) ||
+    const shouldSwitchToPrimary =
+      !currentCamOption ||
+      currentCamOption.score < bestNormal.score ||
       !currentCaps.hasContinuousFocus;
 
-    if (openedWrongLens) {
-      // Switch immediately to the highest-scored Normal 1x Photo Camera
-      const candidateOrder = [...rearCameras].sort((a, b) => b.score - a.score);
-      for (const candidate of candidateOrder) {
-        if (candidate.deviceId === activeDeviceId && currentCaps.hasContinuousFocus) {
-          break;
-        }
-        const replacementStream = await openStreamForDevice(candidate.deviceId);
-        if (replacementStream) {
-          const repTrack = replacementStream.getVideoTracks()[0];
-          const repCaps = inspectTrackFocusAndZoom(repTrack);
-          if (repCaps.hasContinuousFocus || candidate.deviceId === bestNormal.deviceId) {
-            stream.getTracks().forEach((t) => t.stop());
-            stream = replacementStream;
-            activeDeviceId = candidate.deviceId;
-            try {
-              localStorage.setItem(PREFERRED_CAMERA_STORAGE_KEY, activeDeviceId);
-            } catch {}
-            break;
-          } else {
-            replacementStream.getTracks().forEach((t) => t.stop());
-          }
+    if (shouldSwitchToPrimary) {
+      // Stop current stream FIRST and wait 80ms so Android Camera2 HAL cleanly releases the lens before opening primary
+      stream.getTracks().forEach((t) => t.stop());
+      await new Promise<void>((resolve) => setTimeout(resolve, 80));
+
+      const primaryStream = await openStreamForDevice(bestNormal.deviceId);
+      if (primaryStream) {
+        stream = primaryStream;
+        activeDeviceId = bestNormal.deviceId;
+      } else {
+        const fallbackStream = await openStreamForDevice(null);
+        if (fallbackStream) {
+          stream = fallbackStream;
         }
       }
-    } else if (activeDeviceId) {
-      try {
-        localStorage.setItem(PREFERRED_CAMERA_STORAGE_KEY, activeDeviceId);
-      } catch {}
     }
   }
 
-  // Ensure activeDeviceId matches one of rearCameras if available
-  if (!activeDeviceId && rearCameras.length > 0) {
-    activeDeviceId = (bestNormal || rearCameras[0]).deviceId;
+  if (!activeDeviceId && bestNormal) {
+    activeDeviceId = bestNormal.deviceId;
+  }
+
+  if (activeDeviceId) {
+    try {
+      sessionStorage.setItem(PRIMARY_MAIN_CAMERA_CACHE_KEY, activeDeviceId);
+    } catch {}
   }
 
   return {

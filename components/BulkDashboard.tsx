@@ -40,8 +40,6 @@ import {
   BarChart3,
   HardDrive,
   Zap,
-  ZoomIn,
-  ZoomOut,
   FileText,
   FileCode,
   LayoutDashboard,
@@ -66,7 +64,6 @@ import {
   UserCheck,
   AlertTriangle,
   LogOut,
-  SwitchCamera,
 } from "lucide-react";
 import { AuthUserProfile } from "@/app/api/auth/route";
 import * as XLSX from "xlsx";
@@ -100,10 +97,6 @@ import {
   openNormalPhotoCameraStream,
   applyContinuousFocusToTrack,
   triggerTapToFocusOnTrack,
-  inspectTrackFocusAndZoom,
-  PREFERRED_CAMERA_STORAGE_KEY,
-  SHOW_CAMERA_SWITCHER_OPTION,
-  type RearCameraOption,
 } from "@/lib/cameraDeviceSelector";
 
 export interface BulkShipment {
@@ -698,55 +691,15 @@ export function BulkDashboard({
   const cameraGuideModeRef = useRef<"barcode" | "qr" | "both">("both");
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [cameraScanSuccess, setCameraScanSuccess] = useState<{ code: string; carrier: string } | null>(null);
-  const [isAutoZoomFocusEnabled, setIsAutoZoomFocusEnabled] = useState<boolean>(true);
-  const [cameraZoomLevel, setCameraZoomLevel] = useState<number>(1.0);
   const [isEnhancingDamagedLabel, setIsEnhancingDamagedLabel] = useState<boolean>(false);
-  const hwZoomSupportedRef = useRef<{ supported: boolean; min: number; max: number }>({
-    supported: false,
-    min: 1,
-    max: 1,
-  });
-  const lowQualityStreakRef = useRef<number>(0);
-  const emptyFrameStreakRef = useRef<number>(0);
-  const currentZoomRef = useRef<number>(1.0);
   const [isCancelIntakeConfirmOpen, setIsCancelIntakeConfirmOpen] = useState(false);
   const intakeInputRef = useRef<HTMLInputElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const cameraStreamRef = useRef<MediaStream | null>(null);
   const scanCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const macroCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const lastScannedRef = useRef<{ code: string; timestamp: number }>({ code: "", timestamp: 0 });
   const scanSuccessTimerRef = useRef<NodeJS.Timeout | null>(null);
-
-  // Rear Camera Lens Discovery & Switcher state for inline workspace camera
-  const [rearCameras, setRearCameras] = useState<RearCameraOption[]>([]);
-  const [activeCameraDeviceId, setActiveCameraDeviceId] = useState<string>("");
-  const targetCameraDeviceIdRef = useRef<string | null>(null);
-  const [inlineCameraRetryTick, setInlineCameraRetryTick] = useState<number>(0);
-
-  const handleSwitchInlineRearCamera = useCallback(() => {
-    if (rearCameras.length <= 1) return;
-    const currentIdx = rearCameras.findIndex(
-      (c) => c.deviceId === activeCameraDeviceId
-    );
-    const nextIdx = currentIdx >= 0 ? (currentIdx + 1) % rearCameras.length : 0;
-    const nextCam = rearCameras[nextIdx];
-    if (!nextCam) return;
-
-    targetCameraDeviceIdRef.current = nextCam.deviceId;
-    setActiveCameraDeviceId(nextCam.deviceId);
-    try {
-      localStorage.setItem(PREFERRED_CAMERA_STORAGE_KEY, nextCam.deviceId);
-    } catch {}
-
-    if (cameraStreamRef.current) {
-      cameraStreamRef.current.getTracks().forEach((t) => t.stop());
-      cameraStreamRef.current = null;
-    }
-    setCameraZoomLevel(1.0);
-    currentZoomRef.current = 1.0;
-    setCameraError(null);
-    setInlineCameraRetryTick((prev) => prev + 1);
-  }, [rearCameras, activeCameraDeviceId]);
 
   const handleInlineViewfinderTapToFocus = useCallback(() => {
     const stream = cameraStreamRef.current;
@@ -1102,15 +1055,25 @@ export function BulkDashboard({
       return;
     }
 
-    // Check if the user scanned or pasted an Encrypted Office Customer Mini QR ("TFQR1:...") directly
+    // Check if the user scanned or pasted an Encrypted Office Customer Mini QR ("TFQR1:...")
     const qrCheck = decryptCustomerMiniQR(rawTrimmed);
     if (qrCheck.isCustomerQR) {
+      const pendingAwb = customerQrScanStepRef.current.pendingAwb;
+      // Strict 2-step rule: If 2-step mode is ON and we are in Step 1 (awaiting_awb), ignore Customer QR until Tracking Code is scanned first
+      if (isScanCustomerQrEnabledRef.current && !pendingAwb) {
+        setFlaggedInvalidCode(null);
+        setIntakeError("Step 1/2: Please scan the Tracking Code (AWB) first before scanning the Customer Mini QR.");
+        playChime(false);
+        return;
+      }
+
       if (!qrCheck.isValid || !qrCheck.data) {
         setFlaggedInvalidCode(null);
         setIntakeError(qrCheck.error || "Invalid Encrypted Customer Mini QR.");
         playChime(false);
         return;
       }
+
       // Auto-fill customer fields from the decrypted Mini QR
       setIntakeRecipient(qrCheck.data.customerName);
       setIntakePhone(qrCheck.data.customerPhone);
@@ -1118,9 +1081,9 @@ export function BulkDashboard({
       setIntakeItemCode(qrCheck.data.itemCode);
       setIntakeError("");
 
-      // If we were waiting for the 2nd scan (Customer QR) for a pending AWB, complete & stage immediately!
-      const pendingAwb = customerQrScanStepRef.current.pendingAwb;
+      // Complete Step 2 for pendingAwb!
       if (pendingAwb) {
+        const pendingCourier = customerQrScanStepRef.current.pendingCourierId;
         const resetStep = {
           step: "awaiting_awb" as const,
           pendingAwb: "",
@@ -1131,7 +1094,7 @@ export function BulkDashboard({
         setCustomerQrScanStep(resetStep);
         handleStageConsignment(
           pendingAwb,
-          customerQrScanStepRef.current.pendingCourierId || undefined,
+          pendingCourier || undefined,
           qrCheck.data.customerName,
           `Pin ${qrCheck.data.pincode}`,
           undefined,
@@ -1148,6 +1111,21 @@ export function BulkDashboard({
         setTimeout(() => setRecentStagedCode(null), 3000);
         return;
       }
+    }
+
+    // Strict 2-step rule: If waiting for Step 2 (Customer Mini QR) and user did not explicitly force-skip, reject non-Customer-QR scans
+    if (
+      isScanCustomerQrEnabledRef.current &&
+      customerQrScanStepRef.current.step === "awaiting_customer_qr" &&
+      !customerQrDataOverride &&
+      !forcePasteAnyway
+    ) {
+      setFlaggedInvalidCode(null);
+      setIntakeError(
+        `Step 2/2: AWB ${customerQrScanStepRef.current.pendingAwb} is waiting for Customer Mini QR. Scan Customer QR or click Skip.`
+      );
+      playChime(false);
+      return;
     }
 
     const identification = identifyAndValidateConsignment(rawTrimmed);
@@ -1310,17 +1288,33 @@ export function BulkDashboard({
     }
   }, [stagedConsignments, intakeCourier, intakeStatus, intakeItemCode, intakeRecipient, intakePhone, intakePincode, intakeReturnReason, userProfile.hubCity, userProfile.hubPincode, isAutoNextEnabled, isCameraActive, playChime]);
 
-  // Handle hardware scanner or manual Enter in input (supports 2-step AWB -> Customer QR scan cycle)
+  // Handle hardware scanner or manual Enter in input (supports strict 2-step AWB -> Customer QR scan cycle)
   const handleIntakeKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter") {
       e.preventDefault();
       const trimmed = intakeAwb.trim();
       if (!trimmed) return;
 
-      // Check if it's an Encrypted Customer Mini QR ("TFQR1:...")
       const qrRes = decryptCustomerMiniQR(trimmed);
       if (qrRes.isCustomerQR) {
+        // In 2-step mode, Customer QR is only valid in Step 2 (awaiting_customer_qr)
+        if (isScanCustomerQrEnabled && customerQrScanStep.step === "awaiting_awb") {
+          setIntakeError("Step 1/2: Scan Tracking Code (AWB) first before scanning Customer QR.");
+          setIntakeAwb("");
+          playChime(false);
+          return;
+        }
         handleStageConsignment(trimmed);
+        return;
+      }
+
+      // In Step 2 (awaiting_customer_qr), ignore/reject non-Customer-QR tracking scans
+      if (isScanCustomerQrEnabled && customerQrScanStep.step === "awaiting_customer_qr") {
+        setIntakeError(
+          `Step 2/2: Waiting for Customer Mini QR for AWB ${customerQrScanStep.pendingAwb}.`
+        );
+        setIntakeAwb("");
+        playChime(false);
         return;
       }
 
@@ -1346,12 +1340,14 @@ export function BulkDashboard({
         setIntakeCourier(detected.id);
         setIntakeError("");
         setFlaggedInvalidCode(null);
-        setCustomerQrScanStep({
-          step: "awaiting_customer_qr",
+        const nextStep = {
+          step: "awaiting_customer_qr" as const,
           pendingAwb: cleanNum,
           pendingCourierId: detected.id,
           pendingCourierName: detected.name,
-        });
+        };
+        customerQrScanStepRef.current = nextStep;
+        setCustomerQrScanStep(nextStep);
         setIntakeAwb("");
         playChime(true);
         return;
@@ -1674,42 +1670,6 @@ export function BulkDashboard({
     return cleaned.length >= 4 ? cleaned : trimmed.toUpperCase();
   }, []);
 
-  // Apply hardware camera zoom & focus sensitivity constraints when available
-  const applyInlineCameraZoomAndFocus = useCallback((nextZoom: number) => {
-    const clamped = Number(Math.min(2.4, Math.max(1.0, nextZoom)).toFixed(2));
-    currentZoomRef.current = clamped;
-    setCameraZoomLevel(clamped);
-
-    const stream = cameraStreamRef.current;
-    if (!stream) return;
-    const [track] = stream.getVideoTracks();
-    if (!track || typeof track.applyConstraints !== "function") return;
-
-    try {
-      const advancedConstraints: Record<string, unknown> = {};
-      if (hwZoomSupportedRef.current.supported) {
-        const { min, max } = hwZoomSupportedRef.current;
-        advancedConstraints.zoom = Math.min(max, Math.max(min, clamped));
-      }
-      const capabilities =
-        typeof track.getCapabilities === "function"
-          ? (track.getCapabilities() as Record<string, unknown>)
-          : {};
-      if (Array.isArray(capabilities.focusMode) && capabilities.focusMode.includes("continuous")) {
-        advancedConstraints.focusMode = "continuous";
-      }
-      if (Object.keys(advancedConstraints).length > 0) {
-        track
-          .applyConstraints({
-            advanced: [advancedConstraints as MediaTrackConstraintSet],
-          })
-          .catch(() => {});
-      }
-    } catch {
-      // fallback to optical ROI crop zoom
-    }
-  }, []);
-
   const handleStageConsignmentRef = useRef(handleStageConsignment);
   useEffect(() => {
     handleStageConsignmentRef.current = handleStageConsignment;
@@ -1720,46 +1680,48 @@ export function BulkDashboard({
     isAutoNextEnabledRef.current = isAutoNextEnabled;
   }, [isAutoNextEnabled]);
 
-  const isAutoZoomFocusEnabledRef = useRef(isAutoZoomFocusEnabled);
-  useEffect(() => {
-    isAutoZoomFocusEnabledRef.current = isAutoZoomFocusEnabled;
-  }, [isAutoZoomFocusEnabled]);
-
   const intakeCourierRef = useRef(intakeCourier);
   useEffect(() => {
     intakeCourierRef.current = intakeCourier;
   }, [intakeCourier]);
 
-  // Real-time Camera Stream + Strictly Guide-Only ROI Cropping + Auto-Zoom/Focus Damaged Label Enhancer
+  // Real-time Camera Stream + Non-Blocking Sequential Decoder Loop + Strict 2-Step Data Isolation
   useEffect(() => {
     if (!isCameraActive) return;
 
     let isCancelled = false;
-    let scanIntervalId: NodeJS.Timeout | null = null;
+    let loopTimerId: NodeJS.Timeout | null = null;
+    let isDecoding = false;
+    let tickCounter = 0;
 
-    const zxingReader = new MultiFormatReader();
-    const hints = new Map();
-    hints.set(DecodeHintType.POSSIBLE_FORMATS, [
-      BarcodeFormat.QR_CODE,
+    const zxingBarcodeReader = new MultiFormatReader();
+    const barcodeHints = new Map();
+    barcodeHints.set(DecodeHintType.POSSIBLE_FORMATS, [
       BarcodeFormat.CODE_128,
       BarcodeFormat.CODE_39,
       BarcodeFormat.CODE_93,
-      BarcodeFormat.CODABAR,
       BarcodeFormat.EAN_13,
-      BarcodeFormat.EAN_8,
       BarcodeFormat.ITF,
-      BarcodeFormat.UPC_A,
-      BarcodeFormat.UPC_E,
+    ]);
+    barcodeHints.set(DecodeHintType.TRY_HARDER, true);
+    zxingBarcodeReader.setHints(barcodeHints);
+
+    const zxingQrReader = new MultiFormatReader();
+    const qrHints = new Map();
+    qrHints.set(DecodeHintType.POSSIBLE_FORMATS, [
+      BarcodeFormat.QR_CODE,
       BarcodeFormat.DATA_MATRIX,
       BarcodeFormat.PDF_417,
       BarcodeFormat.AZTEC,
     ]);
-    hints.set(DecodeHintType.TRY_HARDER, true);
-    zxingReader.setHints(hints);
+    qrHints.set(DecodeHintType.TRY_HARDER, true);
+    zxingQrReader.setHints(qrHints);
 
     let nativeDetector: {
       detect: (source: HTMLCanvasElement) => Promise<Array<{ rawValue?: string; format?: string }>>;
     } | null = null;
+    let nativeTimeoutStreak = 0;
+
     if (typeof window !== "undefined" && "BarcodeDetector" in window) {
       try {
         const NativeBarcodeDetector = (window as unknown as {
@@ -1773,12 +1735,8 @@ export function BulkDashboard({
             "code_128",
             "code_39",
             "code_93",
-            "codabar",
             "ean_13",
-            "ean_8",
             "itf",
-            "upc_a",
-            "upc_e",
             "data_matrix",
             "pdf417",
             "aztec",
@@ -1794,18 +1752,26 @@ export function BulkDashboard({
       if (!trimmedRaw) return false;
 
       const now = Date.now();
-      if (
-        lastScannedRef.current.code === trimmedRaw &&
-        now - lastScannedRef.current.timestamp < 2200
-      ) {
-        return true;
-      }
+      const isTwoStepOn = isScanCustomerQrEnabledRef.current;
+      const pendingStep = customerQrScanStepRef.current;
+      const isAwaitingCustomerQr =
+        isTwoStepOn && pendingStep.step === "awaiting_customer_qr";
 
       // Check if scanned code is an Encrypted Office Customer Mini QR ("TFQR1:...")
       const customerQr = decryptCustomerMiniQR(trimmedRaw);
       if (customerQr.isCustomerQR) {
+        // STRICT STEP ISOLATION: Ignore Customer QR unless we are in Step 2 (awaiting_customer_qr)!
+        if (!isAwaitingCustomerQr) {
+          return false;
+        }
+
+        if (
+          lastScannedRef.current.code === trimmedRaw &&
+          now - lastScannedRef.current.timestamp < 1500
+        ) {
+          return true;
+        }
         lastScannedRef.current = { code: trimmedRaw, timestamp: now };
-        lowQualityStreakRef.current = 0;
         setIsEnhancingDamagedLabel(false);
 
         if (!customerQr.isValid || !customerQr.data) {
@@ -1814,10 +1780,9 @@ export function BulkDashboard({
           return true;
         }
 
-        const pendingAwb = customerQrScanStepRef.current.pendingAwb;
+        const pendingAwb = pendingStep.pendingAwb;
         if (pendingAwb) {
-          // Complete Step 2: Fill customer details for pendingAwb, stage consignment, and auto-reset to Step 1 for next AWB!
-          const pendingCourier = customerQrScanStepRef.current.pendingCourierId;
+          const pendingCourier = pendingStep.pendingCourierId;
           const resetStep = {
             step: "awaiting_awb" as const,
             pendingAwb: "",
@@ -1841,31 +1806,17 @@ export function BulkDashboard({
             code: `${pendingAwb} • ${customerQr.data.customerName}`,
             carrier: `PIN ${customerQr.data.pincode} • ${customerQr.data.itemCode} • Next Ready`,
           });
-        } else {
-          // Fill customer details into form
-          setIntakeRecipient(customerQr.data.customerName);
-          setIntakePhone(customerQr.data.customerPhone);
-          setIntakePincode(customerQr.data.pincode);
-          setIntakeItemCode(customerQr.data.itemCode);
-          playChime(true);
-          setCameraScanSuccess({
-            code: customerQr.data.customerName,
-            carrier: `${customerQr.data.formattedPhone91} • PIN ${customerQr.data.pincode}`,
-          });
+          if (scanSuccessTimerRef.current) clearTimeout(scanSuccessTimerRef.current);
+          scanSuccessTimerRef.current = setTimeout(() => {
+            setCameraScanSuccess(null);
+          }, 1200);
+          return true;
         }
-
-        if (scanSuccessTimerRef.current) clearTimeout(scanSuccessTimerRef.current);
-        scanSuccessTimerRef.current = setTimeout(() => {
-          setCameraScanSuccess(null);
-        }, 1400);
-        return true;
+        return false;
       }
 
-      // While waiting for Step 2 (Customer Mini QR), ignore non-Customer-QR reads (such as the 1D barcode on the same label!)
-      if (
-        isScanCustomerQrEnabledRef.current &&
-        customerQrScanStepRef.current.step === "awaiting_customer_qr"
-      ) {
+      // STRICT STEP ISOLATION: While waiting for Step 2 (Customer Mini QR), ignore all non-Customer-QR reads!
+      if (isAwaitingCustomerQr) {
         return false;
       }
 
@@ -1879,7 +1830,7 @@ export function BulkDashboard({
       }
 
       const code = extractCleanScannedCode(trimmedRaw);
-      if (!code || code.length < 6) return false;
+      if (!code || code.length < 6 || /^TFQR/i.test(code)) return false;
 
       if (
         lastScannedRef.current.code === code &&
@@ -1888,7 +1839,6 @@ export function BulkDashboard({
         return true;
       }
       lastScannedRef.current = { code, timestamp: now };
-      lowQualityStreakRef.current = 0;
       setIsEnhancingDamagedLabel(false);
 
       const identification = identifyAndValidateConsignment(code);
@@ -1936,7 +1886,7 @@ export function BulkDashboard({
         if (scanSuccessTimerRef.current) clearTimeout(scanSuccessTimerRef.current);
         scanSuccessTimerRef.current = setTimeout(() => {
           setCameraScanSuccess(null);
-        }, 1400);
+        }, 1200);
         return true;
       }
 
@@ -1960,50 +1910,60 @@ export function BulkDashboard({
       if (scanSuccessTimerRef.current) clearTimeout(scanSuccessTimerRef.current);
       scanSuccessTimerRef.current = setTimeout(() => {
         setCameraScanSuccess(null);
-      }, 1400);
+      }, 1200);
       return true;
     };
 
     const tryDecodeROI = async (
       canvas: HTMLCanvasElement,
       ctx: CanvasRenderingContext2D,
-      overrideMode?: "barcode" | "qr" | "both"
+      activeMode: "barcode" | "qr" | "both",
+      invertQr: boolean
     ): Promise<boolean> => {
       const w = canvas.width;
       const h = canvas.height;
-      const isAwaitingCustomerQr =
-        isScanCustomerQrEnabledRef.current &&
-        customerQrScanStepRef.current.step === "awaiting_customer_qr";
-      const activeMode = isAwaitingCustomerQr
-        ? "qr"
-        : overrideMode || cameraGuideModeRef.current;
 
+      // 1. Hardware Native BarcodeDetector with strict 120ms anti-hang timeout
       if (nativeDetector) {
         try {
-          const detected = await nativeDetector.detect(canvas);
-          if (detected && detected.length > 0) {
-            for (const item of detected) {
-              if (!item.rawValue) continue;
-              const fmt = (item.format || "").toLowerCase();
-              const is2D =
-                fmt === "qr_code" ||
-                fmt === "data_matrix" ||
-                fmt === "pdf417" ||
-                fmt === "aztec" ||
-                item.rawValue.trim().toUpperCase().startsWith("TFQR1:");
-              if (activeMode === "barcode" && is2D) continue;
-              if (activeMode === "qr" && !is2D && fmt !== "") continue;
-              if (handleDetectedValue(item.rawValue)) return true;
+          const detected = await Promise.race([
+            nativeDetector.detect(canvas),
+            new Promise<null>((resolve) =>
+              setTimeout(() => resolve(null), 120)
+            ),
+          ]);
+          if (detected === null) {
+            nativeTimeoutStreak += 1;
+            if (nativeTimeoutStreak >= 3) {
+              nativeDetector = null;
+            }
+          } else {
+            nativeTimeoutStreak = 0;
+            if (detected.length > 0) {
+              for (const item of detected) {
+                if (!item.rawValue) continue;
+                const fmt = (item.format || "").toLowerCase();
+                const is2D =
+                  fmt === "qr_code" ||
+                  fmt === "data_matrix" ||
+                  fmt === "pdf417" ||
+                  fmt === "aztec" ||
+                  item.rawValue.trim().toUpperCase().startsWith("TFQR1:");
+                if (activeMode === "barcode" && is2D) continue;
+                if (activeMode === "qr" && !is2D && fmt !== "") continue;
+                if (handleDetectedValue(item.rawValue)) return true;
+              }
             }
           }
         } catch {}
       }
 
+      // 2. jsQR for 2D QR codes
       if (activeMode !== "barcode") {
         try {
           const imageData = ctx.getImageData(0, 0, w, h);
           const qrResult = jsQR(imageData.data, w, h, {
-            inversionAttempts: "attemptBoth",
+            inversionAttempts: invertQr ? "attemptBoth" : "dontInvert",
           });
           if (qrResult && qrResult.data) {
             if (handleDetectedValue(qrResult.data)) return true;
@@ -2011,34 +1971,149 @@ export function BulkDashboard({
         } catch {}
       }
 
-      try {
-        const luminanceSource = new HTMLCanvasElementLuminanceSource(canvas);
-        const binaryBitmap = new BinaryBitmap(new HybridBinarizer(luminanceSource));
-        const result = zxingReader.decodeWithState(binaryBitmap);
-        if (result && result.getText()) {
-          const zFmt = result.getBarcodeFormat();
-          const is2D =
-            zFmt === BarcodeFormat.QR_CODE ||
-            zFmt === BarcodeFormat.DATA_MATRIX ||
-            zFmt === BarcodeFormat.PDF_417 ||
-            zFmt === BarcodeFormat.AZTEC;
-          if (
-            !(activeMode === "barcode" && is2D) &&
-            !(activeMode === "qr" && !is2D) &&
-            handleDetectedValue(result.getText())
-          ) {
-            return true;
-          }
+      // 3. ZXing — run 1D Barcode reader and 2D QR reader separately so a Customer Mini QR on the same label never masks or blocks a 1D Tracking Barcode in Step 1
+      let luminanceSource: HTMLCanvasElementLuminanceSource | null = null;
+      const getLuminance = () => {
+        if (!luminanceSource) {
+          luminanceSource = new HTMLCanvasElementLuminanceSource(canvas);
         }
-      } catch {
-        // normal when no barcode in frame
-      } finally {
+        return luminanceSource;
+      };
+
+      if (activeMode === "barcode" || activeMode === "both") {
         try {
-          zxingReader.reset();
-        } catch {}
+          const binaryBitmap = new BinaryBitmap(new HybridBinarizer(getLuminance()));
+          const result = zxingBarcodeReader.decodeWithState(binaryBitmap);
+          if (result && result.getText()) {
+            if (handleDetectedValue(result.getText())) return true;
+          }
+        } catch {
+          // normal when no 1D barcode in frame
+        } finally {
+          try {
+            zxingBarcodeReader.reset();
+          } catch {}
+        }
+      }
+
+      if (activeMode === "qr" || activeMode === "both") {
+        try {
+          const binaryBitmap = new BinaryBitmap(new HybridBinarizer(getLuminance()));
+          const result = zxingQrReader.decodeWithState(binaryBitmap);
+          if (result && result.getText()) {
+            if (handleDetectedValue(result.getText())) return true;
+          }
+        } catch {
+          // normal when no 2D code in frame
+        } finally {
+          try {
+            zxingQrReader.reset();
+          } catch {}
+        }
       }
 
       return false;
+    };
+
+    const scheduleNextTick = (delayMs: number = 145) => {
+      if (isCancelled) return;
+      loopTimerId = setTimeout(runInlineDecodeTick, delayMs);
+    };
+
+    const runInlineDecodeTick = async () => {
+      if (isCancelled) return;
+      if (isDecoding) {
+        scheduleNextTick(145);
+        return;
+      }
+
+      isDecoding = true;
+      tickCounter = (tickCounter + 1) % 120;
+
+      try {
+        const video = videoRef.current;
+        const canvas = scanCanvasRef.current;
+        const macroCanvas = macroCanvasRef.current;
+        if (!video || !canvas || !macroCanvas) return;
+
+        if (video.paused && video.srcObject) {
+          video.play().catch(() => {});
+        }
+        if (video.readyState < 2 || video.videoWidth === 0 || video.videoHeight === 0) return;
+
+        const vw = video.videoWidth;
+        const vh = video.videoHeight;
+        const minSide = Math.min(vw, vh);
+
+        const isAwaitingCustomerQr =
+          isScanCustomerQrEnabledRef.current &&
+          customerQrScanStepRef.current.step === "awaiting_customer_qr";
+
+        // STEP 2 (Awaiting Customer QR ONLY): Fast dedicated QR-only pass
+        if (isAwaitingCustomerQr) {
+          const qrSide = Math.max(96, Math.floor(minSide * 0.56));
+          const qrX = Math.max(0, Math.floor((vw - qrSide) / 2));
+          const qrY = Math.max(0, Math.floor((vh - qrSide) / 2));
+          const targetSide = 420;
+          if (canvas.width !== targetSide) canvas.width = targetSide;
+          if (canvas.height !== targetSide) canvas.height = targetSide;
+          const ctx = canvas.getContext("2d", { willReadFrequently: true });
+          if (!ctx) return;
+
+          ctx.drawImage(video, qrX, qrY, qrSide, qrSide, 0, 0, targetSide, targetSide);
+          if (await tryDecodeROI(canvas, ctx, "qr", tickCounter % 2 === 0)) return;
+
+          const macroSide = Math.max(80, Math.floor(minSide * 0.38));
+          const macroX = Math.max(0, Math.floor((vw - macroSide) / 2));
+          const macroY = Math.max(0, Math.floor((vh - macroSide) / 2));
+          const macroTarget = 360;
+          if (macroCanvas.width !== macroTarget) macroCanvas.width = macroTarget;
+          if (macroCanvas.height !== macroTarget) macroCanvas.height = macroTarget;
+          const mCtx = macroCanvas.getContext("2d", { willReadFrequently: true });
+          if (mCtx) {
+            mCtx.drawImage(video, macroX, macroY, macroSide, macroSide, 0, 0, macroTarget, macroTarget);
+            await tryDecodeROI(macroCanvas, mCtx, "qr", true);
+          }
+          return;
+        }
+
+        // STEP 1 (Awaiting Tracking Code ONLY): Fast Guide ROI pass
+        const activeMode = cameraGuideModeRef.current;
+        let roiWidthRatio = 0.78;
+        let roiHeightRatio = 0.46;
+        if (activeMode === "barcode") {
+          roiWidthRatio = 0.8;
+          roiHeightRatio = 0.3;
+        } else if (activeMode === "qr") {
+          const sq = minSide * 0.56;
+          roiWidthRatio = sq / vw;
+          roiHeightRatio = sq / vh;
+        }
+
+        const cropW = Math.max(64, Math.floor(vw * roiWidthRatio));
+        const cropH = Math.max(64, Math.floor(vh * roiHeightRatio));
+        const cropX = Math.max(0, Math.floor((vw - cropW) / 2));
+        const cropY = Math.max(0, Math.floor((vh - cropH) / 2));
+
+        const maxTargetDim = 540;
+        const scale = Math.min(1.25, maxTargetDim / Math.max(cropW, cropH));
+        const w = Math.max(64, Math.floor(cropW * scale));
+        const h = Math.max(64, Math.floor(cropH * scale));
+
+        if (canvas.width !== w) canvas.width = w;
+        if (canvas.height !== h) canvas.height = h;
+
+        const ctx = canvas.getContext("2d", { willReadFrequently: true });
+        if (!ctx) return;
+
+        ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, w, h);
+        await tryDecodeROI(canvas, ctx, activeMode, false);
+      } catch {
+        // ignore frame error
+      } finally {
+        isDecoding = false;
+        scheduleNextTick(145);
+      }
     };
 
     const startCameraAndScanner = async () => {
@@ -2051,15 +2126,8 @@ export function BulkDashboard({
 
         let stream = cameraStreamRef.current;
         if (!stream || !stream.active) {
-          const opened = await openNormalPhotoCameraStream(
-            targetCameraDeviceIdRef.current
-          );
+          const opened = await openNormalPhotoCameraStream();
           stream = opened.stream;
-          if (!isCancelled) {
-            setRearCameras(opened.rearCameras);
-            setActiveCameraDeviceId(opened.activeDeviceId);
-            targetCameraDeviceIdRef.current = opened.activeDeviceId;
-          }
         }
 
         if (isCancelled) {
@@ -2069,200 +2137,26 @@ export function BulkDashboard({
 
         cameraStreamRef.current = stream;
 
-        const [videoTrack] = stream.getVideoTracks();
-        if (videoTrack) {
-          const capsInfo = inspectTrackFocusAndZoom(videoTrack);
-          if (capsInfo.hasZoom) {
-            hwZoomSupportedRef.current = {
-              supported: true,
-              min: capsInfo.minZoom,
-              max: capsInfo.maxZoom,
-            };
-          } else {
-            hwZoomSupportedRef.current = { supported: false, min: 1, max: 1 };
-          }
-          await applyContinuousFocusToTrack(videoTrack, currentZoomRef.current);
-        }
-
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           videoRef.current.setAttribute("playsinline", "true");
           await videoRef.current.play().catch(() => {});
         }
 
+        const [videoTrack] = stream.getVideoTracks();
+        if (videoTrack) {
+          // Non-blocking continuous focus after video starts playing
+          void applyContinuousFocusToTrack(videoTrack);
+        }
+
         if (!scanCanvasRef.current) {
           scanCanvasRef.current = document.createElement("canvas");
         }
+        if (!macroCanvasRef.current) {
+          macroCanvasRef.current = document.createElement("canvas");
+        }
 
-        // Continuous frame decoding every 135ms with Guide ROI + Macro Center QR Crop + Full-frame fallback
-        scanIntervalId = setInterval(async () => {
-          if (isCancelled || !videoRef.current || !scanCanvasRef.current) return;
-          const video = videoRef.current;
-          if (video.paused && video.srcObject) {
-            video.play().catch(() => {});
-          }
-          if (video.readyState < 2 || video.videoWidth === 0 || video.videoHeight === 0) return;
-
-          const vw = video.videoWidth;
-          const vh = video.videoHeight;
-          const activeMode = cameraGuideModeRef.current;
-
-          // Calculate source crop matching the Guide Frame
-          let roiWidthRatio = 0.76;
-          let roiHeightRatio = 0.48;
-          if (activeMode === "barcode") {
-            roiWidthRatio = 0.78;
-            roiHeightRatio = 0.28;
-          } else if (activeMode === "qr") {
-            const squareSide = Math.min(vw, vh) * 0.54;
-            roiWidthRatio = squareSide / vw;
-            roiHeightRatio = squareSide / vh;
-          }
-
-          const effectiveDigitalZoom = hwZoomSupportedRef.current.supported
-            ? 1.0
-            : currentZoomRef.current;
-
-          const cropW = Math.max(64, Math.floor((vw * roiWidthRatio) / effectiveDigitalZoom));
-          const cropH = Math.max(64, Math.floor((vh * roiHeightRatio) / effectiveDigitalZoom));
-          const cropX = Math.max(0, Math.floor((vw - cropW) / 2));
-          const cropY = Math.max(0, Math.floor((vh - cropH) / 2));
-
-          const canvas = scanCanvasRef.current;
-          const maxTargetDim = 840;
-          const scale = Math.min(1.6, maxTargetDim / Math.max(cropW, cropH));
-          const w = Math.max(64, Math.floor(cropW * scale));
-          const h = Math.max(64, Math.floor(cropH * scale));
-
-          if (canvas.width !== w) canvas.width = w;
-          if (canvas.height !== h) canvas.height = h;
-
-          const ctx = canvas.getContext("2d", { willReadFrequently: true });
-          if (!ctx) return;
-
-          // Pass 1: Standard decode on Guide ROI
-          ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, w, h);
-          if (await tryDecodeROI(canvas, ctx)) return;
-
-          // Pass 2: Macro Center Crop (42%x42% at 1.35x upscale) for Small Customer Mini QRs!
-          if (activeMode !== "barcode") {
-            const minSide = Math.min(vw, vh);
-            const macroSide = Math.max(80, Math.floor((minSide * 0.44) / effectiveDigitalZoom));
-            const macroX = Math.max(0, Math.floor((vw - macroSide) / 2));
-            const macroY = Math.max(0, Math.floor((vh - macroSide) / 2));
-            const macroTarget = Math.min(640, Math.max(320, Math.floor(macroSide * 1.35)));
-            if (canvas.width !== macroTarget) canvas.width = macroTarget;
-            if (canvas.height !== macroTarget) canvas.height = macroTarget;
-            ctx.drawImage(video, macroX, macroY, macroSide, macroSide, 0, 0, macroTarget, macroTarget);
-            if (await tryDecodeROI(canvas, ctx, "qr")) return;
-          }
-
-          // Restore Guide ROI for Pass 3 contrast & sharpness analysis
-          if (canvas.width !== w) canvas.width = w;
-          if (canvas.height !== h) canvas.height = h;
-          ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, w, h);
-
-          const imgData = ctx.getImageData(0, 0, w, h);
-          const data = imgData.data;
-          const pixelCount = w * h;
-          const lum = new Uint8Array(pixelCount);
-          let minLum = 255;
-          let maxLum = 0;
-
-          for (let i = 0, p = 0; i < data.length; i += 4, p++) {
-            const y = (data[i] * 77 + data[i + 1] * 150 + data[i + 2] * 29) >> 8;
-            lum[p] = y;
-            if (y < minLum) minLum = y;
-            if (y > maxLum) maxLum = y;
-          }
-
-          const contrastSpan = maxLum - minLum;
-          let edgeTransitions = 0;
-          let gradientSum = 0;
-          let sampleCount = 0;
-
-          for (let y = Math.floor(h * 0.2); y < Math.floor(h * 0.8); y += 2) {
-            const rowOffset = y * w;
-            for (let x = Math.floor(w * 0.15); x < Math.floor(w * 0.85) - 1; x += 2) {
-              const idx = rowOffset + x;
-              const grad = Math.max(
-                Math.abs(lum[idx] - lum[idx + 1]),
-                y + 1 < h ? Math.abs(lum[idx] - lum[idx + w]) : 0
-              );
-              gradientSum += grad;
-              sampleCount++;
-              if (grad > 18) edgeTransitions++;
-            }
-          }
-
-          const edgeDensity = sampleCount > 0 ? edgeTransitions / sampleCount : 0;
-          const avgGradient = sampleCount > 0 ? gradientSum / sampleCount : 0;
-          const hasLabelCandidate = edgeDensity > 0.065 && contrastSpan > 28;
-          const isLowQuality = hasLabelCandidate && (avgGradient < 26 || contrastSpan < 145);
-
-          if (hasLabelCandidate) {
-            emptyFrameStreakRef.current = 0;
-            const range = Math.max(1, maxLum - minLum);
-            const stretched = new Uint8ClampedArray(pixelCount);
-            for (let p = 0; p < pixelCount; p++) {
-              stretched[p] = ((lum[p] - minLum) * 255) / range;
-            }
-            for (let y = 1; y < h - 1; y++) {
-              const row = y * w;
-              for (let x = 1; x < w - 1; x++) {
-                const p = row + x;
-                const center = stretched[p];
-                const neighbors =
-                  (stretched[p - 1] + stretched[p + 1] + stretched[p - w] + stretched[p + w]) >> 2;
-                const sharpened = Math.min(255, Math.max(0, center + (center - neighbors) * 2));
-                const finalVal =
-                  sharpened < 120 ? Math.max(0, sharpened - 22) : Math.min(255, sharpened + 22);
-                const idx = p * 4;
-                data[idx] = finalVal;
-                data[idx + 1] = finalVal;
-                data[idx + 2] = finalVal;
-              }
-            }
-            ctx.putImageData(imgData, 0, 0);
-
-            if (await tryDecodeROI(canvas, ctx)) return;
-
-            if (isAutoZoomFocusEnabledRef.current && isLowQuality) {
-              lowQualityStreakRef.current += 1;
-              setIsEnhancingDamagedLabel(true);
-              if (lowQualityStreakRef.current >= 3) {
-                lowQualityStreakRef.current = 0;
-                const currentZ = currentZoomRef.current;
-                const nextZ =
-                  currentZ < 1.3
-                    ? 1.35
-                    : currentZ < 1.65
-                    ? 1.7
-                    : currentZ < 2.0
-                    ? 2.0
-                    : 1.2;
-                applyInlineCameraZoomAndFocus(nextZ);
-              }
-            }
-          } else {
-            emptyFrameStreakRef.current += 1;
-            if (emptyFrameStreakRef.current >= 8) {
-              setIsEnhancingDamagedLabel(false);
-              if (isAutoZoomFocusEnabledRef.current && currentZoomRef.current > 1.05) {
-                applyInlineCameraZoomAndFocus(1.0);
-              }
-            }
-          }
-
-          // Pass 4: Full-frame fallback pass if barcode/QR is slightly outside the inner crop
-          const fullScale = Math.min(1, 720 / Math.max(vw, vh));
-          const fullW = Math.max(120, Math.floor(vw * fullScale));
-          const fullH = Math.max(120, Math.floor(vh * fullScale));
-          if (canvas.width !== fullW) canvas.width = fullW;
-          if (canvas.height !== fullH) canvas.height = fullH;
-          ctx.drawImage(video, 0, 0, vw, vh, 0, 0, fullW, fullH);
-          await tryDecodeROI(canvas, ctx);
-        }, 135);
+        scheduleNextTick(150);
       } catch {
         if (!isCancelled) {
           setCameraError("Camera permission not granted or camera unavailable on this device.");
@@ -2274,14 +2168,12 @@ export function BulkDashboard({
 
     return () => {
       isCancelled = true;
-      if (scanIntervalId) clearInterval(scanIntervalId);
+      if (loopTimerId) clearTimeout(loopTimerId);
     };
   }, [
     isCameraActive,
     playChime,
     extractCleanScannedCode,
-    applyInlineCameraZoomAndFocus,
-    inlineCameraRetryTick,
   ]);
 
   // Force discard all staged / typed intake data and close modal
@@ -7326,53 +7218,6 @@ export function BulkDashboard({
                         Both
                       </button>
                     </div>
-
-                    {/* Manual Zoom Controls */}
-                    <div className="inline-flex items-center gap-1 rounded-xl bg-slate-950 px-2 py-1 border border-slate-800 text-[11px] font-bold">
-                      <button
-                        type="button"
-                        onClick={() => applyInlineCameraZoomAndFocus(cameraZoomLevel - 0.25)}
-                        disabled={cameraZoomLevel <= 1.0}
-                        className="p-1 rounded-md text-slate-400 hover:text-white disabled:opacity-40 cursor-pointer"
-                      >
-                        <ZoomOut className="h-3.5 w-3.5" />
-                      </button>
-                      <span className="font-mono text-[11px] font-black text-indigo-300 px-1 tabular-nums">
-                        {cameraZoomLevel.toFixed(1)}x
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => applyInlineCameraZoomAndFocus(cameraZoomLevel + 0.25)}
-                        disabled={cameraZoomLevel >= 2.4}
-                        className="p-1 rounded-md text-slate-400 hover:text-white disabled:opacity-40 cursor-pointer"
-                      >
-                        <ZoomIn className="h-3.5 w-3.5" />
-                      </button>
-                    </div>
-
-                    {/* Rear Camera Lens Switcher */}
-                    {SHOW_CAMERA_SWITCHER_OPTION && rearCameras.length > 0 && (
-                      <button
-                        type="button"
-                        onClick={handleSwitchInlineRearCamera}
-                        disabled={rearCameras.length <= 1}
-                        className="inline-flex items-center gap-1.5 rounded-xl bg-slate-950 border border-slate-800 hover:border-indigo-500/60 px-2.5 py-1 text-[11px] font-bold text-slate-200 disabled:opacity-75 cursor-pointer transition-colors"
-                        title="Switch rear camera lens (Normal 1x Photo Camera selected by default)"
-                      >
-                        <SwitchCamera className="h-3.5 w-3.5 text-indigo-400 shrink-0" />
-                        <span className="font-mono tabular-nums">
-                          {(() => {
-                            const idx = rearCameras.findIndex(
-                              (c) => c.deviceId === activeCameraDeviceId
-                            );
-                            const activeCam = idx >= 0 ? rearCameras[idx] : rearCameras[0];
-                            return rearCameras.length > 1
-                              ? `Cam ${idx >= 0 ? idx + 1 : 1}/${rearCameras.length} • ${activeCam.shortLabel.split(" ")[0]}`
-                              : activeCam.shortLabel;
-                          })()}
-                        </span>
-                      </button>
-                    )}
                   </div>
 
                   <div className="flex flex-wrap items-center gap-2.5">
@@ -7558,34 +7403,18 @@ export function BulkDashboard({
                   >
                     <video
                       ref={videoRef}
-                      style={{
-                        transform: hwZoomSupportedRef.current.supported
-                          ? undefined
-                          : `scale(${cameraZoomLevel})`,
-                        transition: "transform 220ms ease-out",
-                      }}
                       className="absolute inset-0 w-full h-full object-cover"
                       playsInline
                       muted
                       autoPlay
                     />
 
-                    {/* Top HUD Pill: Strictly Inside Guide Frame & Damaged Label Enhancer */}
+                    {/* Top HUD Pill: Strictly Inside Guide Frame */}
                     <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 pointer-events-none flex flex-wrap items-center justify-center gap-2 px-3">
                       <span className="inline-flex items-center gap-1.5 rounded-full bg-slate-950/80 border border-slate-700/80 px-3 py-1 text-[10px] font-bold text-slate-200 backdrop-blur-xs">
                         <span className="h-1.5 w-1.5 rounded-full bg-red-500 animate-ping" />
                         <span>Scans Only Inside Guide Frame</span>
                       </span>
-                      {(isEnhancingDamagedLabel || cameraZoomLevel > 1.05) && (
-                        <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/90 px-2.5 py-0.5 text-[10px] font-black text-slate-950 shadow-sm">
-                          <Zap className="h-3 w-3 fill-slate-950" />
-                          <span>
-                            {isEnhancingDamagedLabel
-                              ? `Wrinkled Label Boost ${cameraZoomLevel.toFixed(1)}x`
-                              : `Zoom ${cameraZoomLevel.toFixed(1)}x`}
-                          </span>
-                        </span>
-                      )}
                     </div>
 
                     {/* Horizontal RED Laser Scan Line */}
