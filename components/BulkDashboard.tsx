@@ -687,8 +687,8 @@ export function BulkDashboard({
   const customerQrScanStepRef = useRef(customerQrScanStep);
   const [recentStagedCode, setRecentStagedCode] = useState<string | null>(null);
   const [isCameraActive, setIsCameraActive] = useState(false);
-  const [cameraGuideMode, setCameraGuideMode] = useState<"barcode" | "qr">("barcode");
-  const cameraGuideModeRef = useRef<"barcode" | "qr">("barcode");
+  const [cameraGuideMode, setCameraGuideMode] = useState<"barcode" | "qr" | "both">("both");
+  const cameraGuideModeRef = useRef<"barcode" | "qr" | "both">("both");
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [cameraScanSuccess, setCameraScanSuccess] = useState<{ code: string; carrier: string } | null>(null);
   const [isEnhancingDamagedLabel, setIsEnhancingDamagedLabel] = useState<boolean>(false);
@@ -1791,8 +1791,6 @@ export function BulkDashboard({
           };
           customerQrScanStepRef.current = resetStep;
           setCustomerQrScanStep(resetStep);
-          cameraGuideModeRef.current = "barcode";
-          setCameraGuideMode("barcode");
           handleStageConsignmentRef.current(
             pendingAwb,
             pendingCourier || undefined,
@@ -1823,8 +1821,8 @@ export function BulkDashboard({
         return false;
       }
 
-      // - Step 1 / Tracking Code scan: 1D Barcode scanner ONLY! Never accept 2D QR codes as tracking numbers.
-      if (is2DQr) {
+      // - Step 1 of 2-Step Scan: 1D Barcode scanner ONLY! Never accept 2D QR codes as tracking numbers when 2-Step Scan is ON.
+      if (isTwoStepOn && is2DQr) {
         return false;
       }
 
@@ -1864,7 +1862,7 @@ export function BulkDashboard({
       const cleanAwb = identification.normalized || code;
       const detectedCarrier = identification.courier || autoDetectCourier(cleanAwb);
 
-      // If 2-Step "Scan Customer Data QR" is ON:
+      // If 2-Step Scan is ON:
       // 1st scan locks in the Tracking Number (AWB) and automatically switches scanner ready for Step 2 (Customer Data QR ONLY)
       if (isScanCustomerQrEnabledRef.current) {
         setIntakeError("");
@@ -1882,8 +1880,6 @@ export function BulkDashboard({
         };
         customerQrScanStepRef.current = nextStep;
         setCustomerQrScanStep(nextStep);
-        cameraGuideModeRef.current = "qr";
-        setCameraGuideMode("qr");
         playChime(true);
         setCameraScanSuccess({
           code: `Step 1 OK: ${cleanAwb}`,
@@ -1923,7 +1919,7 @@ export function BulkDashboard({
     const tryDecodeROI = async (
       canvas: HTMLCanvasElement,
       ctx: CanvasRenderingContext2D,
-      activeMode: "barcode" | "qr",
+      activeMode: "barcode" | "qr" | "both",
       invertQr: boolean
     ): Promise<boolean> => {
       const w = canvas.width;
@@ -1956,7 +1952,7 @@ export function BulkDashboard({
                   fmt === "aztec" ||
                   item.rawValue.trim().toUpperCase().startsWith("TFQR1:");
                 if (activeMode === "barcode" && is2D) continue;
-                if (activeMode === "qr" && !is2D) continue;
+                if (activeMode === "qr" && !is2D && fmt !== "") continue;
                 if (handleDetectedValue(item.rawValue, is2D)) return true;
               }
             }
@@ -1964,11 +1960,18 @@ export function BulkDashboard({
         } catch {}
       }
 
-      // 2. Tracking Code Mode ("barcode"): Run 1D Barcode reader ONLY
-      if (activeMode === "barcode") {
+      let luminanceSource: HTMLCanvasElementLuminanceSource | null = null;
+      const getLuminance = () => {
+        if (!luminanceSource) {
+          luminanceSource = new HTMLCanvasElementLuminanceSource(canvas);
+        }
+        return luminanceSource;
+      };
+
+      // 2. When 1D Barcode scanning is active ("barcode" or "both"), run zxingBarcodeReader
+      if (activeMode !== "qr") {
         try {
-          const luminanceSource = new HTMLCanvasElementLuminanceSource(canvas);
-          const binaryBitmap = new BinaryBitmap(new HybridBinarizer(luminanceSource));
+          const binaryBitmap = new BinaryBitmap(new HybridBinarizer(getLuminance()));
           const result = zxingBarcodeReader.decodeWithState(binaryBitmap);
           if (result && result.getText()) {
             if (handleDetectedValue(result.getText(), false)) return true;
@@ -1980,33 +1983,33 @@ export function BulkDashboard({
             zxingBarcodeReader.reset();
           } catch {}
         }
-        return false;
       }
 
-      // 3. Customer Data Mode ("qr"): Run 2D QR readers ONLY (jsQR + zxingQrReader)
-      try {
-        const imageData = ctx.getImageData(0, 0, w, h);
-        const qrResult = jsQR(imageData.data, w, h, {
-          inversionAttempts: invertQr ? "attemptBoth" : "dontInvert",
-        });
-        if (qrResult && qrResult.data) {
-          if (handleDetectedValue(qrResult.data, true)) return true;
-        }
-      } catch {}
-
-      try {
-        const luminanceSource = new HTMLCanvasElementLuminanceSource(canvas);
-        const binaryBitmap = new BinaryBitmap(new HybridBinarizer(luminanceSource));
-        const result = zxingQrReader.decodeWithState(binaryBitmap);
-        if (result && result.getText()) {
-          if (handleDetectedValue(result.getText(), true)) return true;
-        }
-      } catch {
-        // normal when no 2D code in frame
-      } finally {
+      // 3. When 2D QR scanning is active ("qr" or "both"), run jsQR + zxingQrReader
+      if (activeMode !== "barcode") {
         try {
-          zxingQrReader.reset();
+          const imageData = ctx.getImageData(0, 0, w, h);
+          const qrResult = jsQR(imageData.data, w, h, {
+            inversionAttempts: invertQr ? "attemptBoth" : "dontInvert",
+          });
+          if (qrResult && qrResult.data) {
+            if (handleDetectedValue(qrResult.data, true)) return true;
+          }
         } catch {}
+
+        try {
+          const binaryBitmap = new BinaryBitmap(new HybridBinarizer(getLuminance()));
+          const result = zxingQrReader.decodeWithState(binaryBitmap);
+          if (result && result.getText()) {
+            if (handleDetectedValue(result.getText(), true)) return true;
+          }
+        } catch {
+          // normal when no 2D code in frame
+        } finally {
+          try {
+            zxingQrReader.reset();
+          } catch {}
+        }
       }
 
       return false;
@@ -2042,11 +2045,12 @@ export function BulkDashboard({
         const vh = video.videoHeight;
         const minSide = Math.min(vw, vh);
 
+        const isTwoStepOn = isScanCustomerQrEnabledRef.current;
         const isAwaitingCustomerQr =
-          isScanCustomerQrEnabledRef.current &&
+          isTwoStepOn &&
           customerQrScanStepRef.current.step === "awaiting_customer_qr";
 
-        // STEP 2 (Awaiting Customer QR ONLY): Fast dedicated QR-only pass
+        // STEP 2 of 2-Step Scan (Awaiting Customer QR ONLY): Fast dedicated QR-only pass
         if (isAwaitingCustomerQr) {
           const qrSide = Math.max(96, Math.floor(minSide * 0.56));
           const qrX = Math.max(0, Math.floor((vw - qrSide) / 2));
@@ -2074,9 +2078,21 @@ export function BulkDashboard({
           return;
         }
 
-        // STEP 1 (Awaiting Tracking Code ONLY): Dedicated 1D Barcode-only pass
-        const roiWidthRatio = 0.8;
-        const roiHeightRatio = 0.3;
+        // When 2-Step Scan is ON (Step 1), force "barcode" only. When OFF, use selected cameraGuideMode ("barcode" | "qr" | "both").
+        const effectiveMode: "barcode" | "qr" | "both" = isTwoStepOn
+          ? "barcode"
+          : cameraGuideModeRef.current;
+
+        let roiWidthRatio = 0.78;
+        let roiHeightRatio = 0.46;
+        if (effectiveMode === "barcode") {
+          roiWidthRatio = 0.8;
+          roiHeightRatio = 0.3;
+        } else if (effectiveMode === "qr") {
+          const sq = minSide * 0.56;
+          roiWidthRatio = sq / vw;
+          roiHeightRatio = sq / vh;
+        }
 
         const cropW = Math.max(64, Math.floor(vw * roiWidthRatio));
         const cropH = Math.max(64, Math.floor(vh * roiHeightRatio));
@@ -2095,7 +2111,7 @@ export function BulkDashboard({
         if (!ctx) return;
 
         ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, w, h);
-        await tryDecodeROI(canvas, ctx, "barcode", false);
+        await tryDecodeROI(canvas, ctx, effectiveMode, false);
       } catch {
         // ignore frame error
       } finally {
@@ -5508,10 +5524,10 @@ export function BulkDashboard({
                   <div className="flex items-center justify-between rounded-2xl border border-slate-200 p-3.5 dark:border-slate-800">
                     <div>
                       <span className="text-xs font-bold text-slate-800 dark:text-slate-200 block">
-                        Scan Customer Data QR
+                        2-Step Scan
                       </span>
                       <span className="text-[11px] text-slate-500 dark:text-slate-400">
-                        1st scan AWB → 2nd scan Mini QR → auto next AWB
+                        Step 1 Barcode (AWB) → Step 2 Customer QR
                       </span>
                     </div>
                     <button
@@ -7168,34 +7184,52 @@ export function BulkDashboard({
                   </button>
                 </div>
 
-                {/* Camera Mode Switcher, Auto-Zoom/Focus Controls & Auto-Next Bar */}
-                <div className="flex flex-wrap items-center justify-between gap-2 px-4 sm:px-6 py-3 bg-slate-900/90 border-b border-slate-800 shrink-0">
+                {/* Unified Camera Controls Bar (No ON/OFF text inside buttons, no repeating toggles) */}
+                <div className="flex flex-wrap items-center justify-between gap-2.5 px-4 sm:px-6 py-3 bg-slate-900/90 border-b border-slate-800 shrink-0">
                   <div className="flex flex-wrap items-center gap-2">
-                    <div
-                      className={`inline-flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-bold border ${
-                        isScanCustomerQrEnabled && customerQrScanStep.step === "awaiting_customer_qr"
-                          ? "bg-indigo-600/20 border-indigo-500/50 text-indigo-300"
-                          : "bg-emerald-500/15 border-emerald-500/40 text-emerald-300"
-                      }`}
-                    >
-                      {isScanCustomerQrEnabled && customerQrScanStep.step === "awaiting_customer_qr" ? (
-                        <>
-                          <QrCode className="h-3.5 w-3.5" />
-                          <span>QR Only (Customer Data)</span>
-                        </>
-                      ) : (
-                        <>
-                          <ScanLine className="h-3.5 w-3.5" />
-                          <span>Barcode Only (Tracking Code)</span>
-                        </>
-                      )}
-                    </div>
+                    {!isScanCustomerQrEnabled ? (
+                      <div className="inline-flex items-center gap-1 rounded-xl bg-slate-950 p-1 border border-slate-800 text-xs font-bold">
+                        {(["barcode", "qr", "both"] as const).map((m) => (
+                          <button
+                            key={m}
+                            type="button"
+                            onClick={() => setCameraGuideMode(m)}
+                            className={`px-3 py-1 rounded-lg capitalize transition-all cursor-pointer ${
+                              cameraGuideMode === m
+                                ? "bg-indigo-600 text-white shadow-xs"
+                                : "text-slate-400 hover:text-slate-200"
+                            }`}
+                          >
+                            {m === "qr" ? "QR" : m}
+                          </button>
+                        ))}
+                      </div>
+                    ) : (
+                      <div
+                        className={`inline-flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-bold border ${
+                          customerQrScanStep.step === "awaiting_customer_qr"
+                            ? "bg-indigo-600/20 border-indigo-500/50 text-indigo-300"
+                            : "bg-emerald-500/15 border-emerald-500/40 text-emerald-300"
+                        }`}
+                      >
+                        {customerQrScanStep.step === "awaiting_customer_qr" ? (
+                          <>
+                            <QrCode className="h-3.5 w-3.5" />
+                            <span>Step 2: Customer QR</span>
+                          </>
+                        ) : (
+                          <>
+                            <ScanLine className="h-3.5 w-3.5" />
+                            <span>Step 1: Barcode</span>
+                          </>
+                        )}
+                      </div>
+                    )}
                   </div>
 
-                  <div className="flex flex-wrap items-center gap-2.5">
-                    {/* Scan Customer Data QR ON/OFF Toggle */}
-                    <button
-                      type="button"
+                  <div className="flex flex-wrap items-center gap-4">
+                    {/* 2-Step Scan Sliding Toggle Switch */}
+                    <label
                       onClick={() => {
                         setIsScanCustomerQrEnabled((prev) => {
                           const next = !prev;
@@ -7207,34 +7241,72 @@ export function BulkDashboard({
                           };
                           customerQrScanStepRef.current = resetStep;
                           setCustomerQrScanStep(resetStep);
-                          cameraGuideModeRef.current = "barcode";
-                          setCameraGuideMode("barcode");
                           return next;
                         });
                       }}
-                      className={`inline-flex items-center gap-1.5 rounded-xl border px-2.5 py-1 text-[11px] font-extrabold transition-colors cursor-pointer ${
-                        isScanCustomerQrEnabled
-                          ? "border-indigo-500/60 bg-indigo-500/15 text-indigo-300"
-                          : "border-slate-800 bg-slate-950 text-slate-300 hover:border-slate-700"
-                      }`}
-                      title="Toggle 2-step scan: 1st scan tracking number -> 2nd scan encrypted customer Mini QR -> auto next AWB"
+                      className="inline-flex items-center gap-2 text-xs font-bold text-slate-200 cursor-pointer select-none"
+                      title="Toggle 2-Step Scan (Step 1 Barcode Tracking -> Step 2 Customer QR)"
                     >
-                      <QrCode className="h-3.5 w-3.5" />
-                      <span>Scan Customer Data:</span>
-                      <span
-                        className={`rounded px-1.5 py-0.5 text-[10px] font-black uppercase ${
-                          isScanCustomerQrEnabled
-                            ? "bg-indigo-500 text-white"
-                            : "bg-slate-800 text-slate-400"
+                      <span>2-Step Scan</span>
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={isScanCustomerQrEnabled}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setIsScanCustomerQrEnabled((prev) => {
+                            const next = !prev;
+                            const resetStep = {
+                              step: "awaiting_awb" as const,
+                              pendingAwb: "",
+                              pendingCourierId: "",
+                              pendingCourierName: "",
+                            };
+                            customerQrScanStepRef.current = resetStep;
+                            setCustomerQrScanStep(resetStep);
+                            return next;
+                          });
+                        }}
+                        className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out ${
+                          isScanCustomerQrEnabled ? "bg-indigo-500" : "bg-slate-700"
                         }`}
                       >
-                        {isScanCustomerQrEnabled ? "ON" : "OFF"}
-                      </span>
-                    </button>
+                        <span
+                          className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-xs transition duration-200 ease-in-out ${
+                            isScanCustomerQrEnabled ? "translate-x-4" : "translate-x-0"
+                          }`}
+                        />
+                      </button>
+                    </label>
 
-                    {/* Fallback 'No Rule' ON/OFF Toggle Button */}
-                    <button
-                      type="button"
+                    {/* Auto-Next Sliding Toggle Switch */}
+                    <label
+                      onClick={() => setIsAutoNextEnabled((prev) => !prev)}
+                      className="inline-flex items-center gap-2 text-xs font-bold text-slate-200 cursor-pointer select-none"
+                    >
+                      <span>Auto-Next</span>
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={isAutoNextEnabled}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setIsAutoNextEnabled((prev) => !prev);
+                        }}
+                        className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out ${
+                          isAutoNextEnabled ? "bg-emerald-600" : "bg-slate-700"
+                        }`}
+                      >
+                        <span
+                          className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-xs transition duration-200 ease-in-out ${
+                            isAutoNextEnabled ? "translate-x-4" : "translate-x-0"
+                          }`}
+                        />
+                      </button>
+                    </label>
+
+                    {/* No Rule Sliding Toggle Switch */}
+                    <label
                       onClick={() => {
                         setIsPasteAnywayEnabled((prev) => {
                           const next = !prev;
@@ -7245,107 +7317,74 @@ export function BulkDashboard({
                           return next;
                         });
                       }}
-                      className={`inline-flex items-center gap-1.5 rounded-xl border px-2.5 py-1 text-[11px] font-extrabold transition-colors cursor-pointer ${
-                        isPasteAnywayEnabled
-                          ? "border-amber-500/60 bg-amber-500/15 text-amber-300"
-                          : "border-slate-800 bg-slate-950 text-slate-300 hover:border-slate-700"
-                      }`}
+                      className="inline-flex items-center gap-2 text-xs font-bold text-slate-200 cursor-pointer select-none"
                     >
-                      <span>No Rule:</span>
-                      <span
-                        className={`rounded px-1.5 py-0.5 text-[10px] font-black uppercase ${
-                          isPasteAnywayEnabled
-                            ? "bg-amber-500 text-slate-950"
-                            : "bg-slate-800 text-slate-400"
+                      <span>No Rule</span>
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={isPasteAnywayEnabled}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setIsPasteAnywayEnabled((prev) => {
+                            const next = !prev;
+                            if (next) {
+                              setIntakeError("");
+                              setFlaggedInvalidCode(null);
+                            }
+                            return next;
+                          });
+                        }}
+                        className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out ${
+                          isPasteAnywayEnabled ? "bg-amber-500" : "bg-slate-700"
                         }`}
                       >
-                        {isPasteAnywayEnabled ? "ON" : "OFF"}
-                      </span>
-                    </button>
-
-                    <span className="text-xs font-bold text-slate-300">
-                      Auto-Next:{" "}
-                      <span className={isAutoNextEnabled ? "text-emerald-400" : "text-amber-400"}>
-                        {isAutoNextEnabled ? "ON" : "OFF"}
-                      </span>
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => setIsAutoNextEnabled((prev) => !prev)}
-                      className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                        isAutoNextEnabled ? "bg-emerald-600" : "bg-slate-700"
-                      }`}
-                    >
-                      <span
-                        className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm ring-0 transition duration-200 ease-in-out ${
-                          isAutoNextEnabled ? "translate-x-5" : "translate-x-0"
-                        }`}
-                      />
-                    </button>
+                        <span
+                          className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-xs transition duration-200 ease-in-out ${
+                            isPasteAnywayEnabled ? "translate-x-4" : "translate-x-0"
+                          }`}
+                        />
+                      </button>
+                    </label>
                   </div>
                 </div>
 
                 {/* Main Dedicated Camera Viewport */}
                 <div className="flex-1 flex flex-col p-4 sm:p-6 gap-3 overflow-y-auto">
-                  {/* 2-Step Customer QR Scan Step Indicator Banner in Camera View */}
-                  {isScanCustomerQrEnabled && (
-                    <div
-                      className={`rounded-xl border px-3.5 py-2.5 text-xs flex flex-wrap items-center justify-between gap-2 ${
-                        customerQrScanStep.step === "awaiting_customer_qr"
-                          ? "border-indigo-500 bg-indigo-950/80 text-indigo-200"
-                          : "border-slate-800 bg-slate-900/90 text-slate-300"
-                      }`}
-                    >
-                      <div className="flex items-center gap-2">
-                        <span
-                          className={`rounded-md px-2 py-0.5 font-mono text-[10px] font-black uppercase ${
-                            customerQrScanStep.step === "awaiting_customer_qr"
-                              ? "bg-indigo-500 text-white animate-pulse"
-                              : "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40"
-                          }`}
-                        >
-                          {customerQrScanStep.step === "awaiting_customer_qr"
-                            ? "Step 2 / 2 • Scan Customer Mini QR"
-                            : "Step 1 / 2 • Scan Tracking Number"}
-                        </span>
-                        <span className="font-semibold">
-                          {customerQrScanStep.step === "awaiting_customer_qr"
-                            ? `AWB ${customerQrScanStep.pendingAwb} locked (${customerQrScanStep.pendingCourierName}). Now scan Encrypted Customer Mini QR on label!`
-                            : "1st scan Tracking Number (AWB), then scanner auto-switches to scan Customer Data Mini QR."}
-                        </span>
-                      </div>
-                      {customerQrScanStep.step === "awaiting_customer_qr" && (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const pending = customerQrScanStep.pendingAwb;
-                            const courier = customerQrScanStep.pendingCourierId;
-                            const resetStep = {
-                              step: "awaiting_awb" as const,
-                              pendingAwb: "",
-                              pendingCourierId: "",
-                              pendingCourierName: "",
-                            };
-                            customerQrScanStepRef.current = resetStep;
-                            setCustomerQrScanStep(resetStep);
-                            cameraGuideModeRef.current = "barcode";
-                            setCameraGuideMode("barcode");
-                            handleStageConsignment(
-                              pending,
-                              courier || undefined,
-                              undefined,
-                              undefined,
-                              undefined,
-                              undefined,
-                              "camera",
-                              true
-                            );
-                          }}
-                          className="rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-600 px-2.5 py-1 text-[11px] font-bold text-white cursor-pointer shrink-0"
-                        >
-                          Skip Customer QR &amp; Stage AWB →
-                        </button>
-                      )}
+                  {/* Only show Step 2 Skip Bar when waiting for Customer QR (Step 1 alert removed) */}
+                  {isScanCustomerQrEnabled && customerQrScanStep.step === "awaiting_customer_qr" && (
+                    <div className="rounded-xl border border-indigo-500 bg-indigo-950/80 px-3.5 py-2 text-xs text-indigo-200 flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-semibold">
+                        AWB <span className="font-mono font-black text-white">{customerQrScanStep.pendingAwb}</span> locked • Now scan Customer QR
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const pending = customerQrScanStep.pendingAwb;
+                          const courier = customerQrScanStep.pendingCourierId;
+                          const resetStep = {
+                            step: "awaiting_awb" as const,
+                            pendingAwb: "",
+                            pendingCourierId: "",
+                            pendingCourierName: "",
+                          };
+                          customerQrScanStepRef.current = resetStep;
+                          setCustomerQrScanStep(resetStep);
+                          handleStageConsignment(
+                            pending,
+                            courier || undefined,
+                            undefined,
+                            undefined,
+                            undefined,
+                            undefined,
+                            "camera",
+                            true
+                          );
+                        }}
+                        className="rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-600 px-2.5 py-1 text-[11px] font-bold text-white cursor-pointer shrink-0"
+                      >
+                        Skip QR →
+                      </button>
                     </div>
                   )}
 
@@ -7413,8 +7452,9 @@ export function BulkDashboard({
                       <div className="absolute left-8 right-8 h-0.5 bg-red-500 shadow-[0_0_14px_#ef4444] animate-pulse z-10 pointer-events-none" />
                     )}
 
-                    {/* Step-Isolated Single Guide Frame: Barcode Guide ONLY for Tracking Code, QR Guide ONLY for Customer Data */}
-                    {!(isScanCustomerQrEnabled && customerQrScanStep.step === "awaiting_customer_qr") ? (
+                    {/* Guide Frame: When 2-Step Scan is ON -> Barcode only (Step 1) or QR only (Step 2). When OFF -> Barcode, QR, or Both */}
+                    {((isScanCustomerQrEnabled && customerQrScanStep.step !== "awaiting_customer_qr") ||
+                      (!isScanCustomerQrEnabled && cameraGuideMode === "barcode")) && (
                       <div
                         className={`relative z-10 w-4/5 max-w-sm h-28 rounded-xl border-2 pointer-events-none shadow-[0_0_0_9999px_rgba(2,6,23,0.52)] transition-colors ${
                           cameraScanSuccess
@@ -7424,7 +7464,10 @@ export function BulkDashboard({
                             : "border-white/80"
                         }`}
                       />
-                    ) : (
+                    )}
+
+                    {((isScanCustomerQrEnabled && customerQrScanStep.step === "awaiting_customer_qr") ||
+                      (!isScanCustomerQrEnabled && cameraGuideMode === "qr")) && (
                       <div
                         className={`relative z-10 w-48 h-48 sm:w-52 sm:h-52 rounded-2xl border-2 pointer-events-none shadow-[0_0_0_9999px_rgba(2,6,23,0.52)] transition-colors ${
                           cameraScanSuccess
@@ -7434,6 +7477,20 @@ export function BulkDashboard({
                             : "border-white/80"
                         }`}
                       />
+                    )}
+
+                    {!isScanCustomerQrEnabled && cameraGuideMode === "both" && (
+                      <div
+                        className={`relative z-10 w-4/5 max-w-md h-44 rounded-2xl border-2 pointer-events-none shadow-[0_0_0_9999px_rgba(2,6,23,0.52)] flex items-center justify-center transition-colors ${
+                          cameraScanSuccess
+                            ? "border-emerald-400 bg-emerald-500/15"
+                            : isEnhancingDamagedLabel
+                            ? "border-amber-400"
+                            : "border-white/75"
+                        }`}
+                      >
+                        <div className="w-32 h-32 rounded-xl border border-white/50" />
+                      </div>
                     )}
 
                     {/* Quick Success Mark Overlay when Barcode or QR is Read & Added */}
@@ -7530,34 +7587,29 @@ export function BulkDashboard({
 
                 {/* Modal Body (Scrollable) */}
                 <div className="overflow-y-auto p-4 sm:p-6 space-y-4 sm:space-y-5 flex-1">
-                  {/* Intake Toolbar: Scan Customer Data QR Toggle, Auto-Next Toggle & No Rule Toggle */}
-                  <div className="flex flex-wrap items-center justify-between gap-2.5 rounded-2xl bg-slate-50 dark:bg-slate-800/60 p-3 sm:p-3.5 border border-slate-200 dark:border-slate-700">
-                    {/* Scan Customer Data QR Switch */}
-                    <div className="flex items-center gap-2.5">
+                  {/* Intake Toolbar: 2-Step Scan, Auto-Next & No Rule Sliding Toggles (No ON/OFF text inside buttons) */}
+                  <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-slate-50 dark:bg-slate-800/60 p-3 sm:p-3.5 border border-slate-200 dark:border-slate-700">
+                    {/* 2-Step Scan Switch (renamed from Scan Customer Data) */}
+                    <label
+                      onClick={() => setIsScanCustomerQrEnabled((prev) => !prev)}
+                      className="flex items-center gap-2.5 cursor-pointer select-none"
+                      title="Toggle 2-Step Scan (Step 1 Tracking Barcode -> Step 2 Customer QR)"
+                    >
                       <QrCode className="h-4 w-4 text-indigo-600 dark:text-indigo-400 shrink-0" />
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-xs font-bold text-slate-900 dark:text-white">
-                          Scan Customer Data:
-                        </span>
-                        <span
-                          className={`rounded-md px-1.5 py-0.5 text-[10px] font-black uppercase tracking-wider ${
-                            isScanCustomerQrEnabled
-                              ? "bg-indigo-100 text-indigo-800 dark:bg-indigo-950 dark:text-indigo-300"
-                              : "bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-300"
-                          }`}
-                        >
-                          {isScanCustomerQrEnabled ? "ON" : "OFF"}
-                        </span>
-                      </div>
+                      <span className="text-xs font-bold text-slate-900 dark:text-white">
+                        2-Step Scan
+                      </span>
                       <button
                         type="button"
                         role="switch"
                         aria-checked={isScanCustomerQrEnabled}
-                        onClick={() => setIsScanCustomerQrEnabled((prev) => !prev)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setIsScanCustomerQrEnabled((prev) => !prev);
+                        }}
                         className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
                           isScanCustomerQrEnabled ? "bg-indigo-600" : "bg-slate-300 dark:bg-slate-600"
                         }`}
-                        title="1st scan tracking number -> 2nd scan encrypted customer Mini QR -> auto next tracking number"
                       >
                         <span
                           className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm ring-0 transition duration-200 ease-in-out ${
@@ -7565,21 +7617,28 @@ export function BulkDashboard({
                           }`}
                         />
                       </button>
-                    </div>
+                    </label>
 
                     <div className="flex flex-wrap items-center gap-4">
                       {/* Auto-Next Switch */}
-                      <div className="flex items-center gap-2">
+                      <label
+                        onClick={() => setIsAutoNextEnabled((prev) => !prev)}
+                        className="flex items-center gap-2 cursor-pointer select-none"
+                      >
                         <span className="text-xs font-bold text-slate-900 dark:text-white">
-                          Auto-Next:
+                          Auto-Next
                         </span>
                         <button
                           type="button"
-                          onClick={() => setIsAutoNextEnabled((prev) => !prev)}
+                          role="switch"
+                          aria-checked={isAutoNextEnabled}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setIsAutoNextEnabled((prev) => !prev);
+                          }}
                           className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
                             isAutoNextEnabled ? "bg-emerald-600" : "bg-slate-300 dark:bg-slate-600"
                           }`}
-                          title={`Click to switch Auto-Next ${isAutoNextEnabled ? "OFF" : "ON"}`}
                         >
                           <span
                             className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm ring-0 transition duration-200 ease-in-out ${
@@ -7587,18 +7646,32 @@ export function BulkDashboard({
                             }`}
                           />
                         </button>
-                      </div>
+                      </label>
 
                       {/* Fallback 'No Rule' Sliding Toggle Switch */}
-                      <div className="flex items-center gap-2">
+                      <label
+                        onClick={() => {
+                          setIsPasteAnywayEnabled((prev) => {
+                            const next = !prev;
+                            if (next) {
+                              setIntakeError("");
+                              setFlaggedInvalidCode(null);
+                            }
+                            return next;
+                          });
+                        }}
+                        className="flex items-center gap-2 cursor-pointer select-none"
+                        title="Allow unrecognized consignment formats"
+                      >
                         <span className="text-xs font-bold text-slate-900 dark:text-white">
-                          No Rule:
+                          No Rule
                         </span>
                         <button
                           type="button"
                           role="switch"
                           aria-checked={isPasteAnywayEnabled}
-                          onClick={() => {
+                          onClick={(e) => {
+                            e.stopPropagation();
                             setIsPasteAnywayEnabled((prev) => {
                               const next = !prev;
                               if (next) {
@@ -7611,7 +7684,6 @@ export function BulkDashboard({
                           className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
                             isPasteAnywayEnabled ? "bg-amber-500" : "bg-slate-300 dark:bg-slate-600"
                           }`}
-                          title="Toggle No Rule mode for unrecognized consignment formats"
                         >
                           <span
                             className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm ring-0 transition duration-200 ease-in-out ${
@@ -7619,56 +7691,33 @@ export function BulkDashboard({
                             }`}
                           />
                         </button>
-                      </div>
+                      </label>
                     </div>
                   </div>
 
-                  {/* 2-Step Automated Customer QR Scan Status Banner */}
-                  {isScanCustomerQrEnabled && (
-                    <div
-                      className={`rounded-2xl border px-4 py-2.5 text-xs flex flex-wrap items-center justify-between gap-2 ${
-                        customerQrScanStep.step === "awaiting_customer_qr"
-                          ? "border-indigo-500 bg-indigo-50/90 text-indigo-950 dark:border-indigo-500 dark:bg-indigo-950/60 dark:text-indigo-200"
-                          : "border-slate-200 bg-white text-slate-600 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300"
-                      }`}
-                    >
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span
-                          className={`rounded-md px-2 py-0.5 font-mono text-[10px] font-black uppercase ${
-                            customerQrScanStep.step === "awaiting_customer_qr"
-                              ? "bg-indigo-600 text-white animate-pulse"
-                              : "bg-indigo-100 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300"
-                          }`}
-                        >
-                          {customerQrScanStep.step === "awaiting_customer_qr"
-                            ? "Step 2 / 2 • Ready for Customer Mini QR"
-                            : "Step 1 / 2 • Scan Tracking Number First"}
-                        </span>
-                        <span className="font-semibold">
-                          {customerQrScanStep.step === "awaiting_customer_qr"
-                            ? `AWB #${customerQrScanStep.pendingAwb} (${customerQrScanStep.pendingCourierName}) locked! Scan or paste Encrypted Customer Mini QR to auto-fill & advance.`
-                            : "1st scan Tracking Number → auto-ready for Customer Data Mini QR → auto-next to next Customer Tracking Number."}
-                        </span>
-                      </div>
-                      {customerQrScanStep.step === "awaiting_customer_qr" && (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const pending = customerQrScanStep.pendingAwb;
-                            const courier = customerQrScanStep.pendingCourierId;
-                            setCustomerQrScanStep({
-                              step: "awaiting_awb",
-                              pendingAwb: "",
-                              pendingCourierId: "",
-                              pendingCourierName: "",
-                            });
-                            handleStageConsignment(pending, courier || undefined);
-                          }}
-                          className="rounded-lg bg-indigo-600 hover:bg-indigo-700 px-2.5 py-1 text-[11px] font-bold text-white cursor-pointer shrink-0"
-                        >
-                          Stage Without Customer QR →
-                        </button>
-                      )}
+                  {/* Only show Step 2 Skip Bar when waiting for Customer QR (Step 1 alert removed) */}
+                  {isScanCustomerQrEnabled && customerQrScanStep.step === "awaiting_customer_qr" && (
+                    <div className="rounded-2xl border border-indigo-500 bg-indigo-50/90 text-indigo-950 dark:border-indigo-500 dark:bg-indigo-950/60 dark:text-indigo-200 px-4 py-2.5 text-xs flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-semibold">
+                        AWB <span className="font-mono font-black">#{customerQrScanStep.pendingAwb}</span> ({customerQrScanStep.pendingCourierName}) locked • Scan Customer Mini QR
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const pending = customerQrScanStep.pendingAwb;
+                          const courier = customerQrScanStep.pendingCourierId;
+                          setCustomerQrScanStep({
+                            step: "awaiting_awb",
+                            pendingAwb: "",
+                            pendingCourierId: "",
+                            pendingCourierName: "",
+                          });
+                          handleStageConsignment(pending, courier || undefined);
+                        }}
+                        className="rounded-lg bg-indigo-600 hover:bg-indigo-700 px-2.5 py-1 text-[11px] font-bold text-white cursor-pointer shrink-0"
+                      >
+                        Stage Without Customer QR →
+                      </button>
                     </div>
                   )}
 

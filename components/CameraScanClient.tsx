@@ -102,8 +102,8 @@ const emptyScanSubscribe = () => () => {};
 function CameraScanInner() {
   const router = useRouter();
 
-  // Camera & Decoder state: Tracking Code = "barcode" only, Customer Data = "qr" only (no "both" mode)
-  const [cameraGuideMode, setCameraGuideMode] = useState<"barcode" | "qr">("barcode");
+  // Camera & Decoder state
+  const [cameraGuideMode, setCameraGuideMode] = useState<"barcode" | "qr" | "both">("both");
   const [isAutoNextEnabled, setIsAutoNextEnabled] = useState<boolean>(true);
   const [isPasteAnywayEnabled, setIsPasteAnywayEnabled] = useState<boolean>(false);
   const [isScanCustomerQrEnabled, setIsScanCustomerQrEnabled] = useState<boolean>(true);
@@ -170,7 +170,7 @@ function CameraScanInner() {
   const audioCtxRef = useRef<AudioContext | null>(null);
 
   // Refs synced with UI state so the camera loop never restarts when buttons are clicked
-  const guideModeRef = useRef<"barcode" | "qr">(cameraGuideMode);
+  const guideModeRef = useRef<"barcode" | "qr" | "both">(cameraGuideMode);
   const defaultStatusRef = useRef<StatusOption>(defaultStatus);
   const isSoundEnabledRef = useRef<boolean>(isSoundEnabled);
   const isPasteAnywayEnabledRef = useRef<boolean>(isPasteAnywayEnabled);
@@ -249,8 +249,6 @@ function CameraScanInner() {
       };
       customerQrScanStepRef.current = resetState;
       setCustomerQrScanStep(resetState);
-      guideModeRef.current = "barcode";
-      setCameraGuideMode("barcode");
       return next;
     });
   }, []);
@@ -564,9 +562,6 @@ function CameraScanInner() {
         };
         customerQrScanStepRef.current = nextStepState;
         setCustomerQrScanStep(nextStepState);
-        // Step 2 scans Customer Data QR ONLY -> switch guide strictly to QR box
-        guideModeRef.current = "qr";
-        setCameraGuideMode("qr");
         // Short 320ms cooldown after Step 1 so the user can immediately scan the Customer Mini QR right next to the barcode
         scanCooldownUntilRef.current = Date.now() + 320;
         playScanBeep(true);
@@ -624,9 +619,6 @@ function CameraScanInner() {
       };
       customerQrScanStepRef.current = resetStepState;
       setCustomerQrScanStep(resetStepState);
-      // Step 1 scans Tracking Code Barcode ONLY -> switch guide strictly back to Barcode box
-      guideModeRef.current = "barcode";
-      setCameraGuideMode("barcode");
       lastScannedRef.current = { code: cleanNum, timestamp: Date.now() };
       scanCooldownUntilRef.current = Date.now() + (isAutoNextEnabledRef.current ? 750 : 1400);
 
@@ -785,8 +777,8 @@ function CameraScanInner() {
         return false;
       }
 
-      // - Step 1 / Tracking Code scan: Barcode scanner ONLY! Never accept 2D QR codes as tracking numbers.
-      if (is2DQr) {
+      // - Step 1 of 2-Step Scan: Barcode scanner ONLY! Never accept 2D QR codes as tracking numbers when 2-Step Scan is ON.
+      if (isTwoStepOn && is2DQr) {
         return false;
       }
 
@@ -799,15 +791,17 @@ function CameraScanInner() {
       }
 
       // Reject 1D motion-blur / edge misreads containing non-alphanumeric symbol noise (e.g. "E%8,W%-]/IN" from Code39/Code93)
-      const compactCheck = candidate.replace(/\s+/g, "");
-      if (
-        /[^A-Z0-9-]/i.test(compactCheck) ||
-        compactCheck.startsWith("-") ||
-        compactCheck.endsWith("-") ||
-        compactCheck.includes("--") ||
-        compactCheck.length < 6
-      ) {
-        return false;
+      if (!is2DQr) {
+        const compactCheck = candidate.replace(/\s+/g, "");
+        if (
+          /[^A-Z0-9-]/i.test(compactCheck) ||
+          compactCheck.startsWith("-") ||
+          compactCheck.endsWith("-") ||
+          compactCheck.includes("--") ||
+          compactCheck.length < 6
+        ) {
+          return false;
+        }
       }
 
       // Ignore same barcode within 2.5 seconds of last scan
@@ -879,7 +873,7 @@ function CameraScanInner() {
     const tryDecodeCanvas = async (
       canvas: HTMLCanvasElement,
       ctx: CanvasRenderingContext2D,
-      effectiveMode: "barcode" | "qr",
+      effectiveMode: "barcode" | "qr" | "both",
       allowHistogramFallback: boolean
     ): Promise<boolean> => {
       const w = canvas.width;
@@ -915,7 +909,7 @@ function CameraScanInner() {
                   fmt === "aztec" ||
                   item.rawValue.trim().toUpperCase().startsWith("TFQR1:");
                 if (effectiveMode === "barcode" && is2D) continue;
-                if (effectiveMode === "qr" && !is2D) continue;
+                if (effectiveMode === "qr" && !is2D && fmt !== "") continue;
 
                 if (processDecodedCandidate(item.rawValue, is2D)) {
                   return true;
@@ -931,11 +925,14 @@ function CameraScanInner() {
         }
       }
 
-      // 2. Tracking Code Mode ("barcode"): Run 1D Barcode reader ONLY
-      if (effectiveMode === "barcode") {
+      let luminanceSource: HTMLCanvasElementLuminanceSource | null = null;
+      let hybridBitmap: BinaryBitmap | null = null;
+
+      // 2. When 1D Barcode scanning is active ("barcode" or "both"), run zxingBarcodeReader
+      if (effectiveMode !== "qr") {
         try {
-          const luminanceSource = new HTMLCanvasElementLuminanceSource(canvas);
-          const hybridBitmap = new BinaryBitmap(new HybridBinarizer(luminanceSource));
+          luminanceSource = new HTMLCanvasElementLuminanceSource(canvas);
+          hybridBitmap = new BinaryBitmap(new HybridBinarizer(luminanceSource));
           const result1D = zxingBarcodeReader.decodeWithState(hybridBitmap);
           if (result1D && result1D.getText()) {
             if (processDecodedCandidate(result1D.getText(), false)) {
@@ -949,52 +946,57 @@ function CameraScanInner() {
             zxingBarcodeReader.reset();
           } catch {}
         }
-        return false;
       }
 
-      // 3. Customer Data Mode ("qr"): Run 2D QR readers ONLY (jsQR + zxingQrReader)
-      try {
-        const imageData = ctx.getImageData(0, 0, w, h);
-        const qrResult = jsQR(imageData.data, w, h, {
-          inversionAttempts: allowHistogramFallback ? "attemptBoth" : "dontInvert",
-        });
-        if (qrResult && qrResult.data) {
-          if (processDecodedCandidate(qrResult.data, true)) {
-            return true;
-          }
-        }
-      } catch {
-        // continue
-      }
-
-      try {
-        const luminanceSource = new HTMLCanvasElementLuminanceSource(canvas);
-        const hybridBitmap = new BinaryBitmap(new HybridBinarizer(luminanceSource));
+      // 3. When 2D QR scanning is active ("qr" or "both"), run jsQR + zxingQrReader
+      if (effectiveMode !== "barcode") {
         try {
-          const result2D = zxingQrReader.decodeWithState(hybridBitmap);
-          if (result2D && result2D.getText()) {
-            if (processDecodedCandidate(result2D.getText(), true)) {
+          const imageData = ctx.getImageData(0, 0, w, h);
+          const qrResult = jsQR(imageData.data, w, h, {
+            inversionAttempts: allowHistogramFallback ? "attemptBoth" : "dontInvert",
+          });
+          if (qrResult && qrResult.data) {
+            if (processDecodedCandidate(qrResult.data, true)) {
               return true;
             }
           }
         } catch {
-          zxingQrReader.reset();
-          if (allowHistogramFallback) {
-            const histBitmap = new BinaryBitmap(new GlobalHistogramBinarizer(luminanceSource));
-            const resultHist = zxingQrReader.decodeWithState(histBitmap);
-            if (resultHist && resultHist.getText()) {
-              if (processDecodedCandidate(resultHist.getText(), true)) {
+          // continue
+        }
+
+        try {
+          if (!luminanceSource) {
+            luminanceSource = new HTMLCanvasElementLuminanceSource(canvas);
+          }
+          if (!hybridBitmap) {
+            hybridBitmap = new BinaryBitmap(new HybridBinarizer(luminanceSource));
+          }
+          try {
+            const result2D = zxingQrReader.decodeWithState(hybridBitmap);
+            if (result2D && result2D.getText()) {
+              if (processDecodedCandidate(result2D.getText(), true)) {
                 return true;
               }
             }
+          } catch {
+            zxingQrReader.reset();
+            if (allowHistogramFallback) {
+              const histBitmap = new BinaryBitmap(new GlobalHistogramBinarizer(luminanceSource));
+              const resultHist = zxingQrReader.decodeWithState(histBitmap);
+              if (resultHist && resultHist.getText()) {
+                if (processDecodedCandidate(resultHist.getText(), true)) {
+                  return true;
+                }
+              }
+            }
           }
+        } catch {
+          // normal when no QR in frame
+        } finally {
+          try {
+            zxingQrReader.reset();
+          } catch {}
         }
-      } catch {
-        // normal when no QR in frame
-      } finally {
-        try {
-          zxingQrReader.reset();
-        } catch {}
       }
 
       return false;
@@ -1050,11 +1052,12 @@ function CameraScanInner() {
         const vh = video.videoHeight;
         const squareSide = Math.min(vw, vh);
 
+        const isTwoStepOn = isScanCustomerQrEnabledRef.current;
         const isAwaitingCustomerQr =
-          isScanCustomerQrEnabledRef.current &&
+          isTwoStepOn &&
           customerQrScanStepRef.current.step === "awaiting_customer_qr";
 
-        // STEP 2 (Awaiting Customer Mini QR ONLY): Dedicated fast QR-only pipeline (ignores 1D barcodes completely)
+        // STEP 2 of 2-Step Scan (Awaiting Customer Mini QR ONLY): Dedicated fast QR-only pipeline
         if (isAwaitingCustomerQr) {
           const qrCropSide = Math.max(96, Math.floor(squareSide * 0.56));
           const qrCropX = Math.max(0, Math.floor((vw - qrCropSide) / 2));
@@ -1088,9 +1091,20 @@ function CameraScanInner() {
           return;
         }
 
-        // STEP 1 (Awaiting Tracking Code ONLY): Dedicated fast 1D Barcode-only pipeline
-        const roiWidthRatio = 0.84;
-        const roiHeightRatio = 0.36;
+        // When 2-Step Scan is ON (Step 1), force "barcode" only. When 2-Step Scan is OFF, use selected cameraGuideMode ("barcode" | "qr" | "both").
+        const effectiveMode: "barcode" | "qr" | "both" = isTwoStepOn
+          ? "barcode"
+          : guideModeRef.current;
+
+        let roiWidthRatio = 0.82;
+        let roiHeightRatio = 0.54;
+        if (effectiveMode === "barcode") {
+          roiWidthRatio = 0.84;
+          roiHeightRatio = 0.36;
+        } else if (effectiveMode === "qr") {
+          roiWidthRatio = 0.66;
+          roiHeightRatio = 0.66;
+        }
 
         const cropW = Math.max(64, Math.floor(squareSide * roiWidthRatio));
         const cropH = Math.max(64, Math.floor(squareSide * roiHeightRatio));
@@ -1108,14 +1122,14 @@ function CameraScanInner() {
         const ctx = canvas.getContext("2d", { willReadFrequently: true });
         if (!ctx) return;
 
-        // Pass 1: Standard 1D Barcode decode on Barcode Guide Box ROI
+        // Pass 1: Standard decode on Guide Box ROI
         ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, targetW, targetH);
-        if (await tryDecodeCanvas(canvas, ctx, "barcode", false)) return;
+        if (await tryDecodeCanvas(canvas, ctx, effectiveMode, false)) return;
 
         // Pass 2 (only every 3rd tick to keep CPU <10%): Lightweight contrast stretch for low-contrast / wrinkled labels
         if (tickCounter % 3 === 0) {
           if (fastContrastStretchROI(ctx, targetW, targetH)) {
-            await tryDecodeCanvas(canvas, ctx, "barcode", false);
+            await tryDecodeCanvas(canvas, ctx, effectiveMode, false);
           }
         }
       } catch {
@@ -1353,35 +1367,54 @@ function CameraScanInner() {
       {/* 2. CENTERED FIXED SQUARE CAMERA SPACE & COMPACT CONTROLS          */}
       {/* ================================================================= */}
       <div className="flex-1 flex flex-col items-center justify-between px-3.5 sm:px-6 py-3 overflow-y-auto gap-3">
-        {/* Top Control Strip Above Square Camera: Guide Mode + Default Status (Booked) + Customer QR + No Rule */}
-        <div className="w-full max-w-md flex flex-wrap items-center justify-between gap-2 shrink-0">
-          {/* Active Step Scanner Mode Badge (Tracking Code = Barcode Only, Customer Data = QR Only) */}
-          <div
-            className={`inline-flex items-center gap-1.5 rounded-xl px-2.5 py-1.5 text-[11px] font-bold border ${
-              isScanCustomerQrEnabled && customerQrScanStep.step === "awaiting_customer_qr"
-                ? "bg-indigo-600/20 border-indigo-500/50 text-indigo-300"
-                : "bg-emerald-500/15 border-emerald-500/40 text-emerald-300"
-            }`}
-          >
-            {isScanCustomerQrEnabled && customerQrScanStep.step === "awaiting_customer_qr" ? (
-              <>
-                <QrCode className="h-3.5 w-3.5" />
-                <span>QR Only (Customer)</span>
-              </>
-            ) : (
-              <>
-                <ScanLine className="h-3.5 w-3.5" />
-                <span>Barcode Only (Tracking)</span>
-              </>
-            )}
-          </div>
+        {/* Unified User-Friendly Top Control Bar (No duplicate buttons or ON/OFF text inside buttons) */}
+        <div className="w-full max-w-md rounded-2xl bg-slate-900/95 border border-slate-800 px-3 py-2 flex flex-wrap items-center justify-between gap-2 shrink-0">
+          {/* Left: When 2-Step Scan is OFF, show Barcode / QR / Both switcher; when ON, show active step indicator */}
+          {!isScanCustomerQrEnabled ? (
+            <div className="inline-flex items-center gap-0.5 rounded-xl bg-slate-950 p-1 border border-slate-800">
+              {(["barcode", "qr", "both"] as const).map((m) => (
+                <button
+                  key={m}
+                  type="button"
+                  onClick={() => setCameraGuideMode(m)}
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-bold capitalize transition-all cursor-pointer ${
+                    cameraGuideMode === m
+                      ? "bg-indigo-600 text-white shadow-2xs"
+                      : "text-slate-400 hover:text-slate-200"
+                  }`}
+                >
+                  {m === "qr" ? "QR" : m}
+                </button>
+              ))}
+            </div>
+          ) : (
+            <div
+              className={`inline-flex items-center gap-1.5 rounded-xl px-2.5 py-1 text-[11px] font-bold border ${
+                customerQrScanStep.step === "awaiting_customer_qr"
+                  ? "bg-indigo-600/20 border-indigo-500/50 text-indigo-300"
+                  : "bg-emerald-500/15 border-emerald-500/40 text-emerald-300"
+              }`}
+            >
+              {customerQrScanStep.step === "awaiting_customer_qr" ? (
+                <>
+                  <QrCode className="h-3.5 w-3.5" />
+                  <span>Step 2: Customer QR</span>
+                </>
+              ) : (
+                <>
+                  <ScanLine className="h-3.5 w-3.5" />
+                  <span>Step 1: Barcode</span>
+                </>
+              )}
+            </div>
+          )}
 
-          {/* Default Status Dropdown (Defaults to Booked, never opens keyboard) */}
+          {/* Right: Default Status Dropdown */}
           <div className="relative">
             <button
               type="button"
               onClick={() => setIsStatusMenuOpen((prev) => !prev)}
-              className="inline-flex items-center gap-1.5 rounded-xl bg-slate-900 border border-slate-800 hover:border-slate-700 px-2.5 py-1.5 text-[11px] font-bold text-slate-200 cursor-pointer"
+              className="inline-flex items-center gap-1.5 rounded-xl bg-slate-950 border border-slate-800 hover:border-slate-700 px-2.5 py-1 text-[11px] font-bold text-slate-200 cursor-pointer"
               title="Default status for scanned consignments"
             >
               <span className={`h-2 w-2 rounded-full ${activeStatusObj.dot}`} />
@@ -1422,63 +1455,65 @@ function CameraScanInner() {
             )}
           </div>
 
-          {/* Scan Customer Data QR ON/OFF Toggle */}
-          <div
-            onClick={toggleScanCustomerQr}
-            className={`inline-flex items-center gap-1.5 rounded-xl border px-2.5 py-1.5 text-[11px] font-bold transition-all cursor-pointer select-none ${
-              isScanCustomerQrEnabled
-                ? "border-indigo-500/60 bg-indigo-500/15 text-indigo-300 shadow-2xs"
-                : "border-slate-800 bg-slate-900 text-slate-300 hover:border-slate-700"
-            }`}
-            title="1st scan tracking number -> 2nd scan encrypted customer Mini QR -> auto next tracking number"
-          >
-            <QrCode className="h-3.5 w-3.5" />
-            <span>Customer QR</span>
-            <button
-              type="button"
-              role="switch"
-              aria-checked={isScanCustomerQrEnabled}
-              onClick={(e) => {
-                e.stopPropagation();
-                toggleScanCustomerQr();
-              }}
-              className={`relative inline-flex h-4.5 w-8 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out ${
-                isScanCustomerQrEnabled ? "bg-indigo-500" : "bg-slate-700"
-              }`}
+          {/* Clean Toggle Row: 2-Step Scan, Auto-Next, No Rule (sliding switches only, no ON/OFF text) */}
+          <div className="w-full flex items-center justify-between gap-2 pt-1.5 border-t border-slate-800/80">
+            {/* 2-Step Scan Toggle (renamed from Customer QR) */}
+            <label
+              onClick={toggleScanCustomerQr}
+              className="inline-flex items-center gap-1.5 text-[11px] font-bold text-slate-200 cursor-pointer select-none"
+              title="Toggle 2-Step Scan (1st Barcode Tracking ID -> 2nd Customer Data QR)"
             >
-              <span
-                className={`pointer-events-none inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow-xs transition duration-200 ease-in-out ${
-                  isScanCustomerQrEnabled ? "translate-x-3.5" : "translate-x-0"
+              <span>2-Step Scan</span>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={isScanCustomerQrEnabled}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  toggleScanCustomerQr();
+                }}
+                className={`relative inline-flex h-4.5 w-8 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out ${
+                  isScanCustomerQrEnabled ? "bg-indigo-500" : "bg-slate-700"
                 }`}
-              />
-            </button>
-          </div>
+              >
+                <span
+                  className={`pointer-events-none inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow-xs transition duration-200 ease-in-out ${
+                    isScanCustomerQrEnabled ? "translate-x-3.5" : "translate-x-0"
+                  }`}
+                />
+              </button>
+            </label>
 
-          {/* Fallback 'No Rule' Sliding Toggle Switch for Unrecognized Formats */}
-          <div
-            onClick={() => {
-              setIsPasteAnywayEnabled((prev) => {
-                const next = !prev;
-                if (next && formatError) {
-                  setFormatError(null);
-                }
-                return next;
-              });
-            }}
-            className={`inline-flex items-center gap-2 rounded-xl border px-2.5 py-1.5 text-[11px] font-bold transition-all cursor-pointer select-none ${
-              isPasteAnywayEnabled
-                ? "border-amber-500/60 bg-amber-500/15 text-amber-300 shadow-2xs"
-                : "border-slate-800 bg-slate-900 text-slate-300 hover:border-slate-700"
-            }`}
-            title="Toggle No Rule mode for unrecognized barcode/QR formats"
-          >
-            <span>No Rule</span>
-            <button
-              type="button"
-              role="switch"
-              aria-checked={isPasteAnywayEnabled}
-              onClick={(e) => {
-                e.stopPropagation();
+            {/* Auto-Next Sliding Toggle Switch */}
+            <label
+              onClick={() => setIsAutoNextEnabled((prev) => !prev)}
+              className="inline-flex items-center gap-1.5 text-[11px] font-bold text-slate-200 cursor-pointer select-none"
+              title="Automatically advance to the next scan"
+            >
+              <span>Auto-Next</span>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={isAutoNextEnabled}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setIsAutoNextEnabled((prev) => !prev);
+                }}
+                className={`relative inline-flex h-4.5 w-8 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out ${
+                  isAutoNextEnabled ? "bg-emerald-500" : "bg-slate-700"
+                }`}
+              >
+                <span
+                  className={`pointer-events-none inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow-xs transition duration-200 ease-in-out ${
+                    isAutoNextEnabled ? "translate-x-3.5" : "translate-x-0"
+                  }`}
+                />
+              </button>
+            </label>
+
+            {/* No Rule Sliding Toggle Switch */}
+            <label
+              onClick={() => {
                 setIsPasteAnywayEnabled((prev) => {
                   const next = !prev;
                   if (next && formatError) {
@@ -1487,58 +1522,54 @@ function CameraScanInner() {
                   return next;
                 });
               }}
-              className={`relative inline-flex h-4.5 w-8 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out ${
-                isPasteAnywayEnabled ? "bg-amber-500" : "bg-slate-700"
-              }`}
+              className="inline-flex items-center gap-1.5 text-[11px] font-bold text-slate-200 cursor-pointer select-none"
+              title="Allow unrecognized barcode/QR formats"
             >
-              <span
-                className={`pointer-events-none inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow-xs transition duration-200 ease-in-out ${
-                  isPasteAnywayEnabled ? "translate-x-3.5" : "translate-x-0"
+              <span>No Rule</span>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={isPasteAnywayEnabled}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setIsPasteAnywayEnabled((prev) => {
+                    const next = !prev;
+                    if (next && formatError) {
+                      setFormatError(null);
+                    }
+                    return next;
+                  });
+                }}
+                className={`relative inline-flex h-4.5 w-8 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out ${
+                  isPasteAnywayEnabled ? "bg-amber-500" : "bg-slate-700"
                 }`}
-              />
-            </button>
+              >
+                <span
+                  className={`pointer-events-none inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow-xs transition duration-200 ease-in-out ${
+                    isPasteAnywayEnabled ? "translate-x-3.5" : "translate-x-0"
+                  }`}
+                />
+              </button>
+            </label>
           </div>
         </div>
 
-        {/* 2-Step Scan Status Strip Above Camera */}
-        {isScanCustomerQrEnabled && (
-          <div
-            className={`w-full max-w-md rounded-xl border px-3 py-2 text-[11px] flex items-center justify-between gap-2 shrink-0 ${
-              customerQrScanStep.step === "awaiting_customer_qr"
-                ? "border-indigo-500 bg-indigo-950/90 text-indigo-200"
-                : "border-slate-800 bg-slate-900/90 text-slate-300"
-            }`}
-          >
-            <div className="min-w-0 flex-1">
-              <span
-                className={`inline-block rounded px-1.5 py-0.5 font-mono text-[9px] font-black uppercase mr-1.5 ${
-                  customerQrScanStep.step === "awaiting_customer_qr"
-                    ? "bg-indigo-500 text-white animate-pulse"
-                    : "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40"
-                }`}
-              >
-                {customerQrScanStep.step === "awaiting_customer_qr"
-                  ? "Step 2/2 • Customer QR Only"
-                  : "Step 1/2 • Tracking ID Only"}
-              </span>
-              <span className="font-semibold">
-                {customerQrScanStep.step === "awaiting_customer_qr"
-                  ? `Scan Customer Mini QR for AWB ${customerQrScanStep.pendingAwb}`
-                  : "Scan Tracking Code first (Customer QR ignored in Step 1)"}
-              </span>
-            </div>
-            {customerQrScanStep.step === "awaiting_customer_qr" && (
-              <button
-                type="button"
-                onClick={() => {
-                  const awb = customerQrScanStep.pendingAwb;
-                  handleStageScannedCode(awb, true, undefined, true);
-                }}
-                className="rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-600 px-2 py-1 text-[10px] font-bold text-white shrink-0 cursor-pointer"
-              >
-                Skip QR →
-              </button>
-            )}
+        {/* Only show Step 2 Skip Strip when waiting for Customer QR (Step 1 alert removed) */}
+        {isScanCustomerQrEnabled && customerQrScanStep.step === "awaiting_customer_qr" && (
+          <div className="w-full max-w-md rounded-xl border border-indigo-500 bg-indigo-950/90 px-3 py-2 text-[11px] text-indigo-200 flex items-center justify-between gap-2 shrink-0">
+            <span className="font-semibold truncate">
+              AWB <span className="font-mono font-black text-white">{customerQrScanStep.pendingAwb}</span> locked • Scan Customer QR
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                const awb = customerQrScanStep.pendingAwb;
+                handleStageScannedCode(awb, true, undefined, true);
+              }}
+              className="rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-600 px-2.5 py-1 text-[10px] font-bold text-white shrink-0 cursor-pointer"
+            >
+              Skip QR →
+            </button>
           </div>
         )}
 
@@ -1591,8 +1622,9 @@ function CameraScanInner() {
               />
             )}
 
-            {/* Step-Isolated Single Guide Frame: Barcode Guide ONLY for Tracking ID, QR Guide ONLY for Customer Data */}
-            {!(isScanCustomerQrEnabled && customerQrScanStep.step === "awaiting_customer_qr") ? (
+            {/* Guide Frame: When 2-Step Scan is ON -> Barcode only (Step 1) or QR only (Step 2). When OFF -> Barcode, QR, or Both */}
+            {((isScanCustomerQrEnabled && customerQrScanStep.step !== "awaiting_customer_qr") ||
+              (!isScanCustomerQrEnabled && cameraGuideMode === "barcode")) && (
               <div
                 className={`relative z-10 w-[84%] h-[38%] rounded-2xl border-2 pointer-events-none shadow-[0_0_0_9999px_rgba(2,6,23,0.58)] flex items-center justify-center transition-colors ${
                   cameraScanSuccess
@@ -1606,7 +1638,10 @@ function CameraScanInner() {
                   <div className="w-[92%] h-0.5 bg-red-500 shadow-[0_0_14px_#ef4444] animate-pulse" />
                 )}
               </div>
-            ) : (
+            )}
+
+            {((isScanCustomerQrEnabled && customerQrScanStep.step === "awaiting_customer_qr") ||
+              (!isScanCustomerQrEnabled && cameraGuideMode === "qr")) && (
               <div
                 className={`relative z-10 w-[68%] h-[68%] rounded-2xl border-2 pointer-events-none shadow-[0_0_0_9999px_rgba(2,6,23,0.58)] flex items-center justify-center transition-colors ${
                   cameraScanSuccess
@@ -1618,6 +1653,23 @@ function CameraScanInner() {
               >
                 {!cameraScanSuccess && !formatError && (
                   <div className="w-[88%] h-0.5 bg-red-500 shadow-[0_0_14px_#ef4444] animate-pulse" />
+                )}
+              </div>
+            )}
+
+            {!isScanCustomerQrEnabled && cameraGuideMode === "both" && (
+              <div
+                className={`relative z-10 w-[82%] h-[68%] rounded-2xl border-2 pointer-events-none shadow-[0_0_0_9999px_rgba(2,6,23,0.58)] flex items-center justify-center transition-colors ${
+                  cameraScanSuccess
+                    ? "border-emerald-400"
+                    : formatError
+                    ? "border-rose-500 bg-rose-500/15"
+                    : "border-white/85"
+                }`}
+              >
+                <div className="w-[62%] aspect-square rounded-xl border border-white/40" />
+                {!cameraScanSuccess && !formatError && (
+                  <div className="absolute left-3 right-3 h-0.5 bg-red-500 shadow-[0_0_14px_#ef4444] animate-pulse" />
                 )}
               </div>
             )}
@@ -1643,7 +1695,7 @@ function CameraScanInner() {
               </div>
             )}
 
-            {/* Invalid / Unrecognized Consignment ID Format Flagged Overlay with Fallback 'No Rule' */}
+            {/* Invalid / Unrecognized Consignment ID Format Flagged Overlay */}
             {formatError && (
               <div
                 key={formatError.ts}
@@ -1666,8 +1718,8 @@ function CameraScanInner() {
                   </div>
                 </div>
 
-                {/* Fallback Action Row: One-Tap No Rule or Toggle No Rule ON/OFF */}
-                <div className="flex flex-wrap items-center justify-between gap-1.5 pt-1.5 border-t border-rose-800/80">
+                {/* Single One-Tap Accept Action (No duplicate No Rule toggle inside error box) */}
+                <div className="flex items-center justify-end pt-1.5 border-t border-rose-800/80">
                   <button
                     type="button"
                     onClick={() => {
@@ -1678,51 +1730,8 @@ function CameraScanInner() {
                     className="inline-flex items-center gap-1.5 rounded-xl bg-amber-500 hover:bg-amber-400 px-3 py-1.5 text-[11px] font-black text-slate-950 shadow-xs cursor-pointer transition-colors"
                   >
                     <Check className="h-3.5 w-3.5 stroke-[3]" />
-                    <span>No Rule ({formatError.code})</span>
+                    <span>Add Anyway ({formatError.code})</span>
                   </button>
-
-                  <div
-                    onClick={() => {
-                      const nextState = !isPasteAnywayEnabled;
-                      setIsPasteAnywayEnabled(nextState);
-                      if (nextState) {
-                        const codeToPaste = formatError.rawCode;
-                        setFormatError(null);
-                        handleStageScannedCode(codeToPaste, true);
-                      }
-                    }}
-                    className={`inline-flex items-center gap-2 rounded-xl border px-2.5 py-1.5 text-[10px] font-bold cursor-pointer transition-colors select-none ${
-                      isPasteAnywayEnabled
-                        ? "border-amber-400 bg-amber-500/20 text-amber-200"
-                        : "border-rose-700 bg-rose-900/70 text-rose-200 hover:bg-rose-800"
-                    }`}
-                  >
-                    <span>No Rule</span>
-                    <button
-                      type="button"
-                      role="switch"
-                      aria-checked={isPasteAnywayEnabled}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        const nextState = !isPasteAnywayEnabled;
-                        setIsPasteAnywayEnabled(nextState);
-                        if (nextState) {
-                          const codeToPaste = formatError.rawCode;
-                          setFormatError(null);
-                          handleStageScannedCode(codeToPaste, true);
-                        }
-                      }}
-                      className={`relative inline-flex h-4 w-7 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out ${
-                        isPasteAnywayEnabled ? "bg-amber-500" : "bg-rose-950"
-                      }`}
-                    >
-                      <span
-                        className={`pointer-events-none inline-block h-3 w-3 transform rounded-full bg-white shadow-xs transition duration-200 ease-in-out ${
-                          isPasteAnywayEnabled ? "translate-x-3" : "translate-x-0"
-                        }`}
-                      />
-                    </button>
-                  </div>
                 </div>
               </div>
             )}
@@ -1948,31 +1957,20 @@ function CameraScanInner() {
         <div className="mx-auto max-w-2xl">
           {stagedItems.length > 0 ? (
             <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-              <div className="grid grid-cols-3 sm:flex items-center gap-2 order-2 sm:order-1">
+              <div className="grid grid-cols-2 sm:flex items-center gap-2 order-2 sm:order-1">
                 <button
                   type="button"
                   onClick={handleRequestCancel}
-                  className="rounded-xl border border-slate-700 bg-slate-800 hover:bg-slate-700 px-3 py-2.5 text-xs font-bold text-slate-200 transition-colors cursor-pointer text-center"
+                  className="rounded-xl border border-slate-700 bg-slate-800 hover:bg-slate-700 px-4 py-2.5 text-xs font-bold text-slate-200 transition-colors cursor-pointer text-center"
                 >
                   Back
                 </button>
                 <button
                   type="button"
                   onClick={handleReturnToReview}
-                  className="rounded-xl border border-indigo-500/40 bg-indigo-950/60 hover:bg-indigo-900/70 px-3 py-2.5 text-xs font-bold text-indigo-200 transition-colors cursor-pointer text-center"
+                  className="rounded-xl border border-indigo-500/40 bg-indigo-950/60 hover:bg-indigo-900/70 px-4 py-2.5 text-xs font-bold text-indigo-200 transition-colors cursor-pointer text-center"
                 >
                   Review ({stagedItems.length})
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setIsAutoNextEnabled((prev) => !prev)}
-                  className={`rounded-xl px-2.5 py-2.5 text-xs font-bold border transition-colors cursor-pointer text-center ${
-                    isAutoNextEnabled
-                      ? "border-indigo-500/40 bg-indigo-500/15 text-indigo-300"
-                      : "border-slate-800 bg-slate-950 text-slate-400"
-                  }`}
-                >
-                  Auto-Next: {isAutoNextEnabled ? "ON" : "OFF"}
                 </button>
               </div>
 
@@ -1993,18 +1991,6 @@ function CameraScanInner() {
                 className="rounded-xl border border-slate-700 bg-slate-800 hover:bg-slate-700 px-5 py-2.5 text-xs font-bold text-slate-200 transition-colors cursor-pointer text-center"
               >
                 Back
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setIsAutoNextEnabled((prev) => !prev)}
-                className={`rounded-xl px-3.5 py-2.5 text-xs font-bold border transition-colors cursor-pointer shrink-0 ${
-                  isAutoNextEnabled
-                    ? "border-indigo-500/40 bg-indigo-500/15 text-indigo-300"
-                    : "border-slate-800 bg-slate-950 text-slate-400"
-                }`}
-              >
-                Auto-Next: {isAutoNextEnabled ? "ON" : "OFF"}
               </button>
             </div>
           )}
