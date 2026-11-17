@@ -29,6 +29,8 @@ export default async function HomePage({ searchParams }: HomePageProps) {
   // 1. Verify authenticated user on the server so BulkDashboard renders on SSR frame 0
   const sessionToken = cookieStore.get(SESSION_COOKIE_NAME)?.value;
   const initialAuthUser = verifySessionToken(sessionToken);
+  const hasClientAuthCookie = cookieStore.get("trackflow_has_auth")?.value === "1";
+  const isAuthenticatedOnServer = Boolean(initialAuthUser || hasClientAuthCookie);
 
   // 2. Resolve route from Next.js rewrite parameter (__tf_path) or active view cookie
   const rawRewrittenPath =
@@ -51,10 +53,16 @@ export default async function HomePage({ searchParams }: HomePageProps) {
 
   if (rawRewrittenPath) {
     const route = resolveRouteFromPathname(rawRewrittenPath);
-    initialView = route.view;
-    initialPublicTab = route.publicTab;
-    initialWorkspaceTab = route.workspaceTab;
-  } else if (savedViewCookie === "bulk") {
+    // Only open bulk view if authenticated; if logged out, automatically go to 1st single search page
+    if (route.view === "bulk" && !isAuthenticatedOnServer) {
+      initialView = "single";
+      initialPublicTab = "track";
+    } else {
+      initialView = route.view;
+      initialPublicTab = route.publicTab;
+      initialWorkspaceTab = route.workspaceTab;
+    }
+  } else if (savedViewCookie === "bulk" && isAuthenticatedOnServer) {
     initialView = "bulk";
   }
 

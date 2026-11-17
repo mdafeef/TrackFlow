@@ -198,11 +198,25 @@ export function TrackingAppClient({
         });
 
         const storedUser = localStorage.getItem("trackflow_auth_user");
+        let hydratedUser: AuthUserProfile | null = initialAuthUser;
         if (storedUser) {
           try {
             const parsedUser = JSON.parse(storedUser) as AuthUserProfile;
+            hydratedUser = hydratedUser || parsedUser;
             setAuthUser((prev) => prev || parsedUser);
+            document.cookie = "trackflow_has_auth=1; path=/; max-age=604800; SameSite=Lax";
           } catch {}
+        }
+
+        // If user is logged out, automatically go to 1st single search page
+        if (!hydratedUser) {
+          document.cookie = "trackflow_has_auth=; path=/; max-age=0; SameSite=Lax";
+          syncViewCookies("single");
+          setActiveView("single");
+          setPublicTab("track");
+          if (window.location.pathname !== "/") {
+            silentNavigateTab("/", true);
+          }
         }
         setIsClientAuthHydrated(true);
 
@@ -215,6 +229,7 @@ export function TrackingAppClient({
           .then((r) => r.json())
           .then((data) => {
             if (data?.authenticated && data?.user) {
+              document.cookie = "trackflow_has_auth=1; path=/; max-age=604800; SameSite=Lax";
               setAuthUser((prev) => {
                 const nextJson = JSON.stringify(data.user);
                 if (prev && JSON.stringify(prev) === nextJson) {
@@ -233,25 +248,31 @@ export function TrackingAppClient({
         setIsClientAuthHydrated(true);
       }
     });
-  }, []);
+  }, [initialAuthUser]);
 
-  const handleLogout = useCallback(async () => {
-    try {
-      await fetch("/api/auth", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "logout" }),
-      });
-    } catch {}
+  const handleLogout = useCallback(() => {
     try {
       localStorage.removeItem("trackflow_auth_user");
       localStorage.removeItem("trackflow_auth_token");
+      localStorage.removeItem("trackflow_active_view");
+      localStorage.removeItem("trackflow_workspace_tab");
+      sessionStorage.removeItem("trackflow_scan_return");
+      document.cookie = "trackflow_has_auth=; path=/; max-age=0; SameSite=Lax";
     } catch {}
     syncViewCookies("single");
+    setIsAuthModalOpen(false);
     setAuthUser(null);
     setActiveView("single");
     setPublicTab("track");
-    silentNavigateTab("/");
+    silentNavigateTab("/", true);
+    if (typeof window !== "undefined") {
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }
+    fetch("/api/auth", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "logout" }),
+    }).catch(() => {});
   }, []);
 
   const toggleTheme = () => {
@@ -413,12 +434,24 @@ export function TrackingAppClient({
         effectiveWorkspaceTab = initialWorkspaceTab;
       }
 
+      const hasStoredAuth = Boolean(
+        initialAuthUser || localStorage.getItem("trackflow_auth_user")
+      );
+      if (!hasStoredAuth && effectiveView === "bulk") {
+        effectiveView = "single";
+      }
+
       if (
         normalizeUrl &&
-        effectiveView === resolved.view &&
-        (window.location.search || window.location.pathname !== resolved.canonicalPath)
+        (window.location.search ||
+          (effectiveView === "single" && window.location.pathname !== "/") ||
+          (effectiveView === resolved.view &&
+            window.location.pathname !== resolved.canonicalPath))
       ) {
-        silentNavigateTab(resolved.canonicalPath, true);
+        silentNavigateTab(
+          effectiveView === "single" ? "/" : resolved.canonicalPath,
+          true
+        );
       }
       setActiveView(effectiveView);
       setPublicTab(resolved.publicTab);
@@ -470,6 +503,16 @@ export function TrackingAppClient({
 
     const handlePopState = () => {
       const resolved = resolveRouteFromPathname(window.location.pathname);
+      const hasStoredAuth = Boolean(
+        initialAuthUser || localStorage.getItem("trackflow_auth_user")
+      );
+      if (resolved.view === "bulk" && !hasStoredAuth) {
+        setActiveView("single");
+        setPublicTab("track");
+        syncViewCookies("single");
+        silentNavigateTab("/", true);
+        return;
+      }
       setActiveView(resolved.view);
       setPublicTab(resolved.publicTab);
       setWorkspaceTab(resolved.workspaceTab);
@@ -486,7 +529,7 @@ export function TrackingAppClient({
     return () => {
       window.removeEventListener("popstate", handlePopState);
     };
-  }, [performSearch, initialView, initialWorkspaceTab]);
+  }, [performSearch, initialView, initialWorkspaceTab, initialAuthUser]);
 
   // Watchlist helpers (synced to Service Worker offline cache)
   const handleAddToWatchlist = () => {
@@ -580,7 +623,11 @@ export function TrackingAppClient({
         onToggleTheme={toggleTheme}
         publicTab={publicTab}
         onSelectPublicTab={handleSelectPublicTab}
-        activeView={activeView}
+        activeView={
+          activeView === "bulk" && (authUser || !isClientAuthHydrated)
+            ? "bulk"
+            : "single"
+        }
         onChangeView={(nextView) => {
           if (nextView === "bulk" && !authUser) {
             setIsAuthModalOpen(true);
@@ -613,7 +660,7 @@ export function TrackingAppClient({
             : "flex-1"
         }
       >
-        {activeView === "bulk" ? (
+        {activeView === "bulk" && (authUser || !isClientAuthHydrated) ? (
           authUser ? (
             /* Enterprise Bulk Operations Dashboard (Authenticated) */
             <BulkDashboard
@@ -625,32 +672,12 @@ export function TrackingAppClient({
               onLogout={handleLogout}
               onProfileUpdated={(updated) => setAuthUser(updated)}
             />
-          ) : !isClientAuthHydrated ? (
+          ) : (
             /* Instantaneous Workspace Shell while localStorage session is checked on frame 0 */
             <div className="flex-1 flex bg-slate-50 dark:bg-slate-950" aria-busy="true">
               <div className="hidden lg:block w-64 shrink-0 border-r border-slate-200/80 dark:border-slate-800/80 bg-white dark:bg-slate-900" />
               <div className="flex-1 p-6" />
             </div>
-          ) : (
-            /* Workspace Login Gate if accessed while unauthenticated */
-            <AuthModal
-              isOpen={true}
-              inlineMode={true}
-              onClose={() => handleSelectPublicTab("track")}
-              onSuccess={(user) => {
-                setAuthUser(user);
-                setIsAuthModalOpen(false);
-                setActiveView("bulk");
-                const currentResolved =
-                  typeof window !== "undefined"
-                    ? resolveRouteFromPathname(window.location.pathname)
-                    : null;
-                const targetPath =
-                  currentResolved?.view === "bulk" ? currentResolved.canonicalPath : "/dashboard";
-                syncViewCookies("bulk", currentResolved?.workspaceTab || "dashboard");
-                silentNavigateTab(targetPath);
-              }}
-            />
           )
         ) : (
           /* Single Tracker Front Page: Unified single-page layout with all sections */
@@ -820,9 +847,12 @@ export function TrackingAppClient({
 
       {/* Real Workspace Login & Registration Modal */}
       <AuthModal
-        isOpen={isAuthModalOpen && !(activeView === "bulk" && !authUser)}
+        isOpen={isAuthModalOpen}
         onClose={() => setIsAuthModalOpen(false)}
         onSuccess={(user) => {
+          try {
+            document.cookie = "trackflow_has_auth=1; path=/; max-age=604800; SameSite=Lax";
+          } catch {}
           setAuthUser(user);
           setIsAuthModalOpen(false);
           setActiveView("bulk");

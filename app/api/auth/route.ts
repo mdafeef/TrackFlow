@@ -132,6 +132,7 @@ export async function POST(req: NextRequest) {
     if (action === "logout") {
       const res = NextResponse.json({ success: true, authenticated: false, user: null });
       res.cookies.delete(SESSION_COOKIE_NAME);
+      res.cookies.delete("trackflow_has_auth");
       res.cookies.set("trackflow_active_view", "single", {
         sameSite: "lax",
         path: "/",
@@ -192,6 +193,11 @@ export async function POST(req: NextRequest) {
 
       res.cookies.set(SESSION_COOKIE_NAME, token, {
         httpOnly: true,
+        sameSite: "lax",
+        path: "/",
+        maxAge: 60 * 60 * 24 * 7,
+      });
+      res.cookies.set("trackflow_has_auth", "1", {
         sameSite: "lax",
         path: "/",
         maxAge: 60 * 60 * 24 * 7,
@@ -270,6 +276,11 @@ export async function POST(req: NextRequest) {
 
       res.cookies.set(SESSION_COOKIE_NAME, token, {
         httpOnly: true,
+        sameSite: "lax",
+        path: "/",
+        maxAge: 60 * 60 * 24 * 7,
+      });
+      res.cookies.set("trackflow_has_auth", "1", {
         sameSite: "lax",
         path: "/",
         maxAge: 60 * 60 * 24 * 7,
