@@ -32,6 +32,7 @@ import {
   Undo2,
   X,
   Hash,
+  Layers,
 } from "lucide-react";
 import {
   encryptCustomerMiniQR,
@@ -51,6 +52,8 @@ export interface LabelPrintItem {
   selected: boolean;
   printed?: boolean;
   awbHint?: string;
+  batchId?: string;
+  batchName?: string;
 }
 
 interface BulkLabelPrintToolProps {
@@ -62,6 +65,9 @@ interface BulkLabelPrintToolProps {
     pincode?: string;
     itemCode?: string;
     destination?: string;
+    batchId?: string;
+    batchName?: string;
+    importedAt?: string;
   }>;
   defaultOfficeName?: string;
   defaultOfficeHub?: string;
@@ -89,6 +95,8 @@ const INITIAL_SAMPLE_LABELS: LabelPrintItem[] = [
     copies: 1,
     selected: true,
     printed: false,
+    batchId: "batch-kerala-hub",
+    batchName: "Kerala Express Batch #1",
   },
   {
     id: "lbl-2",
@@ -100,6 +108,8 @@ const INITIAL_SAMPLE_LABELS: LabelPrintItem[] = [
     copies: 1,
     selected: true,
     printed: false,
+    batchId: "batch-metro-priority",
+    batchName: "Metro Priority Batch #2",
   },
   {
     id: "lbl-3",
@@ -111,6 +121,8 @@ const INITIAL_SAMPLE_LABELS: LabelPrintItem[] = [
     copies: 1,
     selected: true,
     printed: false,
+    batchId: "batch-kerala-hub",
+    batchName: "Kerala Express Batch #1",
   },
   {
     id: "lbl-4",
@@ -122,6 +134,8 @@ const INITIAL_SAMPLE_LABELS: LabelPrintItem[] = [
     copies: 1,
     selected: true,
     printed: false,
+    batchId: "batch-metro-priority",
+    batchName: "Metro Priority Batch #2",
   },
 ];
 
@@ -143,8 +157,8 @@ export const MiniQrSvg: React.FC<{
     );
   }
 
-  // Quiet zone of 3 modules guarantees fast optical recognition on phone & handheld cameras
-  const quietZone = 3;
+  // ISO standard 4-module quiet zone + pure black fill guarantees rapid mobile camera recognition on small labels
+  const quietZone = 4;
   const totalSize = size + quietZone * 2;
 
   return (
@@ -166,7 +180,7 @@ export const MiniQrSvg: React.FC<{
               y={rIdx + quietZone}
               width={1}
               height={1}
-              fill="#0f172a"
+              fill="#000000"
             />
           ) : null
         )
@@ -389,10 +403,11 @@ export default function BulkLabelPrintTool({
     strip91FromPhone(defaultOfficePhone) || defaultOfficePhone
   );
 
-  // Queue Filter & Search
+  // Queue Filter, Batch Filter & Search
   const [queueFilter, setQueueFilter] = useState<"all" | "unprinted" | "printed">(
     "all"
   );
+  const [activeBatchId, setActiveBatchId] = useState<string>("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [statusBanner, setStatusBanner] = useState<{
@@ -402,6 +417,9 @@ export default function BulkLabelPrintTool({
   } | null>(null);
   const [inspectItemId, setInspectItemId] = useState<string | null>(null);
   const [singlePrintTargetId, setSinglePrintTargetId] = useState<string | null>(
+    null
+  );
+  const [pendingBatchPrintId, setPendingBatchPrintId] = useState<string | null>(
     null
   );
 
@@ -555,6 +573,8 @@ export default function BulkLabelPrintTool({
       copies: Math.max(1, Math.min(50, Number(formCopies) || 1)),
       selected: true,
       printed: false,
+      batchId: "batch-manual-entry",
+      batchName: "Manual Quick Add",
     };
 
     setUndoQueueSnapshot(null);
@@ -590,11 +610,18 @@ export default function BulkLabelPrintTool({
       );
       return;
     }
+    const pasteBatchId = `batch-paste-${Date.now()}`;
+    const pasteBatchName = `Smart Paste (${parsed.length} items)`;
+    const tagged = parsed.map((item) => ({
+      ...item,
+      batchId: pasteBatchId,
+      batchName: pasteBatchName,
+    }));
     setUndoQueueSnapshot(null);
-    setLabels((prev) => [...parsed, ...prev]);
+    setLabels((prev) => [...tagged, ...prev]);
     setSmartPasteText("");
     setActiveIntakeTab("single");
-    showToast(`Added ${parsed.length} customer label(s) (91 stripped automatically).`);
+    showToast(`Added ${tagged.length} customer label(s) in "${pasteBatchName}".`);
   };
 
   const handleUpdateField = (
@@ -676,6 +703,8 @@ export default function BulkLabelPrintTool({
         selected: true,
         printed: false,
         awbHint: s.trackingNumber,
+        batchId: s.batchId || "batch-consignments",
+        batchName: s.batchName || "Active Consignments",
       });
     });
 
@@ -745,6 +774,10 @@ export default function BulkLabelPrintTool({
           defval: "",
         });
 
+        const fileBatchId = `batch-file-${Date.now()}`;
+        const fileBatchName =
+          file.name.replace(/\.[^/.]+$/, "").slice(0, 32) || "Uploaded Sheet";
+
         const imported: LabelPrintItem[] = [];
         rows.forEach((row, index) => {
           const getVal = (keys: string[]) => {
@@ -776,6 +809,7 @@ export default function BulkLabelPrintTool({
           ]);
           const awbHint = getVal(["trackingnumber", "awb", "consignment", "tracking"]);
           const copiesRaw = getVal(["copies", "qty", "quantity"]);
+          const rowBatchName = getVal(["batch", "batchname", "group"]);
 
           if (customerName || customerPhone || pincode || deliveryAddress) {
             imported.push({
@@ -789,6 +823,10 @@ export default function BulkLabelPrintTool({
               copies: Math.max(1, Math.min(50, parseInt(copiesRaw, 10) || 1)),
               selected: true,
               printed: false,
+              batchId: rowBatchName
+                ? `batch-${rowBatchName.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`
+                : fileBatchId,
+              batchName: rowBatchName || fileBatchName,
             });
           }
         });
@@ -797,7 +835,7 @@ export default function BulkLabelPrintTool({
           setUndoQueueSnapshot(null);
           setLabels((prev) => [...imported, ...prev]);
           showToast(
-            `Loaded ${imported.length} customer label row(s) from ${file.name} (91 stripped automatically).`
+            `Loaded ${imported.length} customer label row(s) into batch "${fileBatchName}".`
           );
         } else {
           setFormError(
@@ -858,12 +896,79 @@ export default function BulkLabelPrintTool({
     showToast(`Exported ${rows.length} label row(s) to Excel.`);
   };
 
+  // Compute Print Batches (combining batches in Label Queue + batches available in Active Consignments)
+  const printBatches = useMemo(() => {
+    const map = new Map<
+      string,
+      {
+        batchId: string;
+        batchName: string;
+        totalInQueue: number;
+        selectedInQueue: number;
+        printedInQueue: number;
+        unsyncedShipmentsCount: number;
+      }
+    >();
+
+    const existingKeys = new Set(
+      enrichedLabels.map(
+        (l) => `${l.customerName.toLowerCase()}|${l.pincode}|${l.itemCode}`
+      )
+    );
+
+    enrichedLabels.forEach((l) => {
+      const bId = l.batchId || "batch-default";
+      const bName = l.batchName || "General Queue Batch";
+      const entry = map.get(bId) || {
+        batchId: bId,
+        batchName: bName,
+        totalInQueue: 0,
+        selectedInQueue: 0,
+        printedInQueue: 0,
+        unsyncedShipmentsCount: 0,
+      };
+      entry.totalInQueue += 1;
+      if (l.selected) entry.selectedInQueue += 1;
+      if (l.printed) entry.printedInQueue += 1;
+      map.set(bId, entry);
+    });
+
+    shipments.forEach((s) => {
+      if (!s.recipientName && !s.customerPhone && !s.pincode && !s.itemCode) return;
+      const bId = s.batchId || "batch-consignments";
+      const bName = s.batchName || "Active Consignments";
+      const name = s.recipientName || `Customer (${s.trackingNumber})`;
+      const pin = (s.pincode || "").replace(/\D/g, "");
+      const itemCode = (
+        s.itemCode || `ITM-${s.trackingNumber.slice(-4)}`
+      ).toUpperCase();
+      const key = `${name.toLowerCase()}|${pin}|${itemCode}`;
+
+      const entry = map.get(bId) || {
+        batchId: bId,
+        batchName: bName,
+        totalInQueue: 0,
+        selectedInQueue: 0,
+        printedInQueue: 0,
+        unsyncedShipmentsCount: 0,
+      };
+      if (!existingKeys.has(key)) {
+        entry.unsyncedShipmentsCount += 1;
+      }
+      map.set(bId, entry);
+    });
+
+    return Array.from(map.values());
+  }, [enrichedLabels, shipments]);
+
   // Filtered queue list for table view
   const filteredLabels = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     return enrichedLabels.filter((l) => {
       if (queueFilter === "unprinted" && l.printed) return false;
       if (queueFilter === "printed" && !l.printed) return false;
+      if (activeBatchId !== "all" && (l.batchId || "batch-default") !== activeBatchId)
+        return false;
 
       if (!q) return true;
       return (
@@ -871,11 +976,12 @@ export default function BulkLabelPrintTool({
         l.customerPhone.toLowerCase().includes(q) ||
         l.pincode.toLowerCase().includes(q) ||
         l.itemCode.toLowerCase().includes(q) ||
+        (l.batchName && l.batchName.toLowerCase().includes(q)) ||
         (l.deliveryAddress && l.deliveryAddress.toLowerCase().includes(q)) ||
         (l.awbHint && l.awbHint.toLowerCase().includes(q))
       );
     });
-  }, [enrichedLabels, queueFilter, searchQuery]);
+  }, [enrichedLabels, queueFilter, activeBatchId, searchQuery]);
 
   // Expand selected labels by `copies` count for the Printable Sheet
   const printableExpandedLabels = useMemo(() => {
@@ -914,6 +1020,99 @@ export default function BulkLabelPrintTool({
         visibleIds.has(l.id) ? { ...l, selected: !allVisibleSelected } : l
       )
     );
+  };
+
+  // Toggle selection of a specific Print Batch (importing unsynced shipments from that batch if needed)
+  const handleToggleBatchSelection = (batchId: string, batchName: string) => {
+    const batchItemsInQueue = labels.filter(
+      (l) => (l.batchId || "batch-default") === batchId
+    );
+    const allSelected =
+      batchItemsInQueue.length > 0 && batchItemsInQueue.every((l) => l.selected);
+
+    const existingKeys = new Set(
+      labels.map((l) => `${l.customerName.toLowerCase()}|${l.pincode}|${l.itemCode}`)
+    );
+    const newlySyncedFromBatch: LabelPrintItem[] = [];
+    shipments.forEach((s, idx) => {
+      if ((s.batchId || "batch-consignments") !== batchId) return;
+      if (!s.recipientName && !s.customerPhone && !s.pincode && !s.itemCode) return;
+      const name = s.recipientName || `Customer (${s.trackingNumber})`;
+      const pin = (s.pincode || "").replace(/\D/g, "");
+      const itemCode = (
+        s.itemCode || `ITM-${s.trackingNumber.slice(-4)}`
+      ).toUpperCase();
+      const key = `${name.toLowerCase()}|${pin}|${itemCode}`;
+      if (existingKeys.has(key)) return;
+      existingKeys.add(key);
+      newlySyncedFromBatch.push({
+        id: `lbl-ship-${s.id}-${idx}-${Date.now()}`,
+        customerName: name,
+        customerPhone: strip91FromPhone(s.customerPhone || ""),
+        pincode: pin,
+        itemCode,
+        deliveryAddress: s.destination || undefined,
+        copies: 1,
+        selected: true,
+        printed: false,
+        awbHint: s.trackingNumber,
+        batchId,
+        batchName,
+      });
+    });
+
+    setLabels((prev) => [
+      ...newlySyncedFromBatch,
+      ...prev.map((l) =>
+        (l.batchId || "batch-default") === batchId
+          ? { ...l, selected: !allSelected }
+          : l
+      ),
+    ]);
+  };
+
+  // Select ONLY a specific batch and immediately trigger print
+  const handlePrintSpecificBatch = (batchId: string, batchName: string) => {
+    const existingKeys = new Set(
+      labels.map((l) => `${l.customerName.toLowerCase()}|${l.pincode}|${l.itemCode}`)
+    );
+    const newlySyncedFromBatch: LabelPrintItem[] = [];
+    shipments.forEach((s, idx) => {
+      if ((s.batchId || "batch-consignments") !== batchId) return;
+      if (!s.recipientName && !s.customerPhone && !s.pincode && !s.itemCode) return;
+      const name = s.recipientName || `Customer (${s.trackingNumber})`;
+      const pin = (s.pincode || "").replace(/\D/g, "");
+      const itemCode = (
+        s.itemCode || `ITM-${s.trackingNumber.slice(-4)}`
+      ).toUpperCase();
+      const key = `${name.toLowerCase()}|${pin}|${itemCode}`;
+      if (existingKeys.has(key)) return;
+      existingKeys.add(key);
+      newlySyncedFromBatch.push({
+        id: `lbl-ship-${s.id}-${idx}-${Date.now()}`,
+        customerName: name,
+        customerPhone: strip91FromPhone(s.customerPhone || ""),
+        pincode: pin,
+        itemCode,
+        deliveryAddress: s.destination || undefined,
+        copies: 1,
+        selected: true,
+        printed: false,
+        awbHint: s.trackingNumber,
+        batchId,
+        batchName,
+      });
+    });
+
+    setLabels((prev) => [
+      ...newlySyncedFromBatch,
+      ...prev.map((l) => ({
+        ...l,
+        selected: (l.batchId || "batch-default") === batchId,
+      })),
+    ]);
+    setActiveBatchId(batchId);
+    setPendingBatchPrintId(batchId);
   };
 
   // Shared isolated iframe print engine
@@ -1061,12 +1260,19 @@ export default function BulkLabelPrintTool({
                 line-height: 1.3;
                 word-break: break-word;
               }
+              .phone-line {
+                font-family: monospace;
+                font-size: 10.5px;
+                font-weight: 800;
+                color: #0f172a;
+                margin-top: 4px;
+              }
               .pin-phone-row {
                 display: flex;
                 flex-wrap: wrap;
                 align-items: center;
                 gap: 6px;
-                margin-top: 5px;
+                margin-top: 4px;
               }
               .pin-box {
                 border: 1.4px solid #0f172a;
@@ -1077,13 +1283,6 @@ export default function BulkLabelPrintTool({
                 font-weight: 900;
                 color: #0f172a;
                 background: #f8fafc;
-              }
-              .phone-line {
-                font-family: monospace;
-                font-size: 10.5px;
-                font-weight: 800;
-                color: #0f172a;
-                margin-top: 3px;
               }
               .meta-footer {
                 display: flex;
@@ -1161,7 +1360,7 @@ export default function BulkLabelPrintTool({
   );
 
   // Print all currently selected labels from the live DOM sheet
-  const handlePrintLabels = () => {
+  const handlePrintLabels = useCallback(() => {
     if (printableExpandedLabels.length === 0) return;
     const sheetEl = printableSheetRef.current;
     if (!sheetEl) return;
@@ -1169,7 +1368,17 @@ export default function BulkLabelPrintTool({
       enrichedLabels.filter((l) => l.selected).map((l) => l.id)
     );
     printMarkupInIframe(sheetEl.innerHTML, printableExpandedLabels.length, selectedIds);
-  };
+  }, [printableExpandedLabels.length, enrichedLabels, printMarkupInIframe]);
+
+  // Execute batch print once state updates printableExpandedLabels for the requested batch
+  useEffect(() => {
+    if (!pendingBatchPrintId) return;
+    const timer = setTimeout(() => {
+      handlePrintLabels();
+      setPendingBatchPrintId(null);
+    }, 60);
+    return () => clearTimeout(timer);
+  }, [pendingBatchPrintId, handlePrintLabels]);
 
   // Print a single row via isolated hidden container (zero flicker or selection mutation)
   useEffect(() => {
@@ -1701,6 +1910,125 @@ export default function BulkLabelPrintTool({
       </div>
 
       {/* ================================================================= */}
+      {/* 2.5 BATCHES FOR PRINT PANEL                                       */}
+      {/* ================================================================= */}
+      {printBatches.length > 0 && (
+        <div className="rounded-3xl border border-slate-200/90 bg-white p-4 sm:p-5 dark:border-slate-800 dark:bg-slate-900 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <div className="flex h-7 w-7 items-center justify-center rounded-xl bg-indigo-50 text-indigo-600 dark:bg-indigo-950/70 dark:text-indigo-400">
+                <Layers className="h-4 w-4" />
+              </div>
+              <div>
+                <h3 className="text-xs sm:text-sm font-extrabold text-slate-900 dark:text-white">
+                  Batches for Print
+                </h3>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                  Select or one-click print any imported spreadsheet batch, smart paste group, or consignment batch
+                </p>
+              </div>
+            </div>
+            {activeBatchId !== "all" && (
+              <button
+                type="button"
+                onClick={() => setActiveBatchId("all")}
+                className="inline-flex items-center gap-1 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 px-2.5 py-1 text-[11px] font-bold text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300 cursor-pointer"
+              >
+                <span>Show All Batches</span>
+              </button>
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
+            {printBatches.map((batch) => {
+              const isAllBatchSelected =
+                batch.totalInQueue > 0 &&
+                batch.selectedInQueue === batch.totalInQueue &&
+                batch.unsyncedShipmentsCount === 0;
+              const isSomeBatchSelected =
+                batch.selectedInQueue > 0 && !isAllBatchSelected;
+              const isFilteredToBatch = activeBatchId === batch.batchId;
+
+              return (
+                <div
+                  key={batch.batchId}
+                  className={`rounded-2xl border p-3 transition-all flex items-center justify-between gap-3 ${
+                    isFilteredToBatch
+                      ? "border-indigo-500 bg-indigo-50/50 dark:border-indigo-500/70 dark:bg-indigo-950/30"
+                      : "border-slate-200/90 bg-slate-50/70 hover:bg-slate-100/60 dark:border-slate-800 dark:bg-slate-800/50"
+                  }`}
+                >
+                  <div className="flex items-start gap-2.5 min-w-0 flex-1">
+                    <button
+                      type="button"
+                      role="checkbox"
+                      aria-checked={isAllBatchSelected}
+                      aria-label={`Select batch ${batch.batchName}`}
+                      onClick={() =>
+                        handleToggleBatchSelection(batch.batchId, batch.batchName)
+                      }
+                      className={`mt-0.5 flex h-4.5 w-4.5 shrink-0 items-center justify-center rounded-md border transition-all cursor-pointer ${
+                        isAllBatchSelected
+                          ? "border-indigo-600 bg-indigo-600 text-white shadow-2xs shadow-indigo-500/30"
+                          : isSomeBatchSelected
+                          ? "border-indigo-500 bg-indigo-100 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300"
+                          : "border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 hover:border-indigo-400"
+                      }`}
+                    >
+                      {(isAllBatchSelected || isSomeBatchSelected) && (
+                        <Check className="h-3 w-3 stroke-[3.2]" />
+                      )}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setActiveBatchId((prev) =>
+                          prev === batch.batchId ? "all" : batch.batchId
+                        )
+                      }
+                      className="text-left min-w-0 flex-1 cursor-pointer"
+                    >
+                      <div className="text-xs font-extrabold text-slate-900 dark:text-white truncate">
+                        {batch.batchName}
+                      </div>
+                      <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-400 font-mono tabular-nums">
+                        <span>
+                          {batch.selectedInQueue}/{batch.totalInQueue} selected
+                        </span>
+                        {batch.printedInQueue > 0 && (
+                          <span className="text-emerald-600 dark:text-emerald-400 font-sans font-bold">
+                            · {batch.printedInQueue} printed
+                          </span>
+                        )}
+                        {batch.unsyncedShipmentsCount > 0 && (
+                          <span className="text-indigo-600 dark:text-indigo-400 font-sans font-bold">
+                            · +{batch.unsyncedShipmentsCount} in consignments
+                          </span>
+                        )}
+                      </div>
+                    </button>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() =>
+                      handlePrintSpecificBatch(batch.batchId, batch.batchName)
+                    }
+                    className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-2.5 py-1.5 text-[11px] font-extrabold text-white shrink-0 cursor-pointer transition-colors"
+                    title={`Select and print all labels in ${batch.batchName}`}
+                  >
+                    <Printer className="h-3 w-3" />
+                    <span>Print Batch</span>
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* ================================================================= */}
       {/* 3. QUEUE TABLE                                                    */}
       {/* ================================================================= */}
       <div className="rounded-3xl border border-slate-200/90 bg-white p-4 sm:p-5 dark:border-slate-800 dark:bg-slate-900 space-y-3.5">
@@ -1828,17 +2156,28 @@ export default function BulkLabelPrintTool({
             <table className="w-full text-left text-xs min-w-[980px]">
               <thead className="bg-slate-50 dark:bg-slate-800/95 text-[10px] uppercase font-bold text-slate-500 dark:text-slate-400 border-b border-slate-200 dark:border-slate-800 sticky top-0 z-10">
                 <tr>
-                  <th className="py-2.5 px-3 w-9">
-                    <input
-                      type="checkbox"
+                  <th className="py-2.5 px-3 w-10">
+                    <button
+                      type="button"
+                      role="checkbox"
                       aria-label="Select all visible labels"
-                      checked={
+                      aria-checked={
                         filteredLabels.length > 0 &&
                         filteredLabels.every((l) => l.selected)
                       }
-                      onChange={handleToggleSelectAllVisible}
-                      className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
-                    />
+                      onClick={handleToggleSelectAllVisible}
+                      className={`flex h-4.5 w-4.5 items-center justify-center rounded-md border transition-all cursor-pointer ${
+                        filteredLabels.length > 0 &&
+                        filteredLabels.every((l) => l.selected)
+                          ? "border-indigo-600 bg-indigo-600 text-white shadow-2xs shadow-indigo-500/30"
+                          : "border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 hover:border-indigo-400"
+                      }`}
+                    >
+                      {filteredLabels.length > 0 &&
+                        filteredLabels.every((l) => l.selected) && (
+                          <Check className="h-3 w-3 stroke-[3.2]" />
+                        )}
+                    </button>
                   </th>
                   <th className="py-2.5 px-2.5">Customer Name</th>
                   <th className="py-2.5 px-2.5">Mobile Number</th>
@@ -1858,18 +2197,27 @@ export default function BulkLabelPrintTool({
                     }`}
                   >
                     <td className="py-2 px-3">
-                      <input
-                        type="checkbox"
+                      <button
+                        type="button"
+                        role="checkbox"
                         aria-label={`Select ${item.customerName}`}
-                        checked={item.selected}
-                        onChange={(e) =>
-                          handleUpdateField(item.id, "selected", e.target.checked)
+                        aria-checked={item.selected}
+                        onClick={() =>
+                          handleUpdateField(item.id, "selected", !item.selected)
                         }
-                        className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
-                      />
+                        className={`flex h-4.5 w-4.5 items-center justify-center rounded-md border transition-all cursor-pointer ${
+                          item.selected
+                            ? "border-indigo-600 bg-indigo-600 text-white shadow-2xs shadow-indigo-500/30"
+                            : "border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 hover:border-indigo-400"
+                        }`}
+                      >
+                        {item.selected && (
+                          <Check className="h-3 w-3 stroke-[3.2]" />
+                        )}
+                      </button>
                     </td>
 
-                    {/* Customer Name + Printed indicator */}
+                    {/* Customer Name + Batch & Printed indicators */}
                     <td className="py-2 px-2.5">
                       <div className="flex items-center gap-1.5">
                         <input
@@ -2250,17 +2598,17 @@ export default function BulkLabelPrintTool({
                           )}
                         </div>
 
-                        <div className="pin-phone-row flex flex-wrap items-center gap-2 mt-2">
+                        {formattedPhoneText && (
+                          <div className="phone-line font-mono tabular-nums text-[11px] font-extrabold text-slate-900 mt-1.5">
+                            Mob: {formattedPhoneText}
+                          </div>
+                        )}
+
+                        <div className="pin-phone-row flex flex-wrap items-center gap-2 mt-1.5">
                           <span className="pin-box rounded border-[1.5px] border-slate-900 bg-slate-50 px-2 py-0.5 font-mono tabular-nums text-xs font-black text-slate-950">
                             PIN: {item.pincode || "------"}
                           </span>
                         </div>
-
-                        {formattedPhoneText && (
-                          <div className="phone-line font-mono tabular-nums text-[11px] font-extrabold text-slate-900 mt-1">
-                            Mob: {formattedPhoneText}
-                          </div>
-                        )}
                       </div>
 
                       <div>
@@ -2298,10 +2646,10 @@ export default function BulkLabelPrintTool({
                         value={item.encryptedQr}
                         sizePx={
                           labelLayout === "security_4col"
-                            ? 72
+                            ? 78
                             : labelLayout === "mini_3col"
-                            ? 84
-                            : 96
+                            ? 90
+                            : 102
                         }
                       />
                       <span className="qr-caption mt-1 font-mono text-[8px] font-extrabold uppercase tracking-wider text-slate-500">
@@ -2360,16 +2708,16 @@ export default function BulkLabelPrintTool({
                               </div>
                             )}
                           </div>
-                          <div className="pin-phone-row">
-                            <span className="pin-box">
-                              PIN: {targetItem.pincode || "------"}
-                            </span>
-                          </div>
                           {formattedPhoneText && (
                             <div className="phone-line">
                               Mob: {formattedPhoneText}
                             </div>
                           )}
+                          <div className="pin-phone-row">
+                            <span className="pin-box">
+                              PIN: {targetItem.pincode || "------"}
+                            </span>
+                          </div>
                         </div>
                         <div>
                           <div className="meta-footer">
@@ -2401,10 +2749,10 @@ export default function BulkLabelPrintTool({
                           value={targetItem.encryptedQr}
                           sizePx={
                             labelLayout === "security_4col"
-                              ? 72
+                              ? 78
                               : labelLayout === "mini_3col"
-                              ? 84
-                              : 96
+                              ? 90
+                              : 102
                           }
                         />
                         <span className="qr-caption">OFFICE SCAN</span>

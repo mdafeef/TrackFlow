@@ -23,6 +23,7 @@ import {
   HTMLCanvasElementLuminanceSource,
   BinaryBitmap,
   HybridBinarizer,
+  GlobalHistogramBinarizer,
 } from "@zxing/library";
 import jsQR from "jsqr";
 import {
@@ -271,6 +272,12 @@ function CameraScanInner() {
   useEffect(() => {
     isSoundEnabledRef.current = isSoundEnabled;
   }, [isSoundEnabled]);
+
+  const isAutoNextEnabledRef = useRef<boolean>(isAutoNextEnabled);
+
+  useEffect(() => {
+    isAutoNextEnabledRef.current = isAutoNextEnabled;
+  }, [isAutoNextEnabled]);
 
   useEffect(() => {
     isPasteAnywayEnabledRef.current = isPasteAnywayEnabled;
@@ -603,16 +610,21 @@ function CameraScanInner() {
         !effectiveCustomerData &&
         !skipCustomerStep
       ) {
-        setCustomerQrScanStep({
-          step: "awaiting_customer_qr",
+        const nextStepState = {
+          step: "awaiting_customer_qr" as const,
           pendingAwb: cleanNum,
           pendingCourierId: chosenCourier.id,
           pendingCourierName: chosenCourier.name,
           pendingFormatLabel: resolvedFormatLabel,
-        });
+        };
+        customerQrScanStepRef.current = nextStepState;
+        setCustomerQrScanStep(nextStepState);
         if (guideModeRef.current === "barcode") {
+          guideModeRef.current = "both";
           setCameraGuideMode("both");
         }
+        // Short 380ms cooldown after Step 1 so the user can immediately scan the Customer Mini QR right next to the barcode
+        scanCooldownUntilRef.current = Date.now() + 380;
         playScanBeep(true);
         setCameraScanSuccess({
           code: `Step 1 OK: ${cleanNum}`,
@@ -659,13 +671,18 @@ function CameraScanInner() {
       stagedItemsRef.current = nextList;
       setStagedItems(nextList);
 
-      setCustomerQrScanStep({
-        step: "awaiting_awb",
+      // Synchronously reset 2-step state back to Step 1 (awaiting_awb) so Auto-Next is ready for the next parcel
+      const resetStepState = {
+        step: "awaiting_awb" as const,
         pendingAwb: "",
         pendingCourierId: "",
         pendingCourierName: "",
         pendingFormatLabel: "",
-      });
+      };
+      customerQrScanStepRef.current = resetStepState;
+      setCustomerQrScanStep(resetStepState);
+      lastScannedRef.current = { code: cleanNum, timestamp: Date.now() };
+      scanCooldownUntilRef.current = Date.now() + (isAutoNextEnabledRef.current ? 850 : 1600);
 
       playScanBeep(true);
       setCameraScanSuccess({
@@ -673,7 +690,7 @@ function CameraScanInner() {
           ? `${cleanNum} • ${effectiveCustomerData.customerName}`
           : cleanNum,
         carrier: effectiveCustomerData
-          ? `PIN ${effectiveCustomerData.pincode} • ${effectiveCustomerData.itemCode}`
+          ? `PIN ${effectiveCustomerData.pincode} • ${effectiveCustomerData.itemCode} • Next Ready`
           : isPastedAnywayFallback
           ? `${chosenCourier.shortName} • Pasted Anyway`
           : chosenCourier.name,
@@ -788,12 +805,13 @@ function CameraScanInner() {
       if (customerQr.isCustomerQR) {
         if (
           lastScannedRef.current.code === trimmedRaw &&
-          now - lastScannedRef.current.timestamp < 2400
+          now - lastScannedRef.current.timestamp < 1800
         ) {
           return true;
         }
         lastScannedRef.current = { code: trimmedRaw, timestamp: now };
-        scanCooldownUntilRef.current = now + 1100;
+        scanCooldownUntilRef.current = now + 850;
+        setFormatError(null);
 
         if (!customerQr.isValid || !customerQr.data) {
           playScanBeep(false);
@@ -832,71 +850,93 @@ function CameraScanInner() {
         return true;
       }
 
+      // While waiting for Step 2 (Customer Mini QR), ignore non-Customer-QR reads (such as the 1D barcode sitting on the same label!)
+      if (
+        isScanCustomerQrEnabledRef.current &&
+        customerQrScanStepRef.current.step === "awaiting_customer_qr"
+      ) {
+        return false;
+      }
+
       const candidate = extractCandidateScannedCode(rawVal);
       if (!candidate) return false;
 
-      // 2. Ignore same barcode within 2.8 seconds of last scan
+      // Reject 1D motion-blur / edge misreads containing non-alphanumeric symbol noise (e.g. "E%8,W%-]/IN" from Code39/Code93)
+      if (!is2DQr) {
+        const compactCheck = candidate.replace(/\s+/g, "");
+        if (
+          /[^A-Z0-9-]/i.test(compactCheck) ||
+          compactCheck.startsWith("-") ||
+          compactCheck.endsWith("-") ||
+          compactCheck.includes("--") ||
+          compactCheck.length < 6
+        ) {
+          return false;
+        }
+      }
+
+      // 3. Ignore same barcode within 2.5 seconds of last scan
       if (
         lastScannedRef.current.code === candidate &&
-        now - lastScannedRef.current.timestamp < 2800
+        now - lastScannedRef.current.timestamp < 2500
       ) {
         return true;
       }
 
-      // 3. Regex-based evaluation of string length & pattern against known courier formats (India Post, DTDC, etc.)
+      // 4. Regex-based evaluation of string length & pattern against known courier formats (India Post, DTDC, etc.)
       const identification = identifyAndValidateConsignment(candidate);
 
       if (!identification.isValid) {
-        // When Paste Anyway is OFF, immediately flag invalid/unrecognized codes on first detection
-        if (!isPasteAnywayEnabledRef.current) {
-          if (
-            invalidCandidateRef.current.code === candidate &&
-            now - invalidCandidateRef.current.lastSeen < 1800
-          ) {
-            return true;
-          }
-          invalidCandidateRef.current = { code: candidate, count: 1, lastSeen: now };
-          scanCooldownUntilRef.current = now + 900;
-          handleStageScannedCode(candidate, false);
-          return true;
-        }
-
-        // When Paste Anyway is ON, require 2 consistent frame reads for 1D barcodes before pasting unrecognized code
-        const fallbackCode = identification.normalized || candidate;
+        // Require 3 consistent frame reads for unrecognized 1D codes before flagging or pasting so single blurry partial frames are ignored
         if (!is2DQr) {
           const pending = pendingCandidateRef.current;
-          if (pending.code === fallbackCode && now - pending.lastSeen < 850) {
+          if (pending.code === candidate && now - pending.lastSeen < 1000) {
             pending.count += 1;
             pending.lastSeen = now;
           } else {
             pendingCandidateRef.current = {
-              code: fallbackCode,
+              code: candidate,
               count: 1,
               firstSeen: now,
               lastSeen: now,
             };
             return false;
           }
-          if (pendingCandidateRef.current.count < 2) {
+          if (pendingCandidateRef.current.count < 3) {
             return false;
           }
         }
 
+        if (!isPasteAnywayEnabledRef.current) {
+          if (
+            invalidCandidateRef.current.code === candidate &&
+            now - invalidCandidateRef.current.lastSeen < 2200
+          ) {
+            return true;
+          }
+          pendingCandidateRef.current = { code: "", count: 0, firstSeen: 0, lastSeen: 0 };
+          invalidCandidateRef.current = { code: candidate, count: 1, lastSeen: now };
+          scanCooldownUntilRef.current = now + 900;
+          handleStageScannedCode(candidate, false);
+          return true;
+        }
+
+        const fallbackCode = identification.normalized || candidate;
         pendingCandidateRef.current = { code: "", count: 0, firstSeen: 0, lastSeen: 0 };
         invalidCandidateRef.current = { code: "", count: 0, lastSeen: 0 };
         lastScannedRef.current = { code: fallbackCode, timestamp: now };
-        scanCooldownUntilRef.current = now + 1250;
+        scanCooldownUntilRef.current = now + 1100;
         handleStageScannedCode(fallbackCode, true);
         return true;
       }
 
       const normalizedCode = identification.normalized;
 
-      // 4. Regex-validated consignment formats (India Post, DTDC, BlueDart, Delhivery, etc.) are accepted immediately!
+      // 5. Regex-validated consignment formats (India Post, DTDC, BlueDart, Delhivery, etc.) are accepted immediately!
       pendingCandidateRef.current = { code: "", count: 0, firstSeen: 0, lastSeen: 0 };
       invalidCandidateRef.current = { code: "", count: 0, lastSeen: 0 };
       lastScannedRef.current = { code: normalizedCode, timestamp: now };
-      scanCooldownUntilRef.current = now + 1250;
+      scanCooldownUntilRef.current = now + 1100;
 
       handleStageScannedCode(normalizedCode, false);
       return true;
@@ -909,6 +949,13 @@ function CameraScanInner() {
     ): Promise<boolean> => {
       const w = canvas.width;
       const h = canvas.height;
+      // When in Step 2 (awaiting_customer_qr), dedicate 100% of decoder passes to 2D QR codes
+      const isAwaitingCustomerQr =
+        isScanCustomerQrEnabledRef.current &&
+        customerQrScanStepRef.current.step === "awaiting_customer_qr";
+      const effectiveMode: "barcode" | "qr" | "both" = isAwaitingCustomerQr
+        ? "qr"
+        : activeGuideMode;
 
       // 1. Native BarcodeDetector with 250ms timeout guard
       if (nativeDetector) {
@@ -926,9 +973,10 @@ function CameraScanInner() {
                 fmt === "qr_code" ||
                 fmt === "data_matrix" ||
                 fmt === "pdf417" ||
-                fmt === "aztec";
-              if (activeGuideMode === "barcode" && is2D) continue;
-              if (activeGuideMode === "qr" && !is2D && fmt !== "") continue;
+                fmt === "aztec" ||
+                item.rawValue.trim().toUpperCase().startsWith("TFQR1:");
+              if (effectiveMode === "barcode" && is2D) continue;
+              if (effectiveMode === "qr" && !is2D && fmt !== "") continue;
 
               if (processDecodedCandidate(item.rawValue, is2D)) {
                 return true;
@@ -940,8 +988,8 @@ function CameraScanInner() {
         }
       }
 
-      // 2. jsQR for 2D QR codes inside Guide ROI
-      if (activeGuideMode !== "barcode") {
+      // 2. jsQR for 2D QR codes inside ROI
+      if (effectiveMode !== "barcode") {
         try {
           const imageData = ctx.getImageData(0, 0, w, h);
           const qrResult = jsQR(imageData.data, w, h, {
@@ -957,27 +1005,40 @@ function CameraScanInner() {
         }
       }
 
-      // 3. ZXing MultiFormatReader inside Guide ROI (always reset in finally)
+      // 3. ZXing MultiFormatReader inside ROI (tries HybridBinarizer then GlobalHistogramBinarizer for small QRs)
       const activeReader =
-        activeGuideMode === "barcode"
+        effectiveMode === "barcode"
           ? zxingBarcodeReader
-          : activeGuideMode === "qr"
+          : effectiveMode === "qr"
           ? zxingQrReader
           : zxingBothReader;
 
       try {
         const luminanceSource = new HTMLCanvasElementLuminanceSource(canvas);
-        const binaryBitmap = new BinaryBitmap(new HybridBinarizer(luminanceSource));
-        const result = activeReader.decodeWithState(binaryBitmap);
-        if (result && result.getText()) {
-          const zFmt = result.getBarcodeFormat();
-          const is2D =
-            zFmt === BarcodeFormat.QR_CODE ||
-            zFmt === BarcodeFormat.DATA_MATRIX ||
-            zFmt === BarcodeFormat.PDF_417 ||
-            zFmt === BarcodeFormat.AZTEC;
-          if (processDecodedCandidate(result.getText(), is2D)) {
-            return true;
+        try {
+          const binaryBitmap = new BinaryBitmap(new HybridBinarizer(luminanceSource));
+          const result = activeReader.decodeWithState(binaryBitmap);
+          if (result && result.getText()) {
+            const zFmt = result.getBarcodeFormat();
+            const is2D =
+              zFmt === BarcodeFormat.QR_CODE ||
+              zFmt === BarcodeFormat.DATA_MATRIX ||
+              zFmt === BarcodeFormat.PDF_417 ||
+              zFmt === BarcodeFormat.AZTEC;
+            if (processDecodedCandidate(result.getText(), is2D)) {
+              return true;
+            }
+          }
+        } catch {
+          activeReader.reset();
+          if (effectiveMode !== "barcode") {
+            const histBitmap = new BinaryBitmap(new GlobalHistogramBinarizer(luminanceSource));
+            const result2 = zxingQrReader.decodeWithState(histBitmap);
+            if (result2 && result2.getText()) {
+              if (processDecodedCandidate(result2.getText(), true)) {
+                return true;
+              }
+            }
           }
         }
       } catch {
@@ -985,13 +1046,14 @@ function CameraScanInner() {
       } finally {
         try {
           activeReader.reset();
+          zxingQrReader.reset();
         } catch {}
       }
 
       return false;
     };
 
-    const scheduleNextTick = (delayMs: number = 130) => {
+    const scheduleNextTick = (delayMs: number = 110) => {
       if (isCancelled) return;
       loopTimerId = setTimeout(runDecodeTick, delayMs);
     };
@@ -999,7 +1061,7 @@ function CameraScanInner() {
     const runDecodeTick = async () => {
       if (isCancelled) return;
       if (isDecoding) {
-        scheduleNextTick(130);
+        scheduleNextTick(110);
         return;
       }
 
@@ -1016,7 +1078,7 @@ function CameraScanInner() {
         const video = videoRef.current;
         const canvas = scanCanvasRef.current;
         if (!video || !canvas) {
-          scheduleNextTick(160);
+          scheduleNextTick(140);
           return;
         }
 
@@ -1026,13 +1088,13 @@ function CameraScanInner() {
         }
 
         if (video.readyState < 2 || video.videoWidth === 0 || video.videoHeight === 0) {
-          scheduleNextTick(160);
+          scheduleNextTick(140);
           return;
         }
 
         // Skip heavy pixel work during post-scan cooldown
         if (Date.now() < scanCooldownUntilRef.current) {
-          scheduleNextTick(140);
+          scheduleNextTick(110);
           return;
         }
 
@@ -1066,8 +1128,8 @@ function CameraScanInner() {
         const cropX = Math.max(0, Math.floor((vw - cropW) / 2));
         const cropY = Math.max(0, Math.floor((vh - cropH) / 2));
 
-        const maxTargetDim = 680;
-        const scale = Math.min(1.5, maxTargetDim / Math.max(cropW, cropH));
+        const maxTargetDim = 860;
+        const scale = Math.min(1.6, maxTargetDim / Math.max(cropW, cropH));
         const targetW = Math.max(64, Math.floor(cropW * scale));
         const targetH = Math.max(64, Math.floor(cropH * scale));
 
@@ -1076,39 +1138,53 @@ function CameraScanInner() {
 
         const ctx = canvas.getContext("2d", { willReadFrequently: true });
         if (!ctx) {
-          scheduleNextTick(150);
+          scheduleNextTick(140);
           return;
         }
 
-        // Draw ONLY the Guide Box ROI from the square camera space
-        ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, targetW, targetH);
-
         // PASS 1: Standard decode on the Guide Box ROI
+        ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, targetW, targetH);
         const decodedPass1 = await tryDecodeCanvas(canvas, ctx, activeGuideMode);
-        if (!decodedPass1) {
-          // PASS 2: Enhance contrast & sharpness for wrinkled / damaged labels inside Guide Box
-          const { hasLabelCandidate } = enhanceDamagedLabelROI(ctx, targetW, targetH);
-          let decodedPass2 = false;
-          if (hasLabelCandidate) {
-            decodedPass2 = await tryDecodeCanvas(canvas, ctx, activeGuideMode);
-          }
+        if (decodedPass1) return;
 
-          // PASS 3: Full-frame square fallback if the barcode/QR sits slightly outside the inner crop
-          if (!decodedPass2) {
-            const fullScale = Math.min(1, 640 / Math.max(vw, vh));
-            const fullW = Math.max(120, Math.floor(vw * fullScale));
-            const fullH = Math.max(120, Math.floor(vh * fullScale));
-            if (canvas.width !== fullW) canvas.width = fullW;
-            if (canvas.height !== fullH) canvas.height = fullH;
-            ctx.drawImage(video, 0, 0, vw, vh, 0, 0, fullW, fullH);
-            await tryDecodeCanvas(canvas, ctx, activeGuideMode);
-          }
+        // PASS 2: High-Resolution Macro Center Crop (42%x42% at 1.4x upscale) specifically for Small Customer Mini QRs!
+        if (activeGuideMode !== "barcode") {
+          const macroSide = Math.max(80, Math.floor((squareSide * 0.44) / effectiveDigitalZoom));
+          const macroX = Math.max(0, Math.floor((vw - macroSide) / 2));
+          const macroY = Math.max(0, Math.floor((vh - macroSide) / 2));
+          const macroTarget = Math.min(640, Math.max(320, Math.floor(macroSide * 1.35)));
+          if (canvas.width !== macroTarget) canvas.width = macroTarget;
+          if (canvas.height !== macroTarget) canvas.height = macroTarget;
+          ctx.drawImage(video, macroX, macroY, macroSide, macroSide, 0, 0, macroTarget, macroTarget);
+          if (await tryDecodeCanvas(canvas, ctx, "qr")) return;
+
+          // Also try contrast-sharpened Macro Center Crop for small printed QRs under indoor lighting
+          enhanceDamagedLabelROI(ctx, macroTarget, macroTarget);
+          if (await tryDecodeCanvas(canvas, ctx, "qr")) return;
         }
+
+        // PASS 3: Enhance contrast & sharpness on full Guide Box ROI for wrinkled / low-contrast labels
+        if (canvas.width !== targetW) canvas.width = targetW;
+        if (canvas.height !== targetH) canvas.height = targetH;
+        ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, targetW, targetH);
+        const { hasLabelCandidate } = enhanceDamagedLabelROI(ctx, targetW, targetH);
+        if (hasLabelCandidate) {
+          if (await tryDecodeCanvas(canvas, ctx, activeGuideMode)) return;
+        }
+
+        // PASS 4: Full-frame fallback if barcode/QR sits slightly outside the inner crop
+        const fullScale = Math.min(1, 760 / Math.max(vw, vh));
+        const fullW = Math.max(120, Math.floor(vw * fullScale));
+        const fullH = Math.max(120, Math.floor(vh * fullScale));
+        if (canvas.width !== fullW) canvas.width = fullW;
+        if (canvas.height !== fullH) canvas.height = fullH;
+        ctx.drawImage(video, 0, 0, vw, vh, 0, 0, fullW, fullH);
+        await tryDecodeCanvas(canvas, ctx, activeGuideMode);
       } catch {
         // Ensure any unexpected frame error never stops future scans
       } finally {
         isDecoding = false;
-        scheduleNextTick(120);
+        scheduleNextTick(105);
       }
     };
 
@@ -1123,6 +1199,14 @@ function CameraScanInner() {
         let stream = cameraStreamRef.current;
         if (!stream || !stream.active) {
           const constraintAttempts: MediaStreamConstraints[] = [
+            {
+              video: {
+                facingMode: { ideal: "environment" },
+                width: { ideal: 1920 },
+                height: { ideal: 1080 },
+              },
+              audio: false,
+            },
             {
               video: {
                 facingMode: { ideal: "environment" },
@@ -2016,20 +2100,31 @@ function CameraScanInner() {
         <div className="mx-auto max-w-2xl">
           {stagedItems.length > 0 ? (
             <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-              <div className="grid grid-cols-2 sm:flex items-center gap-2 order-2 sm:order-1">
+              <div className="grid grid-cols-3 sm:flex items-center gap-2 order-2 sm:order-1">
                 <button
                   type="button"
                   onClick={handleRequestCancel}
-                  className="rounded-xl border border-slate-700 bg-slate-800 hover:bg-slate-700 px-4 py-2.5 text-xs font-bold text-slate-200 transition-colors cursor-pointer text-center"
+                  className="rounded-xl border border-slate-700 bg-slate-800 hover:bg-slate-700 px-3 py-2.5 text-xs font-bold text-slate-200 transition-colors cursor-pointer text-center"
                 >
                   Back
                 </button>
                 <button
                   type="button"
                   onClick={handleReturnToReview}
-                  className="rounded-xl border border-indigo-500/40 bg-indigo-950/60 hover:bg-indigo-900/70 px-4 py-2.5 text-xs font-bold text-indigo-200 transition-colors cursor-pointer text-center"
+                  className="rounded-xl border border-indigo-500/40 bg-indigo-950/60 hover:bg-indigo-900/70 px-3 py-2.5 text-xs font-bold text-indigo-200 transition-colors cursor-pointer text-center"
                 >
                   Review ({stagedItems.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsAutoNextEnabled((prev) => !prev)}
+                  className={`rounded-xl px-2.5 py-2.5 text-xs font-bold border transition-colors cursor-pointer text-center ${
+                    isAutoNextEnabled
+                      ? "border-indigo-500/40 bg-indigo-500/15 text-indigo-300"
+                      : "border-slate-800 bg-slate-950 text-slate-400"
+                  }`}
+                >
+                  Auto-Next: {isAutoNextEnabled ? "ON" : "OFF"}
                 </button>
               </div>
 

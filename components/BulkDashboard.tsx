@@ -1071,12 +1071,14 @@ export function BulkDashboard({
       // If we were waiting for the 2nd scan (Customer QR) for a pending AWB, complete & stage immediately!
       const pendingAwb = customerQrScanStepRef.current.pendingAwb;
       if (pendingAwb) {
-        setCustomerQrScanStep({
-          step: "awaiting_awb",
+        const resetStep = {
+          step: "awaiting_awb" as const,
           pendingAwb: "",
           pendingCourierId: "",
           pendingCourierName: "",
-        });
+        };
+        customerQrScanStepRef.current = resetStep;
+        setCustomerQrScanStep(resetStep);
         handleStageConsignment(
           pendingAwb,
           customerQrScanStepRef.current.pendingCourierId || undefined,
@@ -1218,22 +1220,22 @@ export function BulkDashboard({
     setTimeout(() => setRecentStagedCode(null), 3000);
 
     // Reset 2-step customer QR state to awaiting_awb for the next customer
-    setCustomerQrScanStep({
-      step: "awaiting_awb",
+    const resetStep = {
+      step: "awaiting_awb" as const,
       pendingAwb: "",
       pendingCourierId: "",
       pendingCourierName: "",
-    });
+    };
+    customerQrScanStepRef.current = resetStep;
+    setCustomerQrScanStep(resetStep);
 
     // If scanned from camera, NEVER focus the text input so the mobile keyboard does not open!
     if (scanSource === "camera" || isCameraActive) {
-      if (isAutoNextEnabled) {
-        setIntakeAwb("");
-        setIntakeRecipient("");
-        setIntakePhone("");
-        setIntakePincode("");
-        setIntakeItemCode("");
-      }
+      setIntakeAwb("");
+      setIntakeRecipient("");
+      setIntakePhone("");
+      setIntakePincode("");
+      setIntakeItemCode("");
       if (typeof document !== "undefined" && document.activeElement instanceof HTMLElement) {
         document.activeElement.blur();
       }
@@ -1658,6 +1660,26 @@ export function BulkDashboard({
     }
   }, []);
 
+  const handleStageConsignmentRef = useRef(handleStageConsignment);
+  useEffect(() => {
+    handleStageConsignmentRef.current = handleStageConsignment;
+  }, [handleStageConsignment]);
+
+  const isAutoNextEnabledRef = useRef(isAutoNextEnabled);
+  useEffect(() => {
+    isAutoNextEnabledRef.current = isAutoNextEnabled;
+  }, [isAutoNextEnabled]);
+
+  const isAutoZoomFocusEnabledRef = useRef(isAutoZoomFocusEnabled);
+  useEffect(() => {
+    isAutoZoomFocusEnabledRef.current = isAutoZoomFocusEnabled;
+  }, [isAutoZoomFocusEnabled]);
+
+  const intakeCourierRef = useRef(intakeCourier);
+  useEffect(() => {
+    intakeCourierRef.current = intakeCourier;
+  }, [intakeCourier]);
+
   // Real-time Camera Stream + Strictly Guide-Only ROI Cropping + Auto-Zoom/Focus Damaged Label Enhancer
   useEffect(() => {
     if (!isCameraActive) return;
@@ -1746,13 +1768,15 @@ export function BulkDashboard({
         if (pendingAwb) {
           // Complete Step 2: Fill customer details for pendingAwb, stage consignment, and auto-reset to Step 1 for next AWB!
           const pendingCourier = customerQrScanStepRef.current.pendingCourierId;
-          setCustomerQrScanStep({
-            step: "awaiting_awb",
+          const resetStep = {
+            step: "awaiting_awb" as const,
             pendingAwb: "",
             pendingCourierId: "",
             pendingCourierName: "",
-          });
-          handleStageConsignment(
+          };
+          customerQrScanStepRef.current = resetStep;
+          setCustomerQrScanStep(resetStep);
+          handleStageConsignmentRef.current(
             pendingAwb,
             pendingCourier || undefined,
             customerQr.data.customerName,
@@ -1765,7 +1789,7 @@ export function BulkDashboard({
           );
           setCameraScanSuccess({
             code: `${pendingAwb} • ${customerQr.data.customerName}`,
-            carrier: `PIN ${customerQr.data.pincode} • ${customerQr.data.itemCode}`,
+            carrier: `PIN ${customerQr.data.pincode} • ${customerQr.data.itemCode} • Next Ready`,
           });
         } else {
           // Fill customer details into form
@@ -1787,8 +1811,25 @@ export function BulkDashboard({
         return true;
       }
 
+      // While waiting for Step 2 (Customer Mini QR), ignore non-Customer-QR reads (such as the 1D barcode on the same label!)
+      if (
+        isScanCustomerQrEnabledRef.current &&
+        customerQrScanStepRef.current.step === "awaiting_customer_qr"
+      ) {
+        return false;
+      }
+
+      // Reject 1D motion-blur / edge misreads containing non-alphanumeric symbol noise (e.g. "E%8,W%-]/IN")
+      if (
+        !/^https?:\/\//i.test(trimmedRaw) &&
+        !trimmedRaw.startsWith("{") &&
+        (/[^\w\s-]/i.test(trimmedRaw) || trimmedRaw.length < 6)
+      ) {
+        return false;
+      }
+
       const code = extractCleanScannedCode(trimmedRaw);
-      if (!code || code.length < 4) return false;
+      if (!code || code.length < 6) return false;
 
       if (
         lastScannedRef.current.code === code &&
@@ -1824,14 +1865,17 @@ export function BulkDashboard({
         if (detectedCarrier) {
           setIntakeCourier(detectedCarrier.id);
         }
-        setCustomerQrScanStep({
-          step: "awaiting_customer_qr",
+        const nextStep = {
+          step: "awaiting_customer_qr" as const,
           pendingAwb: cleanAwb,
-          pendingCourierId: detectedCarrier?.id || intakeCourier,
+          pendingCourierId: detectedCarrier?.id || intakeCourierRef.current,
           pendingCourierName:
             detectedCarrier?.shortName || detectedCarrier?.name || "Auto-Detected",
-        });
+        };
+        customerQrScanStepRef.current = nextStep;
+        setCustomerQrScanStep(nextStep);
         if (cameraGuideModeRef.current === "barcode") {
+          cameraGuideModeRef.current = "both";
           setCameraGuideMode("both");
         }
         playChime(true);
@@ -1846,10 +1890,18 @@ export function BulkDashboard({
         return true;
       }
 
-      if (!isAutoNextEnabled) {
+      if (!isAutoNextEnabledRef.current) {
         setIntakeAwb(cleanAwb);
       }
-      handleStageConsignment(cleanAwb, detectedCarrier?.id, undefined, undefined, undefined, undefined, "camera");
+      handleStageConsignmentRef.current(
+        cleanAwb,
+        detectedCarrier?.id,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        "camera"
+      );
 
       setCameraScanSuccess({
         code: cleanAwb,
@@ -1862,10 +1914,19 @@ export function BulkDashboard({
       return true;
     };
 
-    const tryDecodeROI = async (canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D): Promise<boolean> => {
+    const tryDecodeROI = async (
+      canvas: HTMLCanvasElement,
+      ctx: CanvasRenderingContext2D,
+      overrideMode?: "barcode" | "qr" | "both"
+    ): Promise<boolean> => {
       const w = canvas.width;
       const h = canvas.height;
-      const activeMode = cameraGuideModeRef.current;
+      const isAwaitingCustomerQr =
+        isScanCustomerQrEnabledRef.current &&
+        customerQrScanStepRef.current.step === "awaiting_customer_qr";
+      const activeMode = isAwaitingCustomerQr
+        ? "qr"
+        : overrideMode || cameraGuideModeRef.current;
 
       if (nativeDetector) {
         try {
@@ -1875,7 +1936,11 @@ export function BulkDashboard({
               if (!item.rawValue) continue;
               const fmt = (item.format || "").toLowerCase();
               const is2D =
-                fmt === "qr_code" || fmt === "data_matrix" || fmt === "pdf417" || fmt === "aztec";
+                fmt === "qr_code" ||
+                fmt === "data_matrix" ||
+                fmt === "pdf417" ||
+                fmt === "aztec" ||
+                item.rawValue.trim().toUpperCase().startsWith("TFQR1:");
               if (activeMode === "barcode" && is2D) continue;
               if (activeMode === "qr" && !is2D && fmt !== "") continue;
               if (handleDetectedValue(item.rawValue)) return true;
@@ -1937,6 +2002,14 @@ export function BulkDashboard({
         let stream = cameraStreamRef.current;
         if (!stream || !stream.active) {
           const constraintAttempts: MediaStreamConstraints[] = [
+            {
+              video: {
+                facingMode: { ideal: "environment" },
+                width: { ideal: 1920 },
+                height: { ideal: 1080 },
+              },
+              audio: false,
+            },
             {
               video: {
                 facingMode: { ideal: "environment" },
@@ -2009,7 +2082,7 @@ export function BulkDashboard({
           scanCanvasRef.current = document.createElement("canvas");
         }
 
-        // Continuous frame decoding every 160ms with Guide ROI + Full-frame fallback
+        // Continuous frame decoding every 135ms with Guide ROI + Macro Center QR Crop + Full-frame fallback
         scanIntervalId = setInterval(async () => {
           if (isCancelled || !videoRef.current || !scanCanvasRef.current) return;
           const video = videoRef.current;
@@ -2044,8 +2117,8 @@ export function BulkDashboard({
           const cropY = Math.max(0, Math.floor((vh - cropH) / 2));
 
           const canvas = scanCanvasRef.current;
-          const maxTargetDim = 720;
-          const scale = Math.min(1.5, maxTargetDim / Math.max(cropW, cropH));
+          const maxTargetDim = 840;
+          const scale = Math.min(1.6, maxTargetDim / Math.max(cropW, cropH));
           const w = Math.max(64, Math.floor(cropW * scale));
           const h = Math.max(64, Math.floor(cropH * scale));
 
@@ -2055,13 +2128,28 @@ export function BulkDashboard({
           const ctx = canvas.getContext("2d", { willReadFrequently: true });
           if (!ctx) return;
 
-          // Draw the cropped Guide Box region
-          ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, w, h);
-
           // Pass 1: Standard decode on Guide ROI
+          ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, w, h);
           if (await tryDecodeROI(canvas, ctx)) return;
 
-          // Pass 2: Analyze Guide ROI for low-quality / wrinkled / damaged label & apply enhancement
+          // Pass 2: Macro Center Crop (42%x42% at 1.35x upscale) for Small Customer Mini QRs!
+          if (activeMode !== "barcode") {
+            const minSide = Math.min(vw, vh);
+            const macroSide = Math.max(80, Math.floor((minSide * 0.44) / effectiveDigitalZoom));
+            const macroX = Math.max(0, Math.floor((vw - macroSide) / 2));
+            const macroY = Math.max(0, Math.floor((vh - macroSide) / 2));
+            const macroTarget = Math.min(640, Math.max(320, Math.floor(macroSide * 1.35)));
+            if (canvas.width !== macroTarget) canvas.width = macroTarget;
+            if (canvas.height !== macroTarget) canvas.height = macroTarget;
+            ctx.drawImage(video, macroX, macroY, macroSide, macroSide, 0, 0, macroTarget, macroTarget);
+            if (await tryDecodeROI(canvas, ctx, "qr")) return;
+          }
+
+          // Restore Guide ROI for Pass 3 contrast & sharpness analysis
+          if (canvas.width !== w) canvas.width = w;
+          if (canvas.height !== h) canvas.height = h;
+          ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, w, h);
+
           const imgData = ctx.getImageData(0, 0, w, h);
           const data = imgData.data;
           const pixelCount = w * h;
@@ -2127,7 +2215,7 @@ export function BulkDashboard({
 
             if (await tryDecodeROI(canvas, ctx)) return;
 
-            if (isAutoZoomFocusEnabled && isLowQuality) {
+            if (isAutoZoomFocusEnabledRef.current && isLowQuality) {
               lowQualityStreakRef.current += 1;
               setIsEnhancingDamagedLabel(true);
               if (lowQualityStreakRef.current >= 3) {
@@ -2148,21 +2236,21 @@ export function BulkDashboard({
             emptyFrameStreakRef.current += 1;
             if (emptyFrameStreakRef.current >= 8) {
               setIsEnhancingDamagedLabel(false);
-              if (isAutoZoomFocusEnabled && currentZoomRef.current > 1.05) {
+              if (isAutoZoomFocusEnabledRef.current && currentZoomRef.current > 1.05) {
                 applyInlineCameraZoomAndFocus(1.0);
               }
             }
           }
 
-          // Pass 3: Full-frame fallback pass if barcode/QR is slightly outside the inner crop
-          const fullScale = Math.min(1, 640 / Math.max(vw, vh));
+          // Pass 4: Full-frame fallback pass if barcode/QR is slightly outside the inner crop
+          const fullScale = Math.min(1, 720 / Math.max(vw, vh));
           const fullW = Math.max(120, Math.floor(vw * fullScale));
           const fullH = Math.max(120, Math.floor(vh * fullScale));
           if (canvas.width !== fullW) canvas.width = fullW;
           if (canvas.height !== fullH) canvas.height = fullH;
           ctx.drawImage(video, 0, 0, vw, vh, 0, 0, fullW, fullH);
           await tryDecodeROI(canvas, ctx);
-        }, 160);
+        }, 135);
       } catch {
         if (!isCancelled) {
           setCameraError("Camera permission not granted or camera unavailable on this device.");
@@ -2178,12 +2266,8 @@ export function BulkDashboard({
     };
   }, [
     isCameraActive,
-    isAutoNextEnabled,
-    isAutoZoomFocusEnabled,
-    intakeCourier,
     playChime,
     extractCleanScannedCode,
-    handleStageConsignment,
     applyInlineCameraZoomAndFocus,
   ]);
 

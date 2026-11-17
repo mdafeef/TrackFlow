@@ -2,7 +2,6 @@
 
 import React, { useState, useEffect, useRef } from "react";
 import Link from "next/link";
-import { AnimatePresence, motion } from "motion/react";
 import {
   PackageSearch,
   Moon,
@@ -10,16 +9,11 @@ import {
   BookmarkCheck,
   Search,
   X,
-  Truck,
-  Sparkles,
-  HelpCircle,
   LogIn,
-  LogOut,
   LayoutDashboard,
   PanelLeftOpen,
 } from "lucide-react";
 import { AuthUserProfile } from "@/app/api/auth/route";
-import { PWAInstallButton } from "@/components/PWAInstallButton";
 import { PublicTabId } from "@/lib/tabRoutes";
 
 interface NavbarProps {
@@ -47,13 +41,10 @@ export function Navbar({
   onChangeView,
   authUser,
   onOpenLogin,
-  onLogout,
 }: NavbarProps) {
-  const [isMobileNavOpen, setIsMobileNavOpen] = useState(false);
   const [isWorkspaceDrawerOpen, setIsWorkspaceDrawerOpen] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
 
-  const mobileMenuRef = useRef<HTMLDivElement | null>(null);
   const hamburgerBtnRef = useRef<HTMLButtonElement | null>(null);
 
   // Sync workspace mobile menu & sidebar collapse state via custom events from BulkDashboard
@@ -72,41 +63,13 @@ export function Navbar({
     return () => window.removeEventListener("trackflow:workspace-state", handleWorkspaceState);
   }, []);
 
-  // Close Single Tracker mobile menu when clicking anywhere outside (including header)
-  useEffect(() => {
-    if (!isMobileNavOpen) return;
-    const handlePointerDown = (e: MouseEvent | TouchEvent) => {
-      const target = e.target as Node | null;
-      if (!target) return;
-      if (mobileMenuRef.current?.contains(target)) return;
-      if (hamburgerBtnRef.current?.contains(target)) return;
-      setIsMobileNavOpen(false);
-    };
-    document.addEventListener("mousedown", handlePointerDown);
-    document.addEventListener("touchstart", handlePointerDown);
-    return () => {
-      document.removeEventListener("mousedown", handlePointerDown);
-      document.removeEventListener("touchstart", handlePointerDown);
-    };
-  }, [isMobileNavOpen]);
-
-  const handleMobileTabSelect = (tab: PublicTabId) => {
-    setIsMobileNavOpen(false);
-    onSelectPublicTab(tab);
-  };
-
   const handleMobileMenuClick = () => {
-    if (activeView === "bulk") {
-      setIsMobileNavOpen(false);
-      if (typeof window !== "undefined") {
-        window.dispatchEvent(new CustomEvent("trackflow:toggle-workspace-drawer"));
-      }
-      return;
+    if (activeView === "bulk" && typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("trackflow:toggle-workspace-drawer"));
     }
-    setIsMobileNavOpen((prev) => !prev);
   };
 
-  const isMenuOpen = activeView === "bulk" ? isWorkspaceDrawerOpen : isMobileNavOpen;
+  const isMenuOpen = isWorkspaceDrawerOpen;
   const isWorkspaceActive = activeView === "bulk" && !!authUser;
 
   return (
@@ -143,7 +106,6 @@ export function Navbar({
               } else {
                 onSelectPublicTab("track");
               }
-              setIsMobileNavOpen(false);
             }}
             className={`flex items-center gap-2.5 font-extrabold tracking-tight text-slate-900 dark:text-white whitespace-nowrap shrink-0 group ${
               isWorkspaceActive ? "md:hidden" : ""
@@ -256,7 +218,6 @@ export function Navbar({
               <button
                 type="button"
                 onClick={() => {
-                  setIsMobileNavOpen(false);
                   if (onOpenLogin) onOpenLogin();
                 }}
                 className="inline-flex h-8 sm:h-9 items-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-2.5 sm:px-3.5 py-1.5 text-xs font-bold text-white shadow-xs whitespace-nowrap shrink-0 transition-colors cursor-pointer"
@@ -268,7 +229,6 @@ export function Navbar({
               <button
                 type="button"
                 onClick={() => {
-                  setIsMobileNavOpen(false);
                   onChangeView("bulk");
                 }}
                 className="inline-flex h-8 sm:h-9 items-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-2.5 sm:px-3.5 py-1.5 text-xs font-bold text-white shadow-xs transition-colors cursor-pointer shrink-0"
@@ -280,127 +240,34 @@ export function Navbar({
             )
           )}
 
-          {/* Mobile Hamburger Menu Button */}
-          <button
-            ref={hamburgerBtnRef}
-            type="button"
-            id="trackflow-hamburger-btn"
-            onClick={handleMobileMenuClick}
-            aria-label="Toggle menu"
-            aria-expanded={isMenuOpen}
-            className={`flex md:hidden h-8 w-8 sm:h-9 sm:w-9 items-center justify-center rounded-xl border transition-all cursor-pointer shrink-0 ${
-              isMenuOpen
-                ? "border-indigo-500 bg-indigo-600 text-white shadow-xs"
-                : "border-slate-200/90 bg-white text-slate-700 hover:border-indigo-300 hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
-            }`}
-          >
-            {isMenuOpen ? (
-              <X className="h-4 w-4" />
-            ) : (
-              <div className="flex flex-col items-end justify-center gap-1 w-4">
-                <span className="h-0.5 w-4 rounded-full bg-current transition-all" />
-                <span className="h-0.5 w-3 rounded-full bg-current transition-all" />
-                <span className="h-0.5 w-3.5 rounded-full bg-current transition-all" />
-              </div>
-            )}
-          </button>
-        </div>
-      </div>
-
-      {/* Animated Floating Top-Right Menu Popover (Single Tracker Mode — Zero Fade, Click Anywhere Closes) */}
-      <AnimatePresence>
-        {activeView === "single" && isMobileNavOpen && (
-          <motion.div
-            ref={mobileMenuRef}
-            initial={{ opacity: 0, scale: 0.92, y: -10 }}
-            animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.94, y: -8 }}
-            transition={{ type: "spring", stiffness: 420, damping: 28 }}
-            style={{ transformOrigin: "top right" }}
-            className="fixed top-15 right-3 sm:right-5 z-50 md:hidden w-64 rounded-2xl border border-slate-200/90 bg-white dark:border-slate-800 dark:bg-slate-900 p-2.5 shadow-2xl"
-          >
-            <div className="space-y-1">
-              {(
-                [
-                  { id: "track", label: "Track Shipment", icon: Search },
-                  { id: "carriers", label: "Supported Carriers", icon: Truck },
-                  { id: "features", label: "Platform Features", icon: Sparkles },
-                  { id: "faq", label: "Help & FAQ", icon: HelpCircle },
-                ] as const
-              ).map((navItem) => {
-                const Icon = navItem.icon;
-                const isActive = publicTab === navItem.id;
-                return (
-                  <button
-                    key={navItem.id}
-                    type="button"
-                    onClick={() => handleMobileTabSelect(navItem.id)}
-                    className={`w-full flex items-center gap-2.5 rounded-xl px-3 py-2 text-xs font-bold transition-colors cursor-pointer ${
-                      isActive
-                        ? "bg-indigo-600 text-white shadow-2xs"
-                        : "text-slate-700 hover:bg-indigo-50/80 hover:text-indigo-600 dark:text-slate-200 dark:hover:bg-slate-800/80 dark:hover:text-indigo-400"
-                    }`}
-                  >
-                    <Icon
-                      className={`h-3.5 w-3.5 shrink-0 ${
-                        isActive ? "text-white" : "text-indigo-500"
-                      }`}
-                    />
-                    <span>{navItem.label}</span>
-                  </button>
-                );
-              })}
-              <PWAInstallButton
-                variant="menu"
-                onAfterClick={() => setIsMobileNavOpen(false)}
-              />
-            </div>
-
-            <div className="mt-2 pt-2 border-t border-slate-100 dark:border-slate-800 flex flex-col gap-1.5">
-              {!authUser ? (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setIsMobileNavOpen(false);
-                    if (onOpenLogin) onOpenLogin();
-                  }}
-                  className="w-full flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-3 py-2 text-xs font-bold text-white shadow-2xs transition-colors cursor-pointer"
-                >
-                  <LogIn className="h-3.5 w-3.5" />
-                  <span>Sign In</span>
-                </button>
+          {/* Mobile Hamburger Menu Button — Only needed in Bulk Workspace view */}
+          {activeView === "bulk" && (
+            <button
+              ref={hamburgerBtnRef}
+              type="button"
+              id="trackflow-hamburger-btn"
+              onClick={handleMobileMenuClick}
+              aria-label="Toggle menu"
+              aria-expanded={isMenuOpen}
+              className={`flex md:hidden h-8 w-8 sm:h-9 sm:w-9 items-center justify-center rounded-xl border transition-all cursor-pointer shrink-0 ${
+                isMenuOpen
+                  ? "border-indigo-500 bg-indigo-600 text-white shadow-xs"
+                  : "border-slate-200/90 bg-white text-slate-700 hover:border-indigo-300 hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+              }`}
+            >
+              {isMenuOpen ? (
+                <X className="h-4 w-4" />
               ) : (
-                <div className="flex items-center justify-between gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setIsMobileNavOpen(false);
-                      onChangeView("bulk");
-                    }}
-                    className="flex-1 flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-3 py-2 text-xs font-bold text-white shadow-2xs truncate cursor-pointer"
-                  >
-                    <LayoutDashboard className="h-3.5 w-3.5 shrink-0" />
-                    <span className="truncate">Dashboard</span>
-                  </button>
-                  {onLogout && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setIsMobileNavOpen(false);
-                        onLogout();
-                      }}
-                      className="rounded-xl border border-rose-200 bg-rose-50 p-2 text-rose-600 dark:border-rose-900/60 dark:bg-rose-950/60 dark:text-rose-300 cursor-pointer shrink-0"
-                      title="Sign Out"
-                    >
-                      <LogOut className="h-3.5 w-3.5" />
-                    </button>
-                  )}
+                <div className="flex flex-col items-end justify-center gap-1 w-4">
+                  <span className="h-0.5 w-4 rounded-full bg-current transition-all" />
+                  <span className="h-0.5 w-3 rounded-full bg-current transition-all" />
+                  <span className="h-0.5 w-3.5 rounded-full bg-current transition-all" />
                 </div>
               )}
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+            </button>
+          )}
+        </div>
+      </div>
     </header>
   );
 }

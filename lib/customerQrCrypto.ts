@@ -403,7 +403,7 @@ export function generateMiniQRSvgMatrix(text: string): {
   try {
     const qr = QRCodeEncoder.encode(
       text || "TFQR1:EMPTY",
-      QRCodeDecoderErrorCorrectionLevel.M
+      QRCodeDecoderErrorCorrectionLevel.L
     );
     const matrix = qr.getMatrix();
     const width = matrix.getWidth();
