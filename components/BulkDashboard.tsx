@@ -66,6 +66,7 @@ import {
   UserCheck,
   AlertTriangle,
   LogOut,
+  SwitchCamera,
 } from "lucide-react";
 import { AuthUserProfile } from "@/app/api/auth/route";
 import * as XLSX from "xlsx";
@@ -95,6 +96,15 @@ import {
   decryptCustomerMiniQR,
   strip91FromPhone,
 } from "@/lib/customerQrCrypto";
+import {
+  openNormalPhotoCameraStream,
+  applyContinuousFocusToTrack,
+  triggerTapToFocusOnTrack,
+  inspectTrackFocusAndZoom,
+  PREFERRED_CAMERA_STORAGE_KEY,
+  SHOW_CAMERA_SWITCHER_OPTION,
+  type RearCameraOption,
+} from "@/lib/cameraDeviceSelector";
 
 export interface BulkShipment {
   id: string;
@@ -706,6 +716,44 @@ export function BulkDashboard({
   const scanCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const lastScannedRef = useRef<{ code: string; timestamp: number }>({ code: "", timestamp: 0 });
   const scanSuccessTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Rear Camera Lens Discovery & Switcher state for inline workspace camera
+  const [rearCameras, setRearCameras] = useState<RearCameraOption[]>([]);
+  const [activeCameraDeviceId, setActiveCameraDeviceId] = useState<string>("");
+  const targetCameraDeviceIdRef = useRef<string | null>(null);
+  const [inlineCameraRetryTick, setInlineCameraRetryTick] = useState<number>(0);
+
+  const handleSwitchInlineRearCamera = useCallback(() => {
+    if (rearCameras.length <= 1) return;
+    const currentIdx = rearCameras.findIndex(
+      (c) => c.deviceId === activeCameraDeviceId
+    );
+    const nextIdx = currentIdx >= 0 ? (currentIdx + 1) % rearCameras.length : 0;
+    const nextCam = rearCameras[nextIdx];
+    if (!nextCam) return;
+
+    targetCameraDeviceIdRef.current = nextCam.deviceId;
+    setActiveCameraDeviceId(nextCam.deviceId);
+    try {
+      localStorage.setItem(PREFERRED_CAMERA_STORAGE_KEY, nextCam.deviceId);
+    } catch {}
+
+    if (cameraStreamRef.current) {
+      cameraStreamRef.current.getTracks().forEach((t) => t.stop());
+      cameraStreamRef.current = null;
+    }
+    setCameraZoomLevel(1.0);
+    currentZoomRef.current = 1.0;
+    setCameraError(null);
+    setInlineCameraRetryTick((prev) => prev + 1);
+  }, [rearCameras, activeCameraDeviceId]);
+
+  const handleInlineViewfinderTapToFocus = useCallback(() => {
+    const stream = cameraStreamRef.current;
+    if (!stream) return;
+    const [videoTrack] = stream.getVideoTracks();
+    triggerTapToFocusOnTrack(videoTrack);
+  }, []);
 
   // Guaranteed auto-clear for scan success green overlay & border after 750ms
   useEffect(() => {
@@ -2003,45 +2051,14 @@ export function BulkDashboard({
 
         let stream = cameraStreamRef.current;
         if (!stream || !stream.active) {
-          const constraintAttempts: MediaStreamConstraints[] = [
-            {
-              video: {
-                facingMode: { ideal: "environment" },
-                width: { ideal: 1920 },
-                height: { ideal: 1080 },
-              },
-              audio: false,
-            },
-            {
-              video: {
-                facingMode: { ideal: "environment" },
-                width: { ideal: 1280 },
-                height: { ideal: 720 },
-              },
-              audio: false,
-            },
-            {
-              video: { facingMode: "environment" },
-              audio: false,
-            },
-            {
-              video: true,
-              audio: false,
-            },
-          ];
-
-          let lastErr: unknown = null;
-          for (const constraints of constraintAttempts) {
-            try {
-              stream = await navigator.mediaDevices.getUserMedia(constraints);
-              if (stream) break;
-            } catch (err) {
-              lastErr = err;
-            }
-          }
-
-          if (!stream) {
-            throw lastErr || new Error("Unable to start camera stream");
+          const opened = await openNormalPhotoCameraStream(
+            targetCameraDeviceIdRef.current
+          );
+          stream = opened.stream;
+          if (!isCancelled) {
+            setRearCameras(opened.rearCameras);
+            setActiveCameraDeviceId(opened.activeDeviceId);
+            targetCameraDeviceIdRef.current = opened.activeDeviceId;
           }
         }
 
@@ -2053,25 +2070,18 @@ export function BulkDashboard({
         cameraStreamRef.current = stream;
 
         const [videoTrack] = stream.getVideoTracks();
-        if (videoTrack && typeof videoTrack.getCapabilities === "function") {
-          try {
-            const caps = videoTrack.getCapabilities() as Record<string, unknown>;
-            if (caps.zoom && typeof caps.zoom === "object") {
-              const z = caps.zoom as { min?: number; max?: number };
-              hwZoomSupportedRef.current = {
-                supported: true,
-                min: z.min ?? 1,
-                max: Math.min(z.max ?? 3, 3),
-              };
-            }
-            if (Array.isArray(caps.focusMode) && caps.focusMode.includes("continuous")) {
-              videoTrack
-                .applyConstraints({
-                  advanced: [{ focusMode: "continuous" } as unknown as MediaTrackConstraintSet],
-                })
-                .catch(() => {});
-            }
-          } catch {}
+        if (videoTrack) {
+          const capsInfo = inspectTrackFocusAndZoom(videoTrack);
+          if (capsInfo.hasZoom) {
+            hwZoomSupportedRef.current = {
+              supported: true,
+              min: capsInfo.minZoom,
+              max: capsInfo.maxZoom,
+            };
+          } else {
+            hwZoomSupportedRef.current = { supported: false, min: 1, max: 1 };
+          }
+          await applyContinuousFocusToTrack(videoTrack, currentZoomRef.current);
         }
 
         if (videoRef.current) {
@@ -2271,6 +2281,7 @@ export function BulkDashboard({
     playChime,
     extractCleanScannedCode,
     applyInlineCameraZoomAndFocus,
+    inlineCameraRetryTick,
   ]);
 
   // Force discard all staged / typed intake data and close modal
@@ -7338,6 +7349,30 @@ export function BulkDashboard({
                         <ZoomIn className="h-3.5 w-3.5" />
                       </button>
                     </div>
+
+                    {/* Rear Camera Lens Switcher */}
+                    {SHOW_CAMERA_SWITCHER_OPTION && rearCameras.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={handleSwitchInlineRearCamera}
+                        disabled={rearCameras.length <= 1}
+                        className="inline-flex items-center gap-1.5 rounded-xl bg-slate-950 border border-slate-800 hover:border-indigo-500/60 px-2.5 py-1 text-[11px] font-bold text-slate-200 disabled:opacity-75 cursor-pointer transition-colors"
+                        title="Switch rear camera lens (Normal 1x Photo Camera selected by default)"
+                      >
+                        <SwitchCamera className="h-3.5 w-3.5 text-indigo-400 shrink-0" />
+                        <span className="font-mono tabular-nums">
+                          {(() => {
+                            const idx = rearCameras.findIndex(
+                              (c) => c.deviceId === activeCameraDeviceId
+                            );
+                            const activeCam = idx >= 0 ? rearCameras[idx] : rearCameras[0];
+                            return rearCameras.length > 1
+                              ? `Cam ${idx >= 0 ? idx + 1 : 1}/${rearCameras.length} • ${activeCam.shortLabel.split(" ")[0]}`
+                              : activeCam.shortLabel;
+                          })()}
+                        </span>
+                      </button>
+                    )}
                   </div>
 
                   <div className="flex flex-wrap items-center gap-2.5">
@@ -7511,7 +7546,9 @@ export function BulkDashboard({
                   )}
 
                   <div
-                    className={`relative flex-1 min-h-[260px] sm:min-h-[340px] rounded-2xl bg-black overflow-hidden flex items-center justify-center border-2 transition-colors duration-200 ${
+                    onClick={handleInlineViewfinderTapToFocus}
+                    title="Tap camera view to re-focus"
+                    className={`relative flex-1 min-h-[260px] sm:min-h-[340px] rounded-2xl bg-black overflow-hidden flex items-center justify-center border-2 transition-colors duration-200 cursor-pointer ${
                       cameraScanSuccess
                         ? "border-emerald-500 shadow-[0_0_25px_rgba(16,185,129,0.45)]"
                         : isEnhancingDamagedLabel

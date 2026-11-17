@@ -15,6 +15,7 @@ import {
   ScanLine,
   AlertTriangle,
   QrCode,
+  SwitchCamera,
 } from "lucide-react";
 import {
   MultiFormatReader,
@@ -32,6 +33,15 @@ import {
   identifyAndValidateConsignment,
 } from "@/lib/couriers";
 import { decryptCustomerMiniQR } from "@/lib/customerQrCrypto";
+import {
+  openNormalPhotoCameraStream,
+  applyContinuousFocusToTrack,
+  triggerTapToFocusOnTrack,
+  inspectTrackFocusAndZoom,
+  PREFERRED_CAMERA_STORAGE_KEY,
+  SHOW_CAMERA_SWITCHER_OPTION,
+  type RearCameraOption,
+} from "@/lib/cameraDeviceSelector";
 import type { BulkShipment } from "@/components/BulkDashboard";
 
 const STAGED_STORAGE_KEY = "trackflow_staged_consignments";
@@ -169,6 +179,14 @@ function CameraScanInner() {
     min: 1,
     max: 1,
   });
+
+  // Rear Camera Lens Discovery & Switcher state (Defaults to Normal 1x Photo Camera)
+  const [rearCameras, setRearCameras] = useState<RearCameraOption[]>([]);
+  const [activeCameraDeviceId, setActiveCameraDeviceId] = useState<string>("");
+  const targetCameraDeviceIdRef = useRef<string | null>(null);
+  const [focusTapPoint, setFocusTapPoint] = useState<{ x: number; y: number } | null>(
+    null
+  );
 
   // Custom dropdown state for scanned queue strip
   const [queueOpenDropdown, setQueueOpenDropdown] = useState<{
@@ -421,6 +439,49 @@ function CameraScanInner() {
       audioCtxRef.current = null;
     }
   }, []);
+
+  // Cycle through available rear cameras to test/confirm Normal 1x Photo Camera
+  const handleSwitchRearCamera = useCallback(() => {
+    if (rearCameras.length <= 1) return;
+    const currentIdx = rearCameras.findIndex(
+      (c) => c.deviceId === activeCameraDeviceId
+    );
+    const nextIdx = currentIdx >= 0 ? (currentIdx + 1) % rearCameras.length : 0;
+    const nextCam = rearCameras[nextIdx];
+    if (!nextCam) return;
+
+    targetCameraDeviceIdRef.current = nextCam.deviceId;
+    setActiveCameraDeviceId(nextCam.deviceId);
+    try {
+      localStorage.setItem(PREFERRED_CAMERA_STORAGE_KEY, nextCam.deviceId);
+    } catch {}
+
+    if (cameraStreamRef.current) {
+      cameraStreamRef.current.getTracks().forEach((t) => t.stop());
+      cameraStreamRef.current = null;
+    }
+    setCameraZoomLevel(1.0);
+    zoomLevelRef.current = 1.0;
+    setCameraError(null);
+    setCameraRetryTick((prev) => prev + 1);
+  }, [rearCameras, activeCameraDeviceId]);
+
+  // Tap-to-Focus on video viewfinder
+  const handleViewfinderTapToFocus = useCallback(
+    (e: React.MouseEvent<HTMLDivElement>) => {
+      const rect = e.currentTarget.getBoundingClientRect();
+      const x = Math.round(e.clientX - rect.left);
+      const y = Math.round(e.clientY - rect.top);
+      setFocusTapPoint({ x, y });
+      setTimeout(() => setFocusTapPoint(null), 650);
+
+      const stream = cameraStreamRef.current;
+      if (!stream) return;
+      const [videoTrack] = stream.getVideoTracks();
+      triggerTapToFocusOnTrack(videoTrack);
+    },
+    []
+  );
 
   // Reusable AudioContext beep feedback on scan (never exhausts browser AudioContext limit)
   const playScanBeep = useCallback((isSuccess: boolean = true) => {
@@ -1198,45 +1259,14 @@ function CameraScanInner() {
 
         let stream = cameraStreamRef.current;
         if (!stream || !stream.active) {
-          const constraintAttempts: MediaStreamConstraints[] = [
-            {
-              video: {
-                facingMode: { ideal: "environment" },
-                width: { ideal: 1920 },
-                height: { ideal: 1080 },
-              },
-              audio: false,
-            },
-            {
-              video: {
-                facingMode: { ideal: "environment" },
-                width: { ideal: 1280 },
-                height: { ideal: 720 },
-              },
-              audio: false,
-            },
-            {
-              video: { facingMode: "environment" },
-              audio: false,
-            },
-            {
-              video: true,
-              audio: false,
-            },
-          ];
-
-          let lastErr: unknown = null;
-          for (const constraints of constraintAttempts) {
-            try {
-              stream = await navigator.mediaDevices.getUserMedia(constraints);
-              if (stream) break;
-            } catch (err) {
-              lastErr = err;
-            }
-          }
-
-          if (!stream) {
-            throw lastErr || new Error("Unable to start camera stream");
+          const opened = await openNormalPhotoCameraStream(
+            targetCameraDeviceIdRef.current
+          );
+          stream = opened.stream;
+          if (!isCancelled) {
+            setRearCameras(opened.rearCameras);
+            setActiveCameraDeviceId(opened.activeDeviceId);
+            targetCameraDeviceIdRef.current = opened.activeDeviceId;
           }
         }
 
@@ -1248,28 +1278,20 @@ function CameraScanInner() {
         cameraStreamRef.current = stream;
 
         const [videoTrack] = stream.getVideoTracks();
-        if (videoTrack && typeof videoTrack.getCapabilities === "function") {
-          try {
-            const caps = videoTrack.getCapabilities() as Record<string, unknown>;
-            if (caps.zoom && typeof caps.zoom === "object") {
-              const z = caps.zoom as { min?: number; max?: number };
-              hwZoomSupportedRef.current = {
-                supported: true,
-                min: z.min ?? 1,
-                max: Math.min(z.max ?? 3, 3),
-              };
-              setIsHwZoomSupported(true);
-            }
-            if (Array.isArray(caps.focusMode) && caps.focusMode.includes("continuous")) {
-              videoTrack
-                .applyConstraints({
-                  advanced: [{ focusMode: "continuous" } as unknown as MediaTrackConstraintSet],
-                })
-                .catch(() => {});
-            }
-          } catch {
-            // ignore
+        if (videoTrack) {
+          const capsInfo = inspectTrackFocusAndZoom(videoTrack);
+          if (capsInfo.hasZoom) {
+            hwZoomSupportedRef.current = {
+              supported: true,
+              min: capsInfo.minZoom,
+              max: capsInfo.maxZoom,
+            };
+            setIsHwZoomSupported(true);
+          } else {
+            hwZoomSupportedRef.current = { supported: false, min: 1, max: 1 };
+            setIsHwZoomSupported(false);
           }
+          await applyContinuousFocusToTrack(videoTrack, zoomLevelRef.current);
         }
 
         if (videoRef.current) {
@@ -1561,6 +1583,30 @@ function CameraScanInner() {
             </button>
           </div>
 
+          {/* Rear Camera Lens Switcher (Defaults to Normal 1x Photo Camera; allows testing/switching across rear lenses) */}
+          {SHOW_CAMERA_SWITCHER_OPTION && rearCameras.length > 0 && (
+            <button
+              type="button"
+              onClick={handleSwitchRearCamera}
+              disabled={rearCameras.length <= 1}
+              className="inline-flex items-center gap-1.5 rounded-xl bg-slate-900 border border-slate-800 hover:border-indigo-500/60 px-2.5 py-1.5 text-[11px] font-bold text-slate-200 disabled:opacity-75 cursor-pointer transition-colors"
+              title="Switch rear camera lens (Normal 1x Photo Camera selected by default)"
+            >
+              <SwitchCamera className="h-3.5 w-3.5 text-indigo-400 shrink-0" />
+              <span className="font-mono tabular-nums">
+                {(() => {
+                  const idx = rearCameras.findIndex(
+                    (c) => c.deviceId === activeCameraDeviceId
+                  );
+                  const activeCam = idx >= 0 ? rearCameras[idx] : rearCameras[0];
+                  return rearCameras.length > 1
+                    ? `Cam ${idx >= 0 ? idx + 1 : 1}/${rearCameras.length} • ${activeCam.shortLabel.split(" ")[0]}`
+                    : activeCam.shortLabel;
+                })()}
+              </span>
+            </button>
+          )}
+
           {/* Scan Customer Data QR ON/OFF Toggle */}
           <div
             onClick={toggleScanCustomerQr}
@@ -1700,15 +1746,17 @@ function CameraScanInner() {
             </div>
           )}
 
-          {/* Dedicated Fixed Square Camera Container */}
+          {/* Dedicated Fixed Square Camera Container (Tap anywhere to re-focus) */}
           <div
-            className={`relative aspect-square w-[min(85vw,330px)] sm:w-[370px] rounded-3xl bg-black overflow-hidden flex items-center justify-center border-2 transition-all duration-150 shadow-2xl ${
+            onClick={handleViewfinderTapToFocus}
+            className={`relative aspect-square w-[min(85vw,330px)] sm:w-[370px] rounded-3xl bg-black overflow-hidden flex items-center justify-center border-2 transition-all duration-150 shadow-2xl cursor-pointer ${
               cameraScanSuccess
                 ? "border-emerald-500 shadow-[0_0_28px_rgba(16,185,129,0.4)]"
                 : formatError
                 ? "border-rose-500 shadow-[0_0_28px_rgba(244,63,94,0.45)]"
                 : "border-slate-800"
             }`}
+            title="Tap camera view to re-focus"
           >
             <video
               ref={videoRef}
@@ -1723,6 +1771,16 @@ function CameraScanInner() {
               muted
               autoPlay
             />
+
+            {focusTapPoint && (
+              <div
+                style={{
+                  left: `${focusTapPoint.x}px`,
+                  top: `${focusTapPoint.y}px`,
+                }}
+                className="pointer-events-none absolute z-30 -translate-x-1/2 -translate-y-1/2 h-12 w-12 rounded-full border-2 border-indigo-400 bg-indigo-500/15 animate-ping"
+              />
+            )}
 
             {/* Guide Frame (Strictly scans inside this frame; no text note overlay) */}
             {cameraGuideMode === "barcode" && (
