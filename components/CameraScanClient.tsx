@@ -34,6 +34,7 @@ import {
   openNormalPhotoCameraStream,
   applyContinuousFocusToTrack,
   triggerTapToFocusOnTrack,
+  triggerScanHapticFeedback,
 } from "@/lib/cameraDeviceSelector";
 import type { BulkShipment } from "@/components/BulkDashboard";
 
@@ -564,6 +565,7 @@ function CameraScanInner() {
         setCustomerQrScanStep(nextStepState);
         // Short 320ms cooldown after Step 1 so the user can immediately scan the Customer Mini QR right next to the barcode
         scanCooldownUntilRef.current = Date.now() + 320;
+        triggerScanHapticFeedback(35);
         playScanBeep(true);
         setCameraScanSuccess({
           code: `Step 1 OK: ${cleanNum}`,
@@ -622,6 +624,7 @@ function CameraScanInner() {
       lastScannedRef.current = { code: cleanNum, timestamp: Date.now() };
       scanCooldownUntilRef.current = Date.now() + (isAutoNextEnabledRef.current ? 750 : 1400);
 
+      triggerScanHapticFeedback(effectiveCustomerData ? [30, 45, 40] : 35);
       playScanBeep(true);
       setCameraScanSuccess({
         code: effectiveCustomerData

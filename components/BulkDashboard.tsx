@@ -97,6 +97,7 @@ import {
   openNormalPhotoCameraStream,
   applyContinuousFocusToTrack,
   triggerTapToFocusOnTrack,
+  triggerScanHapticFeedback,
 } from "@/lib/cameraDeviceSelector";
 
 export interface BulkShipment {
@@ -1106,6 +1107,7 @@ export function BulkDashboard({
         return;
       } else {
         setIntakeAwb("");
+        triggerScanHapticFeedback(35);
         playChime(true);
         setRecentStagedCode(`Customer QR Filled (${qrCheck.data.customerName})`);
         setTimeout(() => setRecentStagedCode(null), 3000);
@@ -1241,6 +1243,7 @@ export function BulkDashboard({
     };
 
     setStagedConsignments((prev) => [newStaged, ...prev]);
+    triggerScanHapticFeedback(customerQrDataOverride ? [30, 45, 40] : 35);
     playChime(true);
     setRecentStagedCode(
       effectiveName ? `${cleanNum} • ${effectiveName} (${effectivePin})` : cleanNum
@@ -1349,6 +1352,7 @@ export function BulkDashboard({
         customerQrScanStepRef.current = nextStep;
         setCustomerQrScanStep(nextStep);
         setIntakeAwb("");
+        triggerScanHapticFeedback(35);
         playChime(true);
         return;
       }
@@ -1880,6 +1884,7 @@ export function BulkDashboard({
         };
         customerQrScanStepRef.current = nextStep;
         setCustomerQrScanStep(nextStep);
+        triggerScanHapticFeedback(35);
         playChime(true);
         setCameraScanSuccess({
           code: `Step 1 OK: ${cleanAwb}`,
@@ -5518,87 +5523,6 @@ export function BulkDashboard({
                     ))}
                   </div>
                 </div>
-
-                {/* Sliding Toggle Switches for Scan Customer Data QR, Auto-Next Scan Mode & No Rule */}
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2 border-t border-slate-100 dark:border-slate-800">
-                  <div className="flex items-center justify-between rounded-2xl border border-slate-200 p-3.5 dark:border-slate-800">
-                    <div>
-                      <span className="text-xs font-bold text-slate-800 dark:text-slate-200 block">
-                        2-Step Scan
-                      </span>
-                      <span className="text-[11px] text-slate-500 dark:text-slate-400">
-                        Step 1 Barcode (AWB) → Step 2 Customer QR
-                      </span>
-                    </div>
-                    <button
-                      type="button"
-                      role="switch"
-                      aria-checked={isScanCustomerQrEnabled}
-                      onClick={() => setIsScanCustomerQrEnabled((prev) => !prev)}
-                      className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out ${
-                        isScanCustomerQrEnabled ? "bg-indigo-600" : "bg-slate-300 dark:bg-slate-600"
-                      }`}
-                    >
-                      <span
-                        className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm transition duration-200 ease-in-out ${
-                          isScanCustomerQrEnabled ? "translate-x-5" : "translate-x-0"
-                        }`}
-                      />
-                    </button>
-                  </div>
-
-                  <div className="flex items-center justify-between rounded-2xl border border-slate-200 p-3.5 dark:border-slate-800">
-                    <div>
-                      <span className="text-xs font-bold text-slate-800 dark:text-slate-200 block">
-                        Auto-Next Scan Mode
-                      </span>
-                      <span className="text-[11px] text-slate-500 dark:text-slate-400">
-                        Automatically clear input after staging
-                      </span>
-                    </div>
-                    <button
-                      type="button"
-                      role="switch"
-                      aria-checked={isAutoNextEnabled}
-                      onClick={() => setIsAutoNextEnabled((prev) => !prev)}
-                      className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out ${
-                        isAutoNextEnabled ? "bg-emerald-600" : "bg-slate-300 dark:bg-slate-600"
-                      }`}
-                    >
-                      <span
-                        className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm transition duration-200 ease-in-out ${
-                          isAutoNextEnabled ? "translate-x-5" : "translate-x-0"
-                        }`}
-                      />
-                    </button>
-                  </div>
-
-                  <div className="flex items-center justify-between rounded-2xl border border-slate-200 p-3.5 dark:border-slate-800">
-                    <div>
-                      <span className="text-xs font-bold text-slate-800 dark:text-slate-200 block">
-                        No Rule
-                      </span>
-                      <span className="text-[11px] text-slate-500 dark:text-slate-400">
-                        Allow custom or unrecognized AWB formats
-                      </span>
-                    </div>
-                    <button
-                      type="button"
-                      role="switch"
-                      aria-checked={isPasteAnywayEnabled}
-                      onClick={() => setIsPasteAnywayEnabled((prev) => !prev)}
-                      className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out ${
-                        isPasteAnywayEnabled ? "bg-amber-500" : "bg-slate-300 dark:bg-slate-600"
-                      }`}
-                    >
-                      <span
-                        className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm transition duration-200 ease-in-out ${
-                          isPasteAnywayEnabled ? "translate-x-5" : "translate-x-0"
-                        }`}
-                      />
-                    </button>
-                  </div>
-                </div>
               </div>
 
               {/* ========================================================== */}
@@ -7587,114 +7511,6 @@ export function BulkDashboard({
 
                 {/* Modal Body (Scrollable) */}
                 <div className="overflow-y-auto p-4 sm:p-6 space-y-4 sm:space-y-5 flex-1">
-                  {/* Intake Toolbar: 2-Step Scan, Auto-Next & No Rule Sliding Toggles (No ON/OFF text inside buttons) */}
-                  <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-slate-50 dark:bg-slate-800/60 p-3 sm:p-3.5 border border-slate-200 dark:border-slate-700">
-                    {/* 2-Step Scan Switch (renamed from Scan Customer Data) */}
-                    <label
-                      onClick={() => setIsScanCustomerQrEnabled((prev) => !prev)}
-                      className="flex items-center gap-2.5 cursor-pointer select-none"
-                      title="Toggle 2-Step Scan (Step 1 Tracking Barcode -> Step 2 Customer QR)"
-                    >
-                      <QrCode className="h-4 w-4 text-indigo-600 dark:text-indigo-400 shrink-0" />
-                      <span className="text-xs font-bold text-slate-900 dark:text-white">
-                        2-Step Scan
-                      </span>
-                      <button
-                        type="button"
-                        role="switch"
-                        aria-checked={isScanCustomerQrEnabled}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setIsScanCustomerQrEnabled((prev) => !prev);
-                        }}
-                        className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                          isScanCustomerQrEnabled ? "bg-indigo-600" : "bg-slate-300 dark:bg-slate-600"
-                        }`}
-                      >
-                        <span
-                          className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm ring-0 transition duration-200 ease-in-out ${
-                            isScanCustomerQrEnabled ? "translate-x-5" : "translate-x-0"
-                          }`}
-                        />
-                      </button>
-                    </label>
-
-                    <div className="flex flex-wrap items-center gap-4">
-                      {/* Auto-Next Switch */}
-                      <label
-                        onClick={() => setIsAutoNextEnabled((prev) => !prev)}
-                        className="flex items-center gap-2 cursor-pointer select-none"
-                      >
-                        <span className="text-xs font-bold text-slate-900 dark:text-white">
-                          Auto-Next
-                        </span>
-                        <button
-                          type="button"
-                          role="switch"
-                          aria-checked={isAutoNextEnabled}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setIsAutoNextEnabled((prev) => !prev);
-                          }}
-                          className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                            isAutoNextEnabled ? "bg-emerald-600" : "bg-slate-300 dark:bg-slate-600"
-                          }`}
-                        >
-                          <span
-                            className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm ring-0 transition duration-200 ease-in-out ${
-                              isAutoNextEnabled ? "translate-x-5" : "translate-x-0"
-                            }`}
-                          />
-                        </button>
-                      </label>
-
-                      {/* Fallback 'No Rule' Sliding Toggle Switch */}
-                      <label
-                        onClick={() => {
-                          setIsPasteAnywayEnabled((prev) => {
-                            const next = !prev;
-                            if (next) {
-                              setIntakeError("");
-                              setFlaggedInvalidCode(null);
-                            }
-                            return next;
-                          });
-                        }}
-                        className="flex items-center gap-2 cursor-pointer select-none"
-                        title="Allow unrecognized consignment formats"
-                      >
-                        <span className="text-xs font-bold text-slate-900 dark:text-white">
-                          No Rule
-                        </span>
-                        <button
-                          type="button"
-                          role="switch"
-                          aria-checked={isPasteAnywayEnabled}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setIsPasteAnywayEnabled((prev) => {
-                              const next = !prev;
-                              if (next) {
-                                setIntakeError("");
-                                setFlaggedInvalidCode(null);
-                              }
-                              return next;
-                            });
-                          }}
-                          className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                            isPasteAnywayEnabled ? "bg-amber-500" : "bg-slate-300 dark:bg-slate-600"
-                          }`}
-                        >
-                          <span
-                            className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm ring-0 transition duration-200 ease-in-out ${
-                              isPasteAnywayEnabled ? "translate-x-5" : "translate-x-0"
-                            }`}
-                          />
-                        </button>
-                      </label>
-                    </div>
-                  </div>
-
                   {/* Only show Step 2 Skip Bar when waiting for Customer QR (Step 1 alert removed) */}
                   {isScanCustomerQrEnabled && customerQrScanStep.step === "awaiting_customer_qr" && (
                     <div className="rounded-2xl border border-indigo-500 bg-indigo-50/90 text-indigo-950 dark:border-indigo-500 dark:bg-indigo-950/60 dark:text-indigo-200 px-4 py-2.5 text-xs flex flex-wrap items-center justify-between gap-2">

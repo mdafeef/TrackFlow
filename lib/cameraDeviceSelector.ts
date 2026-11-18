@@ -261,6 +261,21 @@ export async function triggerTapToFocusOnTrack(
 }
 
 /**
+ * Triggers a subtle device vibration (haptic feedback) specifically when a valid
+ * tracking number or QR code is successfully captured by the scanner.
+ */
+export function triggerScanHapticFeedback(pattern: number | number[] = 35): void {
+  if (typeof navigator === "undefined" || typeof navigator.vibrate !== "function") {
+    return;
+  }
+  try {
+    navigator.vibrate(pattern);
+  } catch {
+    // Ignore vibration errors on unsupported browsers or restricted contexts
+  }
+}
+
+/**
  * Always opens the phone's default Primary Main 1x Photo Camera automatically on any phone model.
  * Caches the verified primary sensor ID in sessionStorage so subsequent opens require only a single
  * getUserMedia call, and waits briefly after track.stop() when switching so Android Camera2 HAL never hangs.
