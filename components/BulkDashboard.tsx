@@ -7275,43 +7275,6 @@ export function BulkDashboard({
 
                 {/* Main Dedicated Camera Viewport */}
                 <div className="flex-1 flex flex-col p-4 sm:p-6 gap-3 overflow-y-auto">
-                  {/* Only show Step 2 Skip Bar when waiting for Customer QR (Step 1 alert removed) */}
-                  {isScanCustomerQrEnabled && customerQrScanStep.step === "awaiting_customer_qr" && (
-                    <div className="rounded-xl border border-indigo-500 bg-indigo-950/80 px-3.5 py-2 text-xs text-indigo-200 flex flex-wrap items-center justify-between gap-2">
-                      <span className="font-semibold">
-                        AWB <span className="font-mono font-black text-white">{customerQrScanStep.pendingAwb}</span> locked • Now scan Customer QR
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const pending = customerQrScanStep.pendingAwb;
-                          const courier = customerQrScanStep.pendingCourierId;
-                          const resetStep = {
-                            step: "awaiting_awb" as const,
-                            pendingAwb: "",
-                            pendingCourierId: "",
-                            pendingCourierName: "",
-                          };
-                          customerQrScanStepRef.current = resetStep;
-                          setCustomerQrScanStep(resetStep);
-                          handleStageConsignment(
-                            pending,
-                            courier || undefined,
-                            undefined,
-                            undefined,
-                            undefined,
-                            undefined,
-                            "camera",
-                            true
-                          );
-                        }}
-                        className="rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-600 px-2.5 py-1 text-[11px] font-bold text-white cursor-pointer shrink-0"
-                      >
-                        Skip QR →
-                      </button>
-                    </div>
-                  )}
-
                   {cameraError && (
                     <div className="text-xs text-amber-300 bg-amber-950/70 p-3 rounded-xl border border-amber-800/80">
                       {cameraError}
@@ -7319,28 +7282,19 @@ export function BulkDashboard({
                   )}
 
                   {intakeError && (
-                    <div className="text-xs text-rose-300 bg-rose-950/70 p-3 rounded-xl border border-rose-800/80 flex flex-wrap items-center justify-between gap-2">
+                    <div className="text-xs text-rose-300 bg-rose-950/85 p-3 rounded-xl border border-rose-700/80 flex items-center justify-between gap-2">
                       <span>{intakeError}</span>
-                      {flaggedInvalidCode && (
-                        <button
-                          type="button"
-                          onClick={() =>
-                            handleStageConsignment(
-                              flaggedInvalidCode,
-                              undefined,
-                              undefined,
-                              undefined,
-                              undefined,
-                              undefined,
-                              "camera",
-                              true
-                            )
-                          }
-                          className="rounded-lg bg-amber-500 hover:bg-amber-400 px-2.5 py-1 text-[11px] font-black text-slate-950 cursor-pointer shrink-0"
-                        >
-                          No Rule ({flaggedInvalidCode})
-                        </button>
-                      )}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIntakeError("");
+                          setFlaggedInvalidCode(null);
+                        }}
+                        className="inline-flex items-center gap-1 rounded-lg bg-rose-800/90 hover:bg-rose-700 border border-rose-600/70 px-2.5 py-1 text-[11px] font-black text-white cursor-pointer shrink-0"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                        <span>Close</span>
+                      </button>
                     </div>
                   )}
 
@@ -7430,6 +7384,66 @@ export function BulkDashboard({
                     )}
                   </div>
 
+                  {/* Thumb-Accessible Step 2 Bar below Camera Viewfinder: Skip QR + Delete Icon */}
+                  {isScanCustomerQrEnabled && customerQrScanStep.step === "awaiting_customer_qr" && (
+                    <div className="rounded-2xl border border-indigo-500 bg-indigo-950/90 px-3.5 py-2.5 text-xs text-indigo-200 flex items-center justify-between gap-2">
+                      <span className="font-semibold truncate">
+                        AWB <span className="font-mono font-black text-white">{customerQrScanStep.pendingAwb}</span> locked • Scan Customer QR
+                      </span>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const pending = customerQrScanStep.pendingAwb;
+                            const courier = customerQrScanStep.pendingCourierId;
+                            const resetStep = {
+                              step: "awaiting_awb" as const,
+                              pendingAwb: "",
+                              pendingCourierId: "",
+                              pendingCourierName: "",
+                            };
+                            customerQrScanStepRef.current = resetStep;
+                            setCustomerQrScanStep(resetStep);
+                            handleStageConsignment(
+                              pending,
+                              courier || undefined,
+                              undefined,
+                              undefined,
+                              undefined,
+                              undefined,
+                              "camera",
+                              true
+                            );
+                          }}
+                          className="rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-600 px-3 py-1.5 text-[11px] font-bold text-white cursor-pointer"
+                        >
+                          Skip QR →
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const resetStep = {
+                              step: "awaiting_awb" as const,
+                              pendingAwb: "",
+                              pendingCourierId: "",
+                              pendingCourierName: "",
+                            };
+                            customerQrScanStepRef.current = resetStep;
+                            setCustomerQrScanStep(resetStep);
+                            lastScannedRef.current = { code: "", timestamp: 0 };
+                            setCameraScanSuccess(null);
+                            setIntakeError("");
+                          }}
+                          className="inline-flex items-center justify-center rounded-xl bg-rose-600/90 hover:bg-rose-500 border border-rose-400/50 p-2 text-white cursor-pointer"
+                          title="Delete scanned barcode and rescan"
+                          aria-label="Delete scanned barcode"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
                   {/* Latest Scanned Item Strip (No input fields so keyboard never opens) */}
                   <div className="rounded-2xl border border-slate-800 bg-slate-900/90 px-4 py-3 flex items-center justify-between gap-3">
                     {stagedConsignments.length > 0 ? (
@@ -7517,23 +7531,47 @@ export function BulkDashboard({
                       <span className="font-semibold">
                         AWB <span className="font-mono font-black">#{customerQrScanStep.pendingAwb}</span> ({customerQrScanStep.pendingCourierName}) locked • Scan Customer Mini QR
                       </span>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const pending = customerQrScanStep.pendingAwb;
-                          const courier = customerQrScanStep.pendingCourierId;
-                          setCustomerQrScanStep({
-                            step: "awaiting_awb",
-                            pendingAwb: "",
-                            pendingCourierId: "",
-                            pendingCourierName: "",
-                          });
-                          handleStageConsignment(pending, courier || undefined);
-                        }}
-                        className="rounded-lg bg-indigo-600 hover:bg-indigo-700 px-2.5 py-1 text-[11px] font-bold text-white cursor-pointer shrink-0"
-                      >
-                        Stage Without Customer QR →
-                      </button>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const pending = customerQrScanStep.pendingAwb;
+                            const courier = customerQrScanStep.pendingCourierId;
+                            const resetStep = {
+                              step: "awaiting_awb" as const,
+                              pendingAwb: "",
+                              pendingCourierId: "",
+                              pendingCourierName: "",
+                            };
+                            customerQrScanStepRef.current = resetStep;
+                            setCustomerQrScanStep(resetStep);
+                            handleStageConsignment(pending, courier || undefined);
+                          }}
+                          className="rounded-lg bg-indigo-600 hover:bg-indigo-700 px-2.5 py-1.5 text-[11px] font-bold text-white cursor-pointer shrink-0"
+                        >
+                          Skip QR →
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const resetStep = {
+                              step: "awaiting_awb" as const,
+                              pendingAwb: "",
+                              pendingCourierId: "",
+                              pendingCourierName: "",
+                            };
+                            customerQrScanStepRef.current = resetStep;
+                            setCustomerQrScanStep(resetStep);
+                            lastScannedRef.current = { code: "", timestamp: 0 };
+                            setIntakeError("");
+                          }}
+                          className="inline-flex items-center justify-center rounded-lg bg-rose-600 hover:bg-rose-500 p-1.5 text-white cursor-pointer shrink-0"
+                          title="Delete locked barcode"
+                          aria-label="Delete locked barcode"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
                     </div>
                   )}
 

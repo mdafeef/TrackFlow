@@ -13,6 +13,7 @@ import {
   ScanLine,
   AlertTriangle,
   QrCode,
+  X,
 } from "lucide-react";
 import {
   MultiFormatReader,
@@ -25,7 +26,6 @@ import {
 } from "@zxing/library";
 import jsQR from "jsqr";
 import {
-  COURIER_LIST,
   COURIER_MAP,
   identifyAndValidateConsignment,
 } from "@/lib/couriers";
@@ -139,7 +139,7 @@ function CameraScanInner() {
   // Custom dropdown state for scanned queue strip
   const [queueOpenDropdown, setQueueOpenDropdown] = useState<{
     id: string;
-    field: "courier" | "status";
+    field: "status";
   } | null>(null);
 
   // Consignment ID Regex / Length Format Error state
@@ -1210,16 +1210,23 @@ function CameraScanInner() {
     setStagedItems((prev) => prev.filter((item) => item.id !== id));
   };
 
-  // Update item carrier
-  const handleUpdateItemCarrier = (id: string, courierId: string) => {
-    const c = COURIER_MAP[courierId];
-    if (!c) return;
-    setStagedItems((prev) =>
-      prev.map((item) =>
-        item.id === id ? { ...item, courierId: c.id, courierName: c.name } : item
-      )
-    );
-  };
+  // Discard / Delete locked Step 1 barcode in 2-Step Scan and reset back to Step 1
+  const handleDeletePendingStep1Awb = useCallback(() => {
+    const resetState = {
+      step: "awaiting_awb" as const,
+      pendingAwb: "",
+      pendingCourierId: "",
+      pendingCourierName: "",
+      pendingFormatLabel: "",
+    };
+    customerQrScanStepRef.current = resetState;
+    setCustomerQrScanStep(resetState);
+    lastScannedRef.current = { code: "", timestamp: 0 };
+    pendingCandidateRef.current = { code: "", count: 0, firstSeen: 0, lastSeen: 0 };
+    scanCooldownUntilRef.current = Date.now() + 250;
+    setCameraScanSuccess(null);
+    setFormatError(null);
+  }, []);
 
   // Update item status
   const handleUpdateItemStatus = (id: string, status: StatusOption) => {
@@ -1557,25 +1564,6 @@ function CameraScanInner() {
           </div>
         </div>
 
-        {/* Only show Step 2 Skip Strip when waiting for Customer QR (Step 1 alert removed) */}
-        {isScanCustomerQrEnabled && customerQrScanStep.step === "awaiting_customer_qr" && (
-          <div className="w-full max-w-md rounded-xl border border-indigo-500 bg-indigo-950/90 px-3 py-2 text-[11px] text-indigo-200 flex items-center justify-between gap-2 shrink-0">
-            <span className="font-semibold truncate">
-              AWB <span className="font-mono font-black text-white">{customerQrScanStep.pendingAwb}</span> locked • Scan Customer QR
-            </span>
-            <button
-              type="button"
-              onClick={() => {
-                const awb = customerQrScanStep.pendingAwb;
-                handleStageScannedCode(awb, true, undefined, true);
-              }}
-              className="rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-600 px-2.5 py-1 text-[10px] font-bold text-white shrink-0 cursor-pointer"
-            >
-              Skip QR →
-            </button>
-          </div>
-        )}
-
         {/* Fixed Square Camera Space */}
         <div className="relative flex flex-col items-center justify-center w-full my-auto">
           {cameraError && (
@@ -1721,19 +1709,18 @@ function CameraScanInner() {
                   </div>
                 </div>
 
-                {/* Single One-Tap Accept Action (No duplicate No Rule toggle inside error box) */}
+                {/* Close Action for Invalid Format Popup */}
                 <div className="flex items-center justify-end pt-1.5 border-t border-rose-800/80">
                   <button
                     type="button"
-                    onClick={() => {
-                      const codeToPaste = formatError.rawCode;
+                    onClick={(e) => {
+                      e.stopPropagation();
                       setFormatError(null);
-                      handleStageScannedCode(codeToPaste, true);
                     }}
-                    className="inline-flex items-center gap-1.5 rounded-xl bg-amber-500 hover:bg-amber-400 px-3 py-1.5 text-[11px] font-black text-slate-950 shadow-xs cursor-pointer transition-colors"
+                    className="inline-flex items-center gap-1.5 rounded-xl bg-rose-800/90 hover:bg-rose-700 border border-rose-600/70 px-3.5 py-1.5 text-[11px] font-black text-white shadow-xs cursor-pointer transition-colors"
                   >
-                    <Check className="h-3.5 w-3.5 stroke-[3]" />
-                    <span>Add Anyway ({formatError.code})</span>
+                    <X className="h-3.5 w-3.5 stroke-[2.5]" />
+                    <span>Close</span>
                   </button>
                 </div>
               </div>
@@ -1750,6 +1737,48 @@ function CameraScanInner() {
             )}
           </div>
         </div>
+
+        {/* Thumb-Accessible Step 2 Action Bar: Shows locked Step 1 Barcode, Skip QR button, and easy-to-reach Delete icon */}
+        {isScanCustomerQrEnabled && customerQrScanStep.step === "awaiting_customer_qr" && (
+          <div className="w-full max-w-md rounded-2xl border border-indigo-500/90 bg-indigo-950/95 px-3.5 py-2.5 text-xs text-indigo-200 flex items-center justify-between gap-2 shrink-0 shadow-lg">
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-1.5">
+                <span className="font-mono font-black text-white truncate">
+                  {customerQrScanStep.pendingAwb}
+                </span>
+                <span className="text-[10px] font-bold text-indigo-300 shrink-0">
+                  • {customerQrScanStep.pendingCourierName}
+                </span>
+              </div>
+              <div className="text-[10px] font-semibold text-indigo-300/90">
+                Scan Customer QR next or choose action:
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => {
+                  const awb = customerQrScanStep.pendingAwb;
+                  handleStageScannedCode(awb, true, undefined, true);
+                }}
+                className="rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-600 px-3 py-2 text-[11px] font-bold text-white cursor-pointer active:scale-95 transition-all"
+              >
+                Skip QR →
+              </button>
+
+              <button
+                type="button"
+                onClick={handleDeletePendingStep1Awb}
+                className="inline-flex items-center justify-center rounded-xl bg-rose-600/90 hover:bg-rose-500 border border-rose-400/50 p-2 text-white shadow-sm cursor-pointer active:scale-95 transition-all"
+                title="Delete scanned barcode and rescan"
+                aria-label="Delete scanned barcode"
+              >
+                <Trash2 className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Collapsible Scanned Queue Strip */}
         <div className="w-full max-w-md rounded-2xl border border-slate-800 bg-slate-900/95 overflow-hidden shrink-0">
@@ -1817,57 +1846,10 @@ function CameraScanInner() {
                   </div>
 
                   <div className="flex items-center gap-1.5 shrink-0">
-                    {/* Custom Styled Courier Dropdown */}
-                    <div className="relative inline-flex items-center">
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setQueueOpenDropdown((prev) =>
-                            prev?.id === item.id && prev.field === "courier"
-                              ? null
-                              : { id: item.id, field: "courier" }
-                          )
-                        }
-                        className="inline-flex items-center justify-between gap-1.5 rounded-lg border border-slate-700 bg-slate-900 hover:border-indigo-500/60 px-2 py-1 text-[10px] font-semibold text-slate-200 cursor-pointer"
-                      >
-                        <span className="truncate max-w-[78px]">
-                          {COURIER_MAP[item.courierId]?.shortName || item.courierName}
-                        </span>
-                        <ChevronDown className="h-3 w-3 text-slate-400 shrink-0" />
-                      </button>
-
-                      {queueOpenDropdown?.id === item.id &&
-                        queueOpenDropdown.field === "courier" && (
-                          <>
-                            <div
-                              className="fixed inset-0 z-40"
-                              onClick={() => setQueueOpenDropdown(null)}
-                            />
-                            <div className="absolute right-0 bottom-full mb-1 z-50 w-44 max-h-40 overflow-y-auto rounded-xl border border-slate-700 bg-slate-900 p-1 shadow-2xl space-y-0.5">
-                              {COURIER_LIST.map((c) => (
-                                <button
-                                  key={c.id}
-                                  type="button"
-                                  onClick={() => {
-                                    handleUpdateItemCarrier(item.id, c.id);
-                                    setQueueOpenDropdown(null);
-                                  }}
-                                  className={`w-full flex items-center justify-between rounded-lg px-2 py-1 text-[10px] font-semibold text-left cursor-pointer ${
-                                    item.courierId === c.id
-                                      ? "bg-indigo-600 text-white"
-                                      : "text-slate-200 hover:bg-slate-800"
-                                  }`}
-                                >
-                                  <span className="truncate">{c.shortName}</span>
-                                  {item.courierId === c.id && (
-                                    <Check className="h-3 w-3 shrink-0" />
-                                  )}
-                                </button>
-                              ))}
-                            </div>
-                          </>
-                        )}
-                    </div>
+                    {/* Courier Partner Name (Static Badge - No Dropdown) */}
+                    <span className="inline-flex items-center rounded-lg border border-slate-800 bg-slate-900 px-2 py-1 text-[10px] font-semibold text-slate-300 truncate max-w-[88px]">
+                      {COURIER_MAP[item.courierId]?.shortName || item.courierName}
+                    </span>
 
                     {/* Custom Styled Status Dropdown */}
                     <div className="relative inline-flex items-center">
