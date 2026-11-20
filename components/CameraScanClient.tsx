@@ -27,7 +27,10 @@ import {
 import jsQR from "jsqr";
 import {
   COURIER_MAP,
+  hasSpecialOrInvalidTrackingChars,
   identifyAndValidateConsignment,
+  isCandidateMatchingCustomOrStandardStructure,
+  syncCustomCouriersFromStorage,
 } from "@/lib/couriers";
 import { decryptCustomerMiniQR } from "@/lib/customerQrCrypto";
 import {
@@ -182,6 +185,7 @@ function CameraScanInner() {
   useEffect(() => {
     queueMicrotask(() => {
       try {
+        syncCustomCouriersFromStorage();
         const rawCtx = sessionStorage.getItem(SCAN_CONTEXT_KEY);
         if (rawCtx) {
           const parsed = JSON.parse(rawCtx);
@@ -300,12 +304,19 @@ function CameraScanInner() {
     return () => clearTimeout(timer);
   }, [formatError]);
 
-  // Guaranteed auto-clear for duplicate alert after 1500ms
+  // Guaranteed auto-clear for duplicate alert after 1300ms (via both effect and direct ref timer)
+  const duplicateAlertTimestampRef = useRef<number>(0);
+  const duplicateAlertTimerRef = useRef<NodeJS.Timeout | null>(null);
   useEffect(() => {
-    if (!duplicateAlert) return;
+    if (!duplicateAlert) {
+      duplicateAlertTimestampRef.current = 0;
+      return;
+    }
+    duplicateAlertTimestampRef.current = duplicateAlert.ts || Date.now();
     const timer = setTimeout(() => {
+      duplicateAlertTimestampRef.current = 0;
       setDuplicateAlert(null);
-    }, 1500);
+    }, 1300);
     return () => clearTimeout(timer);
   }, [duplicateAlert]);
 
@@ -414,7 +425,7 @@ function CameraScanInner() {
     }
   }, []);
 
-  // Extract candidate code from barcode or QR payload
+  // Extract candidate code from barcode or QR payload — strictly rejects special characters
   const extractCandidateScannedCode = useCallback((rawValue: string): string => {
     const trimmed = rawValue.trim();
     if (!trimmed) return "";
@@ -424,36 +435,45 @@ function CameraScanInner() {
         const url = new URL(trimmed);
         const paramKeys = ["awb", "track", "tracking", "id", "consignment", "number", "code", "q"];
         for (const key of paramKeys) {
-          const val = url.searchParams.get(key) || url.searchParams.get(key.toUpperCase());
-          if (val && val.trim().length >= 4) {
-            return val.trim().toUpperCase();
+          const val = (url.searchParams.get(key) || url.searchParams.get(key.toUpperCase()) || "").trim().toUpperCase();
+          if (val && /^[A-Z0-9]{8,19}$/.test(val)) {
+            return val;
           }
         }
         const segments = url.pathname.split("/").filter(Boolean);
-        const lastSeg = segments[segments.length - 1];
-        if (lastSeg && /^[A-Z0-9-]{8,24}$/i.test(lastSeg)) {
-          return lastSeg.toUpperCase();
+        const lastSeg = (segments[segments.length - 1] || "").trim().toUpperCase();
+        if (lastSeg && /^[A-Z0-9]{8,19}$/.test(lastSeg)) {
+          return lastSeg;
         }
-        return trimmed;
+        return "";
       } catch {
-        return trimmed;
+        return "";
       }
     }
 
     if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
       try {
         const parsed = JSON.parse(trimmed);
-        const candidate =
+        const rawCandidate =
           parsed.trackingNumber || parsed.awb || parsed.consignment || parsed.id || parsed.code;
-        if (candidate && String(candidate).trim().length > 0) {
-          return String(candidate).trim().toUpperCase();
+        if (rawCandidate) {
+          const candidate = String(rawCandidate).trim().toUpperCase();
+          if (/^[A-Z0-9]{8,19}$/.test(candidate)) {
+            return candidate;
+          }
         }
+        return "";
       } catch {
-        return trimmed;
+        return "";
       }
     }
 
-    return trimmed.toUpperCase();
+    const upper = trimmed.toUpperCase();
+    // Reject any scan containing special characters, punctuation, spaces, or symbols
+    if (hasSpecialOrInvalidTrackingChars(upper)) {
+      return "";
+    }
+    return upper;
   }, []);
 
   // Build logical status metadata
@@ -501,7 +521,9 @@ function CameraScanInner() {
       if (!rawTrimmed) return;
 
       const identification = identifyAndValidateConsignment(rawTrimmed);
-      const allowUnrecognized = forcePasteAnyway || isPasteAnywayEnabledRef.current;
+      const allowUnrecognized =
+        (forcePasteAnyway || isPasteAnywayEnabledRef.current) &&
+        identification.canPasteAnyway !== false;
 
       if (!identification.isValid && !allowUnrecognized) {
         playScanBeep(false);
@@ -535,10 +557,22 @@ function CameraScanInner() {
 
       // Check duplicate synchronously against current stagedItemsRef
       if (stagedItemsRef.current.some((s) => s.trackingNumber === cleanNum)) {
+        playScanBeep(false);
+        const nowTs = Date.now();
+        lastScannedRef.current = { code: cleanNum, timestamp: nowTs };
+        scanCooldownUntilRef.current = nowTs + 1300;
+        duplicateAlertTimestampRef.current = nowTs;
         setDuplicateAlert({
           text: `Already scanned: ${cleanNum} (${chosenCourier.shortName})`,
-          ts: Date.now(),
+          ts: nowTs,
         });
+        if (duplicateAlertTimerRef.current) {
+          clearTimeout(duplicateAlertTimerRef.current);
+        }
+        duplicateAlertTimerRef.current = setTimeout(() => {
+          duplicateAlertTimestampRef.current = 0;
+          setDuplicateAlert(null);
+        }, 1300);
         return;
       }
 
@@ -651,13 +685,12 @@ function CameraScanInner() {
     let isDecoding = false;
     let tickCounter = 0;
 
-    // Initialize ZXing readers with strict logistics formats
+    // Initialize ZXing readers with strict logistics formats (Code 93 excluded to prevent special-char edge noise)
     const zxingBarcodeReader = new MultiFormatReader();
     const barcodeHints = new Map();
     barcodeHints.set(DecodeHintType.POSSIBLE_FORMATS, [
       BarcodeFormat.CODE_128,
       BarcodeFormat.CODE_39,
-      BarcodeFormat.CODE_93,
       BarcodeFormat.EAN_13,
       BarcodeFormat.ITF,
     ]);
@@ -696,7 +729,6 @@ function CameraScanInner() {
             "qr_code",
             "code_128",
             "code_39",
-            "code_93",
             "ean_13",
             "itf",
             "data_matrix",
@@ -793,18 +825,12 @@ function CameraScanInner() {
         return false;
       }
 
-      // Reject 1D motion-blur / edge misreads containing non-alphanumeric symbol noise (e.g. "E%8,W%-]/IN" from Code39/Code93)
-      if (!is2DQr) {
-        const compactCheck = candidate.replace(/\s+/g, "");
-        if (
-          /[^A-Z0-9-]/i.test(compactCheck) ||
-          compactCheck.startsWith("-") ||
-          compactCheck.endsWith("-") ||
-          compactCheck.includes("--") ||
-          compactCheck.length < 6
-        ) {
-          return false;
-        }
+      // Strictly reject ANY special character or structurally impossible noise (both 1D and 2D)
+      if (
+        hasSpecialOrInvalidTrackingChars(candidate) ||
+        !isCandidateMatchingCustomOrStandardStructure(candidate)
+      ) {
+        return false;
       }
 
       // Ignore same barcode within 2.5 seconds of last scan
@@ -1027,6 +1053,14 @@ function CameraScanInner() {
         ) {
           cameraScanSuccessTimestampRef.current = 0;
           setCameraScanSuccess(null);
+        }
+
+        if (
+          duplicateAlertTimestampRef.current > 0 &&
+          Date.now() - duplicateAlertTimestampRef.current > 1300
+        ) {
+          duplicateAlertTimestampRef.current = 0;
+          setDuplicateAlert(null);
         }
 
         const video = videoRef.current;
@@ -1726,11 +1760,19 @@ function CameraScanInner() {
               </div>
             )}
 
-            {/* Duplicate Scan Alert Pill */}
+            {/* Duplicate Scan Alert Pill (Auto-hides after 1.3s or tap to dismiss) */}
             {duplicateAlert && !formatError && (
               <div
                 key={duplicateAlert.ts}
-                className="absolute bottom-3 inset-x-4 z-30 rounded-xl border border-amber-500/70 bg-amber-950/95 px-3 py-1.5 text-center text-xs font-bold text-amber-300 shadow-lg"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  duplicateAlertTimestampRef.current = 0;
+                  if (duplicateAlertTimerRef.current) {
+                    clearTimeout(duplicateAlertTimerRef.current);
+                  }
+                  setDuplicateAlert(null);
+                }}
+                className="absolute bottom-3 inset-x-4 z-30 rounded-xl border border-amber-500/70 bg-amber-950/95 px-3 py-1.5 text-center text-xs font-bold text-amber-300 shadow-lg cursor-pointer"
               >
                 {duplicateAlert.text}
               </div>
@@ -1764,7 +1806,7 @@ function CameraScanInner() {
                 }}
                 className="rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-600 px-3 py-2 text-[11px] font-bold text-white cursor-pointer active:scale-95 transition-all"
               >
-                Skip QR →
+                Skip QR
               </button>
 
               <button

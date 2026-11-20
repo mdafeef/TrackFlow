@@ -80,8 +80,16 @@ import {
   autoDetectCourier,
   COURIER_LIST,
   COURIER_MAP,
+  hasSpecialOrInvalidTrackingChars,
   identifyAndValidateConsignment,
   validateConsignmentFormat,
+  CustomCourierRecord,
+  buildCustomCourierRegex,
+  getStoredCustomCouriers,
+  saveCustomCourierToStorage,
+  deleteCustomCourierFromStorage,
+  syncCustomCouriersFromStorage,
+  isCandidateMatchingCustomOrStandardStructure,
 } from "@/lib/couriers";
 import {
   WORKSPACE_TAB_PATHS,
@@ -652,8 +660,130 @@ export function BulkDashboard({
   // Settings custom interval input
   const [customMinutesInput, setCustomMinutesInput] = useState("");
 
+  // Custom Courier Partner & Tracking Format state (Settings)
+  const [customCouriersList, setCustomCouriersList] = useState<CustomCourierRecord[]>([]);
+  const [customCourierName, setCustomCourierName] = useState("");
+  const [customCourierShortName, setCustomCourierShortName] = useState("");
+  const [customCourierSampleCode, setCustomCourierSampleCode] = useState("");
+  const [customCourierPrefix, setCustomCourierPrefix] = useState("");
+  const [customCourierMinDigits, setCustomCourierMinDigits] = useState<number>(8);
+  const [customCourierMaxDigits, setCustomCourierMaxDigits] = useState<number>(12);
+  const [customCourierSuffix, setCustomCourierSuffix] = useState("");
+  const [customCourierFeedback, setCustomCourierFeedback] = useState<{
+    type: "success" | "error";
+    text: string;
+  } | null>(null);
+
+  useEffect(() => {
+    try {
+      syncCustomCouriersFromStorage();
+      setCustomCouriersList(getStoredCustomCouriers());
+    } catch {}
+  }, []);
+
+  const handleAutoFillCustomFormatFromSample = () => {
+    const raw = customCourierSampleCode.trim().toUpperCase();
+    if (!raw) {
+      setCustomCourierFeedback({
+        type: "error",
+        text: "Enter a sample tracking number first to auto-detect its format.",
+      });
+      return;
+    }
+    if (/[^A-Z0-9]/.test(raw)) {
+      setCustomCourierFeedback({
+        type: "error",
+        text: "Sample tracking code must contain only letters (A-Z) and numbers (0-9). Special characters are not allowed.",
+      });
+      return;
+    }
+    const match = raw.match(/^([A-Z]{0,6})(\d{4,19})([A-Z]{0,4})$/);
+    if (!match) {
+      setCustomCourierFeedback({
+        type: "error",
+        text: "Sample must follow [Optional Prefix Letters] + [4–19 Digits] + [Optional Suffix Letters], e.g. ST12345678IN.",
+      });
+      return;
+    }
+    const [, pref, digits, suff] = match;
+    setCustomCourierPrefix(pref);
+    setCustomCourierMinDigits(digits.length);
+    setCustomCourierMaxDigits(digits.length);
+    setCustomCourierSuffix(suff);
+    setCustomCourierFeedback({
+      type: "success",
+      text: `Detected format from ${raw}: Prefix "${pref || "None"}", ${digits.length} Digits, Suffix "${suff || "None"}".`,
+    });
+  };
+
+  const handleAddCustomCourierPartner = (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanName = customCourierName.trim();
+    if (!cleanName) {
+      setCustomCourierFeedback({
+        type: "error",
+        text: "Please enter a Courier Partner Name.",
+      });
+      return;
+    }
+    const cleanShort = (customCourierShortName.trim() || cleanName).slice(0, 22);
+    const cleanPrefix = customCourierPrefix.toUpperCase().replace(/[^A-Z]/g, "").slice(0, 6);
+    const cleanSuffix = customCourierSuffix.toUpperCase().replace(/[^A-Z]/g, "").slice(0, 4);
+    const minD = Math.max(4, Math.min(19, Number(customCourierMinDigits) || 8));
+    const maxD = Math.max(minD, Math.min(19, Number(customCourierMaxDigits) || minD));
+
+    const built = buildCustomCourierRegex({
+      prefix: cleanPrefix,
+      minDigits: minD,
+      maxDigits: maxD,
+      suffix: cleanSuffix,
+    });
+    const newRecord: CustomCourierRecord = {
+      id: `custom-${cleanName.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${Date.now().toString(36).slice(-4)}`,
+      name: cleanName,
+      shortName: cleanShort,
+      prefix: cleanPrefix,
+      minDigits: minD,
+      maxDigits: maxD,
+      suffix: cleanSuffix,
+      regexSource: built.regexSource,
+      sampleNumber: customCourierSampleCode.trim().toUpperCase() || built.sampleNumber,
+      formatDescription: built.formatDescription,
+    };
+
+    const updated = saveCustomCourierToStorage(newRecord);
+    setCustomCouriersList(updated);
+    setCustomCourierName("");
+    setCustomCourierShortName("");
+    setCustomCourierSampleCode("");
+    setCustomCourierPrefix("");
+    setCustomCourierMinDigits(8);
+    setCustomCourierMaxDigits(12);
+    setCustomCourierSuffix("");
+    setCustomCourierFeedback({
+      type: "success",
+      text: `Added custom courier "${cleanName}" (${built.formatDescription}). Active in scanner & directory.`,
+    });
+    setTimeout(() => setCustomCourierFeedback(null), 4000);
+  };
+
+  const handleDeleteCustomCourierPartner = (id: string, name: string) => {
+    const updated = deleteCustomCourierFromStorage(id);
+    setCustomCouriersList(updated);
+    setCustomCourierFeedback({
+      type: "success",
+      text: `Removed custom courier "${name}".`,
+    });
+    setTimeout(() => setCustomCourierFeedback(null), 3000);
+  };
+
   // Unified Intake & Scanner Form state (Typing, Hardware Barcode Scanner & Camera QR/Barcode)
   const [stagedConsignments, setStagedConsignments] = useState<BulkShipment[]>([]);
+  const stagedConsignmentsRef = useRef<BulkShipment[]>([]);
+  const duplicateErrorTimerRef = useRef<NodeJS.Timeout | null>(null);
+  useEffect(() => {
+    stagedConsignmentsRef.current = stagedConsignments;
+  }, [stagedConsignments]);
   const [intakeAwb, setIntakeAwb] = useState("");
   const [intakeCourier, setIntakeCourier] = useState("speedpost");
   const [isIntakeCourierDropdownOpen, setIsIntakeCourierDropdownOpen] = useState(false);
@@ -772,14 +902,16 @@ export function BulkDashboard({
 
   const filteredIntakeCouriers = useMemo(() => {
     const q = intakeCourierSearch.trim().toLowerCase();
-    if (!q) return COURIER_LIST;
+    // Reference customCouriersList.length so memo updates when custom couriers are added/removed
+    const totalCount = COURIER_LIST.length + customCouriersList.length;
+    if (!q && totalCount >= 0) return [...COURIER_LIST];
     return COURIER_LIST.filter(
       (c) =>
         c.name.toLowerCase().includes(q) ||
         c.shortName.toLowerCase().includes(q) ||
         c.id.toLowerCase().includes(q)
     );
-  }, [intakeCourierSearch]);
+  }, [intakeCourierSearch, customCouriersList.length]);
 
   // Batch Wise Ingestion state
   const [selectedBatchId, setSelectedBatchId] = useState<string>("all");
@@ -1131,7 +1263,9 @@ export function BulkDashboard({
     }
 
     const identification = identifyAndValidateConsignment(rawTrimmed);
-    const allowUnrecognized = forcePasteAnyway || isPasteAnywayEnabledRef.current;
+    const allowUnrecognized =
+      (forcePasteAnyway || isPasteAnywayEnabledRef.current) &&
+      identification.canPasteAnyway !== false;
 
     if (!identification.isValid && !allowUnrecognized) {
       setFlaggedInvalidCode(identification.normalized || rawTrimmed.toUpperCase());
@@ -1145,10 +1279,18 @@ export function BulkDashboard({
 
     const cleanNum = identification.normalized || rawTrimmed.toUpperCase().replace(/\s+/g, "");
 
-    // Check duplicate in currently staged list
+    // Check duplicate in currently staged list (auto-clears after 1.4s)
     if (stagedConsignments.some((s) => s.trackingNumber === cleanNum)) {
       setFlaggedInvalidCode(null);
-      setIntakeError(`AWB ${cleanNum} is already in your staged review list.`);
+      setIntakeError(`Already scanned: AWB ${cleanNum} is already in your staged review list.`);
+      if (duplicateErrorTimerRef.current) {
+        clearTimeout(duplicateErrorTimerRef.current);
+      }
+      duplicateErrorTimerRef.current = setTimeout(() => {
+        setIntakeError((prev) =>
+          prev.includes(cleanNum) || prev.toLowerCase().includes("already") ? "" : prev
+        );
+      }, 1400);
       return;
     }
 
@@ -1629,7 +1771,7 @@ export function BulkDashboard({
     }
   }, []);
 
-  // Extract clean AWB / Consignment ID from raw barcode or QR payload (handles URLs, JSON, or plain codes)
+  // Extract clean AWB / Consignment ID from raw barcode or QR payload — strictly rejects special characters
   const extractCleanScannedCode = useCallback((rawValue: string): string => {
     const trimmed = rawValue.trim();
     if (!trimmed) return "";
@@ -1640,18 +1782,19 @@ export function BulkDashboard({
         const url = new URL(trimmed);
         const paramKeys = ["awb", "track", "tracking", "id", "consignment", "number", "code", "q"];
         for (const key of paramKeys) {
-          const val = url.searchParams.get(key) || url.searchParams.get(key.toUpperCase());
-          if (val && val.trim().length >= 4) {
-            return val.trim().toUpperCase();
+          const val = (url.searchParams.get(key) || url.searchParams.get(key.toUpperCase()) || "").trim().toUpperCase();
+          if (val && /^[A-Z0-9]{8,19}$/.test(val)) {
+            return val;
           }
         }
         const segments = url.pathname.split("/").filter(Boolean);
-        const lastSeg = segments[segments.length - 1];
-        if (lastSeg && /^[A-Z0-9-]{5,30}$/i.test(lastSeg)) {
-          return lastSeg.toUpperCase();
+        const lastSeg = (segments[segments.length - 1] || "").trim().toUpperCase();
+        if (lastSeg && /^[A-Z0-9]{8,19}$/.test(lastSeg)) {
+          return lastSeg;
         }
+        return "";
       } catch {
-        // Fallback to regex extraction below
+        return "";
       }
     }
 
@@ -1659,19 +1802,26 @@ export function BulkDashboard({
     if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
       try {
         const parsed = JSON.parse(trimmed);
-        const candidate =
+        const rawCandidate =
           parsed.trackingNumber || parsed.awb || parsed.consignment || parsed.id || parsed.code;
-        if (candidate && String(candidate).trim().length >= 4) {
-          return String(candidate).trim().toUpperCase();
+        if (rawCandidate) {
+          const candidate = String(rawCandidate).trim().toUpperCase();
+          if (/^[A-Z0-9]{8,19}$/.test(candidate)) {
+            return candidate;
+          }
         }
+        return "";
       } catch {
-        // ignore
+        return "";
       }
     }
 
-    // Standard alphanumeric barcode / QR string
-    const cleaned = trimmed.replace(/[^a-zA-Z0-9-_]/g, "").toUpperCase();
-    return cleaned.length >= 4 ? cleaned : trimmed.toUpperCase();
+    // Standard alphanumeric barcode / QR string — NEVER strip special characters; reject if any special char exists
+    const upper = trimmed.toUpperCase();
+    if (hasSpecialOrInvalidTrackingChars(upper)) {
+      return "";
+    }
+    return upper;
   }, []);
 
   const handleStageConsignmentRef = useRef(handleStageConsignment);
@@ -1830,17 +1980,15 @@ export function BulkDashboard({
         return false;
       }
 
-      // Reject 1D motion-blur / edge misreads containing non-alphanumeric symbol noise (e.g. "E%8,W%-]/IN")
+      const code = extractCleanScannedCode(trimmedRaw);
       if (
-        !/^https?:\/\//i.test(trimmedRaw) &&
-        !trimmedRaw.startsWith("{") &&
-        (/[^\w\s-]/i.test(trimmedRaw) || trimmedRaw.length < 6)
+        !code ||
+        /^TFQR/i.test(code) ||
+        hasSpecialOrInvalidTrackingChars(code) ||
+        !isCandidateMatchingCustomOrStandardStructure(code)
       ) {
         return false;
       }
-
-      const code = extractCleanScannedCode(trimmedRaw);
-      if (!code || code.length < 6 || /^TFQR/i.test(code)) return false;
 
       if (
         lastScannedRef.current.code === code &&
@@ -1852,7 +2000,8 @@ export function BulkDashboard({
       setIsEnhancingDamagedLabel(false);
 
       const identification = identifyAndValidateConsignment(code);
-      const allowUnrecognized = isPasteAnywayEnabledRef.current;
+      const allowUnrecognized =
+        isPasteAnywayEnabledRef.current && identification.canPasteAnyway !== false;
 
       if (!identification.isValid && !allowUnrecognized) {
         setFlaggedInvalidCode(identification.normalized || code);
@@ -1865,6 +2014,22 @@ export function BulkDashboard({
 
       const cleanAwb = identification.normalized || code;
       const detectedCarrier = identification.courier || autoDetectCourier(cleanAwb);
+
+      // Check duplicate synchronously before locking Step 1 or showing success badge
+      if (stagedConsignmentsRef.current.some((s) => s.trackingNumber === cleanAwb)) {
+        setFlaggedInvalidCode(null);
+        setIntakeError(`Already scanned: ${cleanAwb} (${detectedCarrier?.shortName || "Staged"})`);
+        playChime(false);
+        if (duplicateErrorTimerRef.current) {
+          clearTimeout(duplicateErrorTimerRef.current);
+        }
+        duplicateErrorTimerRef.current = setTimeout(() => {
+          setIntakeError((prev) =>
+            prev.includes(cleanAwb) || prev.toLowerCase().includes("already") ? "" : prev
+          );
+        }, 1400);
+        return true;
+      }
 
       // If 2-Step Scan is ON:
       // 1st scan locks in the Tracking Number (AWB) and automatically switches scanner ready for Step 2 (Customer Data QR ONLY)
@@ -5526,6 +5691,256 @@ export function BulkDashboard({
               </div>
 
               {/* ========================================================== */}
+              {/* CUSTOM COURIER PARTNER & TRACKING CODE FORMAT BUILDER      */}
+              {/* ========================================================== */}
+              <div className="rounded-3xl border border-slate-200/90 bg-white p-5 sm:p-6 shadow-xs dark:border-slate-800 dark:bg-slate-900 space-y-5">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-100 dark:border-slate-800">
+                  <div className="flex items-center gap-2.5">
+                    <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-indigo-50 dark:bg-indigo-950/70 text-indigo-600 dark:text-indigo-400">
+                      <Truck className="h-4.5 w-4.5" />
+                    </span>
+                    <div>
+                      <h3 className="text-base font-bold text-slate-900 dark:text-white">
+                        Custom Courier Partner &amp; Tracking Code Format
+                      </h3>
+                      <p className="text-xs text-slate-500 dark:text-slate-400">
+                        Add custom courier partners and define strict alphanumeric tracking code patterns for camera &amp; manual scanning
+                      </p>
+                    </div>
+                  </div>
+                  <span className="inline-flex items-center gap-1.5 rounded-full bg-indigo-50 dark:bg-indigo-950/60 border border-indigo-200 dark:border-indigo-800/80 px-3 py-1 text-[11px] font-bold text-indigo-700 dark:text-indigo-300 self-start sm:self-auto">
+                    <span>{customCouriersList.length} Custom Added</span>
+                  </span>
+                </div>
+
+                {customCourierFeedback && (
+                  <div
+                    className={`rounded-2xl border p-3.5 flex items-start justify-between gap-2.5 text-xs ${
+                      customCourierFeedback.type === "success"
+                        ? "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900/60 dark:bg-emerald-950/60 dark:text-emerald-300"
+                        : "border-rose-200 bg-rose-50 text-rose-800 dark:border-rose-900/60 dark:bg-rose-950/60 dark:text-rose-300"
+                    }`}
+                  >
+                    <div className="flex items-start gap-2">
+                      {customCourierFeedback.type === "success" ? (
+                        <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0 mt-0.5" />
+                      ) : (
+                        <AlertCircle className="h-4 w-4 text-rose-600 shrink-0 mt-0.5" />
+                      )}
+                      <span className="font-semibold">{customCourierFeedback.text}</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setCustomCourierFeedback(null)}
+                      className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 cursor-pointer"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                )}
+
+                <form onSubmit={handleAddCustomCourierPartner} className="space-y-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
+                    <div>
+                      <label className="text-xs font-bold text-slate-700 dark:text-slate-300 mb-1.5 block">
+                        Courier Partner Name *
+                      </label>
+                      <input
+                        type="text"
+                        value={customCourierName}
+                        onChange={(e) => setCustomCourierName(e.target.value)}
+                        placeholder="e.g. ST Courier / VRL Logistics"
+                        className="w-full rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/80 px-3.5 py-2 text-xs font-semibold text-slate-900 dark:text-white focus:border-indigo-500 focus:outline-none"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="text-xs font-bold text-slate-700 dark:text-slate-300 mb-1.5 block">
+                        Short Display Name
+                      </label>
+                      <input
+                        type="text"
+                        value={customCourierShortName}
+                        onChange={(e) => setCustomCourierShortName(e.target.value)}
+                        placeholder="e.g. ST Courier (optional)"
+                        className="w-full rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/80 px-3.5 py-2 text-xs font-semibold text-slate-900 dark:text-white focus:border-indigo-500 focus:outline-none"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="text-xs font-bold text-slate-700 dark:text-slate-300 mb-1.5 block">
+                        Sample Tracking Code (Auto-Fill)
+                      </label>
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="text"
+                          value={customCourierSampleCode}
+                          onChange={(e) =>
+                            setCustomCourierSampleCode(
+                              e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "")
+                            )
+                          }
+                          placeholder="e.g. ST48291038IN"
+                          className="w-full rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/80 px-3 py-2 font-mono text-xs font-bold text-slate-900 dark:text-white focus:border-indigo-500 focus:outline-none"
+                        />
+                        <button
+                          type="button"
+                          onClick={handleAutoFillCustomFormatFromSample}
+                          className="shrink-0 rounded-xl border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-950/70 hover:bg-indigo-100 dark:hover:bg-indigo-900/70 px-2.5 py-2 text-[11px] font-bold text-indigo-700 dark:text-indigo-300 cursor-pointer"
+                        >
+                          Detect
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3.5">
+                    <div>
+                      <label className="text-xs font-bold text-slate-700 dark:text-slate-300 mb-1.5 block">
+                        Prefix Letters (A–Z)
+                      </label>
+                      <input
+                        type="text"
+                        maxLength={6}
+                        value={customCourierPrefix}
+                        onChange={(e) =>
+                          setCustomCourierPrefix(
+                            e.target.value.toUpperCase().replace(/[^A-Z]/g, "")
+                          )
+                        }
+                        placeholder="None or e.g. ST"
+                        className="w-full rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/80 px-3.5 py-2 font-mono text-xs font-bold text-slate-900 dark:text-white focus:border-indigo-500 focus:outline-none"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="text-xs font-bold text-slate-700 dark:text-slate-300 mb-1.5 block">
+                        Min Digits (4–19)
+                      </label>
+                      <input
+                        type="number"
+                        min={4}
+                        max={19}
+                        value={customCourierMinDigits}
+                        onChange={(e) =>
+                          setCustomCourierMinDigits(
+                            Math.max(4, Math.min(19, parseInt(e.target.value, 10) || 4))
+                          )
+                        }
+                        className="w-full rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/80 px-3.5 py-2 font-mono text-xs font-bold text-slate-900 dark:text-white focus:border-indigo-500 focus:outline-none"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="text-xs font-bold text-slate-700 dark:text-slate-300 mb-1.5 block">
+                        Max Digits (4–19)
+                      </label>
+                      <input
+                        type="number"
+                        min={4}
+                        max={19}
+                        value={customCourierMaxDigits}
+                        onChange={(e) =>
+                          setCustomCourierMaxDigits(
+                            Math.max(4, Math.min(19, parseInt(e.target.value, 10) || 4))
+                          )
+                        }
+                        className="w-full rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/80 px-3.5 py-2 font-mono text-xs font-bold text-slate-900 dark:text-white focus:border-indigo-500 focus:outline-none"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="text-xs font-bold text-slate-700 dark:text-slate-300 mb-1.5 block">
+                        Suffix Letters (A–Z)
+                      </label>
+                      <input
+                        type="text"
+                        maxLength={4}
+                        value={customCourierSuffix}
+                        onChange={(e) =>
+                          setCustomCourierSuffix(
+                            e.target.value.toUpperCase().replace(/[^A-Z]/g, "")
+                          )
+                        }
+                        placeholder="None or e.g. IN"
+                        className="w-full rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/80 px-3.5 py-2 font-mono text-xs font-bold text-slate-900 dark:text-white focus:border-indigo-500 focus:outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  {(() => {
+                    const previewBuilt = buildCustomCourierRegex({
+                      prefix: customCourierPrefix,
+                      minDigits: customCourierMinDigits,
+                      maxDigits: Math.max(customCourierMinDigits, customCourierMaxDigits),
+                      suffix: customCourierSuffix,
+                    });
+                    return (
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-800/40 px-4 py-3">
+                        <div className="text-xs space-y-0.5">
+                          <div className="font-bold text-slate-700 dark:text-slate-200">
+                            Format Preview:{" "}
+                            <span className="text-indigo-600 dark:text-indigo-400">
+                              {previewBuilt.formatDescription}
+                            </span>
+                          </div>
+                          <div className="text-[11px] text-slate-500 dark:text-slate-400 font-mono">
+                            Example: {previewBuilt.sampleNumber} • Pattern: {previewBuilt.regexSource} (No special chars allowed)
+                          </div>
+                        </div>
+
+                        <button
+                          type="submit"
+                          className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-4 py-2.5 text-xs font-extrabold text-white shadow-xs transition-colors cursor-pointer shrink-0"
+                        >
+                          <Plus className="h-4 w-4" />
+                          <span>Add Courier &amp; Format</span>
+                        </button>
+                      </div>
+                    );
+                  })()}
+                </form>
+
+                {customCouriersList.length > 0 && (
+                  <div className="space-y-2 pt-2 border-t border-slate-100 dark:border-slate-800">
+                    <div className="text-xs font-bold text-slate-700 dark:text-slate-300">
+                      Saved Custom Courier Formats:
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                      {customCouriersList.map((cc) => (
+                        <div
+                          key={cc.id}
+                          className="flex items-center justify-between gap-3 rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-800/50 px-3.5 py-2.5"
+                        >
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs font-extrabold text-slate-900 dark:text-white truncate">
+                                {cc.name}
+                              </span>
+                              <span className="rounded-md bg-indigo-50 dark:bg-indigo-950/80 border border-indigo-200 dark:border-indigo-800 px-1.5 py-0.5 font-mono text-[10px] font-bold text-indigo-700 dark:text-indigo-300">
+                                {cc.sampleNumber}
+                              </span>
+                            </div>
+                            <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate mt-0.5">
+                              {cc.formatDescription} • <span className="font-mono">{cc.regexSource}</span>
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteCustomCourierPartner(cc.id, cc.name)}
+                            className="rounded-xl p-2 text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950/60 transition-colors cursor-pointer shrink-0"
+                            title={`Delete ${cc.name}`}
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* ========================================================== */}
               {/* DATA BACKUP & RECOVERY (WITH DATE-WISE BACKUP IN SETTINGS) */}
               {/* ========================================================== */}
               <div className="rounded-3xl border border-slate-200/90 bg-white p-5 sm:p-6 shadow-xs dark:border-slate-800 dark:bg-slate-900 space-y-5">
@@ -7417,7 +7832,7 @@ export function BulkDashboard({
                           }}
                           className="rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-600 px-3 py-1.5 text-[11px] font-bold text-white cursor-pointer"
                         >
-                          Skip QR →
+                          Skip QR
                         </button>
                         <button
                           type="button"
@@ -7549,7 +7964,7 @@ export function BulkDashboard({
                           }}
                           className="rounded-lg bg-indigo-600 hover:bg-indigo-700 px-2.5 py-1.5 text-[11px] font-bold text-white cursor-pointer shrink-0"
                         >
-                          Skip QR →
+                          Skip QR
                         </button>
                         <button
                           type="button"

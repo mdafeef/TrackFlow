@@ -74,7 +74,7 @@ export function Navbar({
 
   return (
     <header
-      className={`fixed top-0 left-0 right-0 z-40 h-14 sm:h-16 bg-white/95 backdrop-blur-md dark:bg-slate-900/95 transition-all duration-200 ${
+      className={`fixed top-0 left-0 right-0 z-40 h-14 sm:h-16 bg-white/95 backdrop-blur-md dark:bg-slate-900/95 transition-colors ${
         isWorkspaceActive
           ? isSidebarCollapsed
             ? "md:left-[68px]"
@@ -140,7 +140,7 @@ export function Navbar({
 
         {/* Zone 2: Public Navigation Tabs (Centered horizontally on Desktop Single View — switches tabs silently in same page) */}
         {activeView === "single" && (
-          <nav className="hidden md:flex items-center gap-1 md:absolute md:left-1/2 md:-translate-x-1/2 rounded-xl border border-slate-200/80 bg-slate-100/75 p-1 dark:border-slate-800 dark:bg-slate-800/80">
+          <nav className="hidden md:flex items-center gap-0.5 lg:gap-1 md:absolute md:left-1/2 md:-translate-x-1/2 rounded-xl border border-slate-200/80 bg-slate-100/75 p-1 dark:border-slate-800 dark:bg-slate-800/80">
             {(
               [
                 { id: "track", label: "Track" },
@@ -155,7 +155,7 @@ export function Navbar({
                   key={item.id}
                   type="button"
                   onClick={() => onSelectPublicTab(item.id)}
-                  className={`rounded-lg px-4 py-1.5 text-xs font-bold transition-all whitespace-nowrap cursor-pointer ${
+                  className={`rounded-lg px-2.5 lg:px-4 py-1.5 text-xs font-bold transition-all whitespace-nowrap cursor-pointer ${
                     isActive
                       ? "bg-white text-indigo-600 shadow-2xs dark:bg-slate-900 dark:text-indigo-400"
                       : "text-slate-600 hover:bg-white/70 hover:text-indigo-600 dark:text-slate-300 dark:hover:bg-slate-900/60 dark:hover:text-indigo-400"
@@ -184,16 +184,17 @@ export function Navbar({
             </button>
           )}
 
-          {/* In Single Mode: Watchlist Drawer Trigger */}
+          {/* In Single Mode: Watchlist Drawer Trigger (Icon-only when screen width reduces below lg) */}
           {activeView === "single" && (
             <button
               type="button"
               onClick={onOpenWatchlist}
               aria-label="Open watchlist"
-              className="relative flex h-8 sm:h-9 items-center gap-1.5 sm:gap-2 rounded-xl border border-slate-200/90 bg-white px-2.5 sm:px-3 py-1.5 text-xs font-bold text-slate-700 shadow-2xs hover:border-indigo-300 hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200 dark:hover:border-slate-700 dark:hover:bg-slate-800 whitespace-nowrap shrink-0 transition-colors cursor-pointer"
+              title="Watchlist"
+              className="relative flex h-8 min-w-8 sm:h-9 sm:min-w-9 items-center justify-center gap-1.5 lg:gap-2 rounded-xl border border-slate-200/90 bg-white px-2 lg:px-3 py-1.5 text-xs font-bold text-slate-700 shadow-2xs hover:border-indigo-300 hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200 dark:hover:border-slate-700 dark:hover:bg-slate-800 whitespace-nowrap shrink-0 transition-colors cursor-pointer"
             >
               <BookmarkCheck className="h-4 w-4 text-indigo-600 dark:text-indigo-400 shrink-0" />
-              <span className="hidden sm:inline">Watchlist</span>
+              <span className="hidden lg:inline">Watchlist</span>
               {watchlistCount > 0 && (
                 <span className="flex h-4.5 min-w-4.5 sm:h-5 sm:min-w-5 items-center justify-center rounded-full bg-indigo-600 px-1 text-[10px] font-extrabold text-white tabular-nums">
                   {watchlistCount}
